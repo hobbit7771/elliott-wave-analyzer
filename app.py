@@ -1,10 +1,10 @@
 """
 Flask веб-приложение для анализа волн Эллиота
+Оптимизировано для Render deployment
 """
 
 from flask import Flask, render_template, jsonify, request
 from flask_cors import CORS
-import json
 import logging
 from binance_connector import BinanceConnector
 from elliott_wave_analyzer import ElliottWaveAnalyzer
@@ -15,6 +15,7 @@ import matplotlib
 matplotlib.use('Agg')  # Для веб-сервера
 import matplotlib.pyplot as plt
 from visualizer import WaveVisualizer
+import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -25,11 +26,21 @@ CORS(app)
 # Глобальные переменные для хранения данных
 analysis_results = {}
 
+# Конфигурация
+app.config['JSON_SORT_KEYS'] = False
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max
+
 
 @app.route('/')
 def index():
     """Главная страница"""
     return render_template('index.html')
+
+
+@app.route('/api/health', methods=['GET'])
+def health():
+    """Проверка здоровья сервера"""
+    return jsonify({'status': 'ok', 'message': 'Elliott Wave Analyzer is running'}), 200
 
 
 @app.route('/api/analyze', methods=['POST'])
@@ -48,7 +59,7 @@ def analyze():
         df = connector.get_klines(symbol, timeframe, limit)
         
         if df is None:
-            return jsonify({'error': 'Не удалось загрузить данные'}), 400
+            return jsonify({'error': 'Не удалось загрузить данные с Binance'}), 400
         
         # Анализ волн Эллиота
         analyzer = ElliottWaveAnalyzer(df)
@@ -109,7 +120,7 @@ def analyze():
         })
     
     except Exception as e:
-        logger.error(f"Ошибка: {e}")
+        logger.error(f"Ошибка анализа: {e}")
         return jsonify({'error': str(e)}), 500
 
 
@@ -126,7 +137,7 @@ def get_chart(timeframe):
         fib_levels = data['fib_levels']
         
         # Создание графика
-        visualizer = WaveVisualizer(df)
+        visualizer = WaveVisualizer(df, figsize=(14, 7))
         fig, ax = visualizer.plot_waves_and_fibonacci(
             waves,
             fib_levels,
@@ -135,7 +146,7 @@ def get_chart(timeframe):
         
         # Сохранение в base64
         buffer = io.BytesIO()
-        plt.savefig(buffer, format='png', dpi=100, bbox_inches='tight')
+        plt.savefig(buffer, format='png', dpi=80, bbox_inches='tight')
         buffer.seek(0)
         image_base64 = base64.b64encode(buffer.read()).decode()
         plt.close(fig)
@@ -182,6 +193,7 @@ def multi_analyze():
             df = connector.get_klines(symbol, timeframe, limit)
             
             if df is None:
+                logger.warning(f"Не удалось загрузить данные для {timeframe}")
                 continue
             
             analyzer = ElliottWaveAnalyzer(df)
@@ -208,21 +220,12 @@ def multi_analyze():
                 'extremes': analyzer.extremes
             }
             
-            waves_json = [{
-                'wave': w['wave'],
-                'type': w['type'],
-                'start_price': float(w['start_price']),
-                'end_price': float(w['end_price']),
-                'movement': float(w['movement']),
-                'change_percent': float(w['change_percent'])
-            } for w in waves]
-            
             results[timeframe] = {
                 'current_price': float(summary['current_price']),
                 'total_waves': summary['total_waves'],
                 'impulse_waves': summary['impulse_waves'],
                 'corrective_waves': summary['corrective_waves'],
-                'waves_count': len(waves_json),
+                'waves_count': len(waves),
                 'fibonacci_levels': {k: float(v) for k, v in fib_levels.items()}
             }
         
@@ -233,15 +236,10 @@ def multi_analyze():
         })
     
     except Exception as e:
-        logger.error(f"Ошибка: {e}")
+        logger.error(f"Ошибка multi-analyze: {e}")
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/health')
-def health():
-    """Проверка здоровья сервера"""
-    return jsonify({'status': 'ok'})
-
-
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(debug=False, host='0.0.0.0', port=port)
