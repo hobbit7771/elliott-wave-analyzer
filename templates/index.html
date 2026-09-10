@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Elliott Waves">
+    <title>Elliott Wave Analyzer - ATOM</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 10px;
+            color: #333;
+        }
+
+        .container {
+            max-width: 100%;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            padding: 20px;
+            margin-bottom: 15px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 24px;
+            color: #667eea;
+            margin-bottom: 5px;
+        }
+
+        .header p {
+            font-size: 12px;
+            color: #999;
+        }
+
+        .card {
+            background: white;
+            border-radius: 15px;
+            padding: 15px;
+            margin-bottom: 15px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+        }
+
+        .controls {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .control-group {
+            display: flex;
+            flex-direction: column;
+        }
+
+        label {
+            font-size: 12px;
+            font-weight: 600;
+            color: #667eea;
+            margin-bottom: 5px;
+            text-transform: uppercase;
+        }
+
+        select, input {
+            padding: 10px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        select:focus, input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .button-group {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        button {
+            padding: 12px;
+            border: none;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-transform: uppercase;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:active {
+            transform: scale(0.98);
+            opacity: 0.9;
+        }
+
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #667eea;
+        }
+
+        .btn-secondary:active {
+            background: #e0e0e0;
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 5px;
+            margin-bottom: 15px;
+            overflow-x: auto;
+            padding-bottom: 5px;
+        }
+
+        .tab-btn {
+            padding: 10px 15px;
+            border: 2px solid #e0e0e0;
+            background: white;
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+            white-space: nowrap;
+            transition: all 0.3s;
+        }
+
+        .tab-btn.active {
+            background: #667eea;
+            color: white;
+            border-color: #667eea;
+        }
+
+        .results {
+            display: none;
+        }
+
+        .results.active {
+            display: block;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+
+        .stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px;
+            border-radius: 10px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 20px;
+            font-weight: 700;
+            margin-bottom: 5px;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            opacity: 0.9;
+            text-transform: uppercase;
+        }
+
+        .chart-container {
+            margin: 15px 0;
+            border-radius: 10px;
+            overflow: hidden;
+            background: #f5f5f5;
+        }
+
+        .chart-container img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .wave-list {
+            list-style: none;
+        }
+
+        .wave-item {
+            padding: 10px;
+            border-left: 4px solid #667eea;
+            margin-bottom: 8px;
+            background: #f9f9f9;
+            border-radius: 5px;
+            font-size: 12px;
+        }
+
+        .wave-item strong {
+            color: #667eea;
+        }
+
+        .wave-number {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            text-align: center;
+            line-height: 24px;
+            margin-right: 8px;
+            font-weight: 700;
+            font-size: 12px;
+        }
+
+        .fib-levels {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+
+        .fib-level {
+            padding: 10px;
+            background: #f9f9f9;
+            border-radius: 8px;
+            font-size: 11px;
+            border-left: 3px solid #667eea;
+        }
+
+        .fib-level-name {
+            font-weight: 600;
+            color: #667eea;
+            text-transform: uppercase;
+        }
+
+        .fib-level-price {
+            font-size: 13px;
+            font-weight: 700;
+            color: #333;
+            margin-top: 3px;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 20px;
+            display: none;
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .error-message {
+            background: #ff6b6b;
+            color: white;
+            padding: 12px;
+            border-radius: 10px;
+            margin-bottom: 15px;
+            display: none;
+            font-size: 12px;
+        }
+
+        .success-message {
+            background: #51cf66;
+            color: white;
+            padding: 12px;
+            border-radius: 10px;
+            margin-bottom: 15px;
+            display: none;
+            font-size: 12px;
+        }
+
+        .info-box {
+            background: #e3f2fd;
+            border-left: 4px solid #667eea;
+            padding: 12px;
+            border-radius: 5px;
+            margin-bottom: 15px;
+            font-size: 12px;
+            color: #667eea;
+        }
+
+        @media (max-width: 480px) {
+            .header h1 {
+                font-size: 20px;
+            }
+
+            .controls {
+                grid-template-columns: 1fr;
+            }
+
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .fib-levels {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .footer {
+            text-align: center;
+            color: white;
+            font-size: 11px;
+            margin-top: 20px;
+            padding-bottom: 20px;
+            opacity: 0.8;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🌊 Elliott Waves</h1>
+            <p>Анализ волн Эллиота и Фибоначчи</p>
+        </div>
+
+        <div class="card">
+            <div class="error-message" id="errorMsg"></div>
+            <div class="success-message" id="successMsg"></div>
+
+            <div class="info-box">
+                💡 Выберите монету, таймфрейм и нажмите "Анализировать" для начала анализа
+            </div>
+
+            <div class="controls">
+                <div class="control-group">
+                    <label for="symbol">Монета</label>
+                    <select id="symbol">
+                        <option value="ATOMUSDT">ATOM</option>
+                        <option value="BTCUSDT">BTC</option>
+                        <option value="ETHUSDT">ETH</option>
+                        <option value="BNBUSDT">BNB</option>
+                        <option value="ADAUSDT">ADA</option>
+                        <option value="DOGEUSDT">DOGE</option>
+                    </select>
+                </div>
+
+                <div class="control-group">
+                    <label for="timeframe">Таймфрейм</label>
+                    <select id="timeframe">
+                        <option value="1m">1 минута</option>
+                        <option value="5m">5 минут</option>
+                        <option value="15m">15 минут</option>
+                        <option value="1h" selected>1 час</option>
+                        <option value="4h">4 часа</option>
+                        <option value="1d">1 день</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="button-group">
+                <button class="btn-primary" onclick="analyzeWaves()">📊 Анализировать</button>
+                <button class="btn-secondary" onclick="analyzeMultiple()">🔄 Все таймфреймы</button>
+            </div>
+
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                <p style="margin-top: 10px; color: #667eea;">Анализируем данные...</p>
+            </div>
+        </div>
+
+        <!-- Результаты одного таймфрейма -->
+        <div id="singleResults" class="card results">
+            <h3 style="color: #667eea; margin-bottom: 15px;">📈 Результаты анализа</h3>
+
+            <div class="tabs" id="singleTabs">
+                <button class="tab-btn active" onclick="switchTab('stats-single', this)">📊 Статистика</button>
+                <button class="tab-btn" onclick="switchTab('chart-single', this)">📉 График</button>
+                <button class="tab-btn" onclick="switchTab('waves-single', this)">🌊 Волны</button>
+                <button class="tab-btn" onclick="switchTab('fib-single', this)">📐 Фибоначчи</button>
+            </div>
+
+            <!-- Статистика -->
+            <div id="stats-single" class="tab-content active">
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="currentPrice">--</div>
+                        <div class="stat-label">Текущая цена</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="totalWaves">--</div>
+                        <div class="stat-label">Всего волн</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="impulseWaves">--</div>
+                        <div class="stat-label">Импульсных волн</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="correctiveWaves">--</div>
+                        <div class="stat-label">Коррекционных волн</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- График -->
+            <div id="chart-single" class="tab-content" style="display: none;">
+                <div class="chart-container" id="chartContainer">
+                    <p style="text-align: center; padding: 20px; color: #999;">Загрузка графика...</p>
+                </div>
+            </div>
+
+            <!-- Волны -->
+            <div id="waves-single" class="tab-content" style="display: none;">
+                <ul class="wave-list" id="wavesList"></ul>
+            </div>
+
+            <!-- Фибоначчи -->
+            <div id="fib-single" class="tab-content" style="display: none;">
+                <div class="fib-levels" id="fibLevels"></div>
+            </div>
+        </div>
+
+        <!-- Результаты нескольких таймфреймов -->
+        <div id="multiResults" class="card results">
+            <h3 style="color: #667eea; margin-bottom: 15px;">📊 Анализ по таймфреймам</h3>
+            <div id="multiTimeframes"></div>
+        </div>
+
+        <div class="footer">
+            <p>⚠️ Это инструмент для анализа и образования. Не финансовая рекомендация.</p>
+            <p>Elliott Wave Analyzer v1.0 • iOS Optimized</p>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:5000/api';
+
+        function showLoading(show) {
+            document.getElementById('loading').style.display = show ? 'block' : 'none';
+        }
+
+        function showError(message) {
+            const msg = document.getElementById('errorMsg');
+            msg.textContent = '❌ ' + message;
+            msg.style.display = 'block';
+            setTimeout(() => msg.style.display = 'none', 5000);
+        }
+
+        function showSuccess(message) {
+            const msg = document.getElementById('successMsg');
+            msg.textContent = '✅ ' + message;
+            msg.style.display = 'block';
+            setTimeout(() => msg.style.display = 'none', 3000);
+        }
+
+        function switchTab(tabName, button) {
+            // Скрыть все табы в этом контейнере
+            const parent = button.parentElement.parentElement;
+            const tabs = parent.querySelectorAll('.tab-content');
+            tabs.forEach(tab => tab.style.display = 'none');
+
+            // Деактивировать все кнопки
+            const buttons = button.parentElement.querySelectorAll('.tab-btn');
+            buttons.forEach(btn => btn.classList.remove('active'));
+
+            // Активировать нужный таб и кнопку
+            document.getElementById(tabName).style.display = 'block';
+            button.classList.add('active');
+        }
+
+        async function analyzeWaves() {
+            const symbol = document.getElementById('symbol').value;
+            const timeframe = document.getElementById('timeframe').value;
+
+            showLoading(true);
+            document.getElementById('singleResults').classList.remove('active');
+
+            try {
+                const response = await fetch(`${API_BASE}/analyze`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ symbol, timeframe, limit: 800 })
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.error || 'Ошибка анализа');
+                }
+
+                const data = await response.json();
+                displaySingleResults(data, timeframe);
+                showSuccess('Анализ завершён успешно!');
+
+            } catch (error) {
+                console.error('Ошибка:', error);
+                showError(error.message);
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        function displaySingleResults(data, timeframe) {
+            // Обновить статистику
+            document.getElementById('currentPrice').textContent = 
+                parseFloat(data.current_price).toFixed(2);
+            document.getElementById('totalWaves').textContent = data.total_waves;
+            document.getElementById('impulseWaves').textContent = data.impulse_waves;
+            document.getElementById('correctiveWaves').textContent = data.corrective_waves;
+
+            // Волны
+            const wavesList = document.getElementById('wavesList');
+            wavesList.innerHTML = '';
+            data.waves.slice(-10).forEach(wave => {
+                const li = document.createElement('li');
+                li.className = 'wave-item';
+                li.innerHTML = `
+                    <div>
+                        <span class="wave-number">${wave.wave}</span>
+                        <strong>${wave.type.toUpperCase()}</strong>
+                    </div>
+                    <div style="margin-top: 5px; color: #666; font-size: 11px;">
+                        ${wave.start_price.toFixed(6)} → ${wave.end_price.toFixed(6)}
+                        <br>Изменение: ${wave.change_percent.toFixed(2)}%
+                    </div>
+                `;
+                wavesList.appendChild(li);
+            });
+
+            // Фибоначчи
+            const fibLevels = document.getElementById('fibLevels');
+            fibLevels.innerHTML = '';
+            const fibNames = {
+                'strong_resistance': 'Сильное сопротивление',
+                'resistance_1': 'Сопротивление 1',
+                'resistance_2': 'Сопротивление 2',
+                'pivot': 'Пивот',
+                'support_2': 'Поддержка 2',
+                'support_1': 'Поддержка 1',
+                'strong_support': 'Сильная поддержка'
+            };
+
+            Object.entries(data.fibonacci_levels).forEach(([key, price]) => {
+                const div = document.createElement('div');
+                div.className = 'fib-level';
+                div.innerHTML = `
+                    <div class="fib-level-name">${fibNames[key] || key}</div>
+                    <div class="fib-level-price">${parseFloat(price).toFixed(6)}</div>
+                `;
+                fibLevels.appendChild(div);
+            });
+
+            // График
+            loadChart(timeframe);
+
+            document.getElementById('singleResults').classList.add('active');
+            document.getElementById('multiResults').classList.remove('active');
+        }
+
+        async function loadChart(timeframe) {
+            try {
+                const response = await fetch(`${API_BASE}/chart/${timeframe}`);
+                const data = await response.json();
+                
+                if (data.success) {
+                    document.getElementById('chartContainer').innerHTML = 
+                        `<img src="${data.image}" alt="Chart">`;
+                }
+            } catch (error) {
+                console.error('Ошибка загрузки графика:', error);
+                document.getElementById('chartContainer').innerHTML = 
+                    '<p style="text-align: center; padding: 20px; color: #999;">Ошибка загрузки графика</p>';
+            }
+        }
+
+        async function analyzeMultiple() {
+            const symbol = document.getElementById('symbol').value;
+            const timeframes = ['1h', '4h', '1d'];
+
+            showLoading(true);
+            document.getElementById('multiResults').classList.remove('active');
+
+            try {
+                const response = await fetch(`${API_BASE}/multi-analyze`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ symbol, timeframes, limit: 800 })
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.error || 'Ошибка анализа');
+                }
+
+                const data = await response.json();
+                displayMultiResults(data);
+                showSuccess('Анализ завершён!');
+
+            } catch (error) {
+                console.error('Ошибка:', error);
+                showError(error.message);
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        function displayMultiResults(data) {
+            const container = document.getElementById('multiTimeframes');
+            container.innerHTML = '';
+
+            Object.entries(data.results).forEach(([timeframe, result]) => {
+                const div = document.createElement('div');
+                div.className = 'card' style="background: #f9f9f9; margin-bottom: 10px;";
+                div.innerHTML = `
+                    <h4 style="color: #667eea; margin-bottom: 10px; text-transform: uppercase;">${timeframe}</h4>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12px;">
+                        <div>
+                            <strong>Цена:</strong><br>
+                            ${parseFloat(result.current_price).toFixed(2)}
+                        </div>
+                        <div>
+                            <strong>Волн:</strong><br>
+                            ${result.total_waves} (${result.impulse_waves} импульс)
+                        </div>
+                        <div>
+                            <strong>Сопротивление:</strong><br>
+                            ${parseFloat(result.fibonacci_levels.resistance_1).toFixed(6)}
+                        </div>
+                        <div>
+                            <strong>Поддержка:</strong><br>
+                            ${parseFloat(result.fibonacci_levels.support_1).toFixed(6)}
+                        </div>
+                    </div>
+                `;
+                container.appendChild(div);
+            });
+
+            document.getElementById('multiResults').classList.add('active');
+            document.getElementById('singleResults').classList.remove('active');
+        }
+    </script>
+</body>
+</html>
