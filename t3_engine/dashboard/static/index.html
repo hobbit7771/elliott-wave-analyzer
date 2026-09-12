@@ -30,7 +30,13 @@
   #tabs button { background:none; border:none; color:#8891a3; font-size:12px; padding:6px 10px; border-radius:6px; cursor:pointer; }
   #tabs button.active { background:#1b2028; color:#f2f4f8; }
   #layout { display:flex; height: calc(100vh - 96px); }
-  #chart { flex: 1 1 auto; min-width:0; }
+  #chart, #analystChart { flex: 1 1 auto; min-width:0; }
+  /* The analyst's own chart. Same box as the main one, but it never
+     receives an engine overlay - see drawAnalystCount(). */
+  #analystChart { display:none; }
+  .step { display:flex; gap:6px; font-size:11px; color:#9aa3b2; padding:2px 0; border-bottom:1px solid #1b1f29; }
+  .step .t { color:#c084fc; flex:0 0 108px; }
+  .step .r { flex:1; text-align:right; color:#7b8397; }
   #panel { width: 340px; flex-shrink:0; border-left:1px solid #232733; padding:12px; overflow-y:auto; font-size:12.5px; }
   #panel h2 { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:#8891a3; margin:14px 0 6px; }
   #panel h2:first-child { margin-top:0; }
@@ -57,7 +63,7 @@
      beside it, and give the chart enough height to still be usable. */
   @media (max-width: 820px) {
     #layout { flex-direction: column; height: auto; }
-    #chart { height: 46vh; }
+    #chart, #analystChart { height: 46vh; }
     #panel { width: 100%; border-left:none; border-top:1px solid #232733; max-height: 54vh; }
     header { padding: 8px; }
     header h1 { flex-basis: 100%; }
@@ -118,9 +124,11 @@
 <div id="tabs">
   <button data-tab="analysis" class="active">Analysis</button>
   <button data-tab="ai">AI Advisor</button>
+  <button data-tab="analyst">AI Analyst</button>
 </div>
 <div id="layout">
   <div id="chart"></div>
+  <div id="analystChart"></div>
   <div id="panel">
     <div id="tab-analysis">
       <div class="note" id="note" style="display:none;"></div>
@@ -173,6 +181,43 @@
       <button class="panel-btn" id="askAiLabel">Propose a count for this history</button>
       <div class="hint" id="aiLabelStatus"></div>
       <div class="signal" id="ai-label-answer" style="margin-top:10px; display:none;"></div>
+    </div>
+    <div id="tab-analyst" style="display:none;">
+      <div class="note">
+        A clean chart and an agent, nothing else. This tab loads the candles and hands the model
+        <em>no</em> markup — no pivots, no BOS/CHoCH, no scenarios, no Fibonacci — then lets it work
+        the chart with real tools: list the swings at any degree, measure legs, compute Fibonacci
+        levels, and <strong>test a count against this server's rule engine before committing to it</strong>.
+        It is told the Elliott rulebook (hard rules vs. guidelines, impulses, diagonals, zigzags,
+        flats, triangles, combinations) and asked to work top-down, oldest structure first.
+      </div>
+      <div class="note">
+        Separate chart on purpose: a model shown an existing markup tends to agree with it. Here the
+        two counts stay comparable instead of superimposed. Every structure it submits is still
+        re-validated server-side — anything that breaks a hard rule is listed below as rejected,
+        never drawn.
+      </div>
+      <h2>Run the analyst</h2>
+      <div class="field-row">
+        <label style="font-size:11px;color:#9aa3b2;display:flex;align-items:center;gap:6px;flex:1;">Step budget
+          <input id="analystSteps" type="number" value="14" min="1" max="30" style="width:60px;" />
+        </label>
+        <button class="panel-btn" id="runAnalyst">Label from scratch</button>
+      </div>
+      <div class="hint" id="analystStatus">Uses the Source / Symbol / TF / Candles pickers in the header.</div>
+
+      <div id="analystSummary" style="display:none;">
+        <h2>Read</h2>
+        <div class="signal" id="analystRead"></div>
+      </div>
+      <div id="analystStructuresWrap" style="display:none;">
+        <h2>Structures</h2>
+        <div id="analystStructures"></div>
+      </div>
+      <div id="analystStepsWrap" style="display:none;">
+        <h2>What it actually did</h2>
+        <div id="analystSteps"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -716,13 +761,190 @@ document.getElementById('liveStop').addEventListener('click', async () => {
 });
 
 // ---- tabs ----
+// The analyst tab swaps in a DIFFERENT chart element rather than reusing
+// the main one. Two reasons, both deliberate: the analyst's chart must
+// stay clean (no engine overlay ever reaches it), and swapping elements
+// means switching tabs can't disturb the zoom/pan state of either chart.
+const TAB_PANELS = { analysis: 'tab-analysis', ai: 'tab-ai', analyst: 'tab-analyst' };
 document.querySelectorAll('#tabs button').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('#tabs button').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
-    document.getElementById('tab-analysis').style.display = btn.dataset.tab === 'analysis' ? '' : 'none';
-    document.getElementById('tab-ai').style.display = btn.dataset.tab === 'ai' ? '' : 'none';
+    const active = btn.dataset.tab;
+    Object.entries(TAB_PANELS).forEach(([tab, id]) => {
+      document.getElementById(id).style.display = tab === active ? '' : 'none';
+    });
+    const onAnalyst = active === 'analyst';
+    // 'block', not '': #analystChart is display:none in the stylesheet, and
+    // clearing the inline style just falls back to that rule - which left
+    // the tab showing an empty gap where the chart should be.
+    document.getElementById('chart').style.display = onAnalyst ? 'none' : 'block';
+    document.getElementById('analystChart').style.display = onAnalyst ? 'block' : 'none';
+    if (onAnalyst) ensureAnalystChart();
   });
+});
+
+// ---- the analyst's clean chart ----
+// Created lazily: a lightweight-charts instance sizes itself from its
+// container, and the container has zero height until its tab is shown.
+let analystChart = null, analystSeries = null, analystOverlays = [];
+
+function ensureAnalystChart() {
+  if (analystChart) { resizeAnalystChart(); return; }
+  const el = document.getElementById('analystChart');
+  analystChart = LightweightCharts.createChart(el, {
+    layout: { background: { color: '#0e1117' }, textColor: '#c7cbd3' },
+    grid: { vertLines: { color: '#1b1f29' }, horzLines: { color: '#1b1f29' } },
+    timeScale: { timeVisible: true, secondsVisible: false },
+    rightPriceScale: { borderColor: '#232733' },
+  });
+  analystSeries = analystChart.addCandlestickSeries({
+    upColor: '#26a69a', downColor: '#ef5350', borderVisible: false,
+    wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+  });
+  new ResizeObserver(resizeAnalystChart).observe(el);
+}
+
+function resizeAnalystChart() {
+  const el = document.getElementById('analystChart');
+  if (analystChart && el.clientWidth) analystChart.resize(el.clientWidth, el.clientHeight);
+}
+
+function clearAnalystOverlays() {
+  analystOverlays.forEach(s => analystChart.removeSeries(s));
+  analystOverlays = [];
+  if (analystSeries) analystSeries.setMarkers([]);
+}
+
+// Motive structures in sky blue, corrections in amber. The colour says
+// which RULE SET the server held that structure to, not which way price
+// went - an impulse and a zigzag are validated by completely different
+// code, and conflating them on screen is how a correction gets traded as
+// a trend.
+const MOTIVE_COLOR = '#38bdf8';
+const CORRECTIVE_COLOR = '#fbbf24';
+function structureColor(name) {
+  return (name || '').startsWith('IMPULSE') || (name || '').startsWith('DIAGONAL')
+    ? MOTIVE_COLOR : CORRECTIVE_COLOR;
+}
+
+function drawAnalystCount(structures) {
+  clearAnalystOverlays();
+  const marks = [];
+  (structures || []).forEach(st => {
+    const waves = st.waves || [];
+    if (!waves.length) return;
+    const color = structureColor(st.structure);
+    const line = analystChart.addLineSeries({
+      color, lineWidth: 2, lastValueVisible: false, priceLineVisible: false,
+      crosshairMarkerVisible: false,
+    });
+    const points = [{ time: waves[0].start_time, value: waves[0].start_price }]
+      .concat(waves.map(w => ({ time: w.end_time, value: w.end_price })));
+    line.setData(points);
+    analystOverlays.push(line);
+    waves.forEach(w => {
+      marks.push({
+        time: w.end_time,
+        position: w.direction === 'UP' ? 'aboveBar' : 'belowBar',
+        color, shape: 'circle', text: w.label,
+      });
+    });
+  });
+  // Markers must be time-sorted or lightweight-charts silently drops them,
+  // and structures at different degrees interleave in time.
+  marks.sort((a, b) => a.time - b.time);
+  if (analystSeries) analystSeries.setMarkers(marks);
+}
+
+function renderAnalystSteps(steps) {
+  const wrap = document.getElementById('analystStepsWrap');
+  const el = document.getElementById('analystSteps');
+  if (!steps || !steps.length) { wrap.style.display = 'none'; return; }
+  wrap.style.display = '';
+  el.innerHTML = steps.map(s => `<div class="step"><span class="t">${s.tool}</span>`
+    + `<span class="r">${escapeHtml(s.result)}</span></div>`).join('');
+}
+
+function escapeHtml(text) {
+  return String(text === undefined || text === null ? '' : text)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function renderAnalystStructures(data) {
+  const wrap = document.getElementById('analystStructuresWrap');
+  const el = document.getElementById('analystStructures');
+  const accepted = data.accepted || [], rejected = data.rejected || [];
+  if (!accepted.length && !rejected.length) { wrap.style.display = 'none'; return; }
+  wrap.style.display = '';
+  const acceptedHtml = accepted.map(st => {
+    const labels = (st.waves || []).map(w => w.label).join(' → ');
+    return `<div class="signal accepted"><div class="row"><span class="k">${escapeHtml(st.structure)}</span>`
+      + `<span class="v">${escapeHtml(labels)}</span></div>`
+      + `<div class="row"><span class="k">Degree</span><span class="v">${st.deviation_pct}% swing</span></div>`
+      + (st.note ? `<div class="hint">${escapeHtml(st.note)}</div>` : '') + `</div>`;
+  }).join('');
+  // Rejected structures are shown, not hidden. "The model proposed this and
+  // the rule engine threw it out, for this reason" is the most useful thing
+  // on this panel - it is the proof that validation is doing something.
+  const rejectedHtml = rejected.map(st => `<div class="signal rejected">`
+    + `<div class="row"><span class="k">${escapeHtml(st.structure || 'structure')}</span>`
+    + `<span class="v">rejected</span></div>`
+    + `<div class="hint">${escapeHtml(st.broken_rule ? st.broken_rule + ': ' : '')}`
+    + `${escapeHtml(st.reason || st.notes || '')}</div></div>`).join('');
+  el.innerHTML = acceptedHtml + rejectedHtml;
+}
+
+document.getElementById('runAnalyst').addEventListener('click', async () => {
+  const apiKey = geminiKey();
+  const statusEl = document.getElementById('analystStatus');
+  if (!apiKey) { statusEl.textContent = 'Enter and save your Gemini API key in the AI Advisor tab first.'; return; }
+  const source = document.getElementById('source').value;
+  if (source === 'live') {
+    statusEl.textContent = 'Switch to Synthetic or Bybit (history) — the analyst works a loaded history, not a live stream.';
+    return;
+  }
+  ensureAnalystChart();
+
+  statusEl.textContent = 'The analyst is working the chart… (it calls tools in a loop, so this takes a while)';
+  document.getElementById('analystSummary').style.display = 'none';
+  try {
+    const resp = await fetchWithTimeout('/api/ai/analyst', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_key: apiKey,
+        model: geminiModel(),
+        source,
+        symbol: normalizeSymbol(document.getElementById('symbol').value),
+        timeframe: document.getElementById('timeframe').value,
+        limit: Number(document.getElementById('limit').value),
+        cycles: Number(document.getElementById('cycles').value),
+        max_steps: Number(document.getElementById('analystSteps').value),
+      }),
+    }, 600000);
+    const data = await resp.json();
+    if (!resp.ok) { statusEl.textContent = data.detail || 'Request failed.'; return; }
+
+    analystSeries.setData(data.candles);
+    drawAnalystCount(data.accepted);
+    analystChart.timeScale().fitContent();
+    renderAnalystStructures(data);
+    renderAnalystSteps(data.steps);
+
+    const accepted = (data.accepted || []).length;
+    statusEl.textContent = `${accepted} structure(s) accepted, ${(data.rejected || []).length} rejected, `
+      + `after ${data.steps_used} step(s).`;
+    document.getElementById('analystSummary').style.display = '';
+    document.getElementById('analystRead').innerHTML =
+      `<div class="row"><span class="k">Model</span><span class="v">${escapeHtml(data.model)}</span></div>`
+      + `<div class="row"><span class="k">Where we are</span><span class="v" style="text-align:left;max-width:200px;">`
+      + `${escapeHtml(data.summary || '—')}</span></div>`
+      + `<div class="row"><span class="k">Reasoning</span><span class="v" style="text-align:left;max-width:200px;">`
+      + `${escapeHtml(data.reasoning || '—')}</span></div>`
+      + (data.note ? `<div class="hint">${escapeHtml(data.note)}</div>` : '');
+  } catch (e) {
+    statusEl.textContent = e.message || 'Network error running the analyst.';
+  }
 });
 
 // ---- AI advisor + labelling (BYO Gemini key) ----

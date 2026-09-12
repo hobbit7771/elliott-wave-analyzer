@@ -539,3 +539,108 @@ def test_ai_label_never_takes_pivots_from_the_caller():
         })
     assert resp.status_code == 200
     assert "saw 1 pivots" not in resp.json()["reasoning"]
+
+
+# ---------------------------------------------------------------------------
+# AI analyst: a clean chart, an agent, and the same trust boundary
+# ---------------------------------------------------------------------------
+
+def test_index_exposes_the_analyst_tab_with_its_own_chart():
+    """The analyst gets a SEPARATE chart element. Reusing the main one
+    would put the engine's markup under the model's count, and a model
+    shown an existing markup stops being an independent read."""
+    resp = client.get("/")
+    assert 'data-tab="analyst"' in resp.text
+    assert 'id="analystChart"' in resp.text
+    assert "/api/ai/analyst" in resp.text
+    assert "runAnalyst" in resp.text
+
+
+def test_analyst_requires_a_key_like_every_other_ai_path():
+    resp = client.post("/api/ai/analyst", json={"api_key": "", "source": "synthetic", "cycles": 1})
+    assert resp.status_code == 502
+
+
+class _FakeAnalystResult:
+    def __init__(self, accepted, rejected=None, note=""):
+        self.accepted = accepted
+        self.rejected = rejected or []
+        self.summary = "Five waves up look complete."
+        self.reasoning = "Wave 3 is the longest."
+        self.steps = []
+        self.model = "gemini-3.6-flash"
+        self.steps_used = 3
+        self.finished = True
+        self.note = note
+
+    @property
+    def waves(self):
+        return [{**w, "structure": s.get("structure")}
+                for s in self.accepted for w in s.get("waves", [])]
+
+
+def test_analyst_returns_the_exact_candles_it_analysed():
+    """The tab draws the series returned WITH the answer rather than
+    fetching its own, so the count can never be rendered over a chart that
+    differs from the one the agent worked."""
+    seen = {}
+
+    def fake_run(api_key, candles, degree, **kwargs):
+        seen["candles"] = candles
+        return _FakeAnalystResult([])
+
+    with patch.object(server_module, "run_analyst", side_effect=fake_run):
+        resp = client.post("/api/ai/analyst",
+                           json={"api_key": "AIza-test", "source": "synthetic", "cycles": 2})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["candles"]) == len(seen["candles"])
+    assert data["candles"][0]["time"] == seen["candles"][0].open_time // 1000
+
+
+def test_analyst_reports_rejected_structures_rather_than_hiding_them():
+    """"The model proposed this and the rule engine threw it out" is the
+    most useful line on the panel - it is the evidence that validation runs
+    at all."""
+    rejected = [{"position": 0, "structure": "IMPULSE", "valid": False,
+                 "broken_rule": "WAVE4_OVERLAPS_WAVE1", "reason": "Wave 4 low entered Wave 1 territory"}]
+    with patch.object(server_module, "run_analyst",
+                      return_value=_FakeAnalystResult([], rejected=rejected)):
+        resp = client.post("/api/ai/analyst",
+                           json={"api_key": "AIza-test", "source": "synthetic", "cycles": 2})
+    data = resp.json()
+    assert data["accepted"] == []
+    assert data["rejected"][0]["broken_rule"] == "WAVE4_OVERLAPS_WAVE1"
+    assert data["waves"] == []
+
+
+def test_analyst_passes_the_model_name_and_step_budget_through():
+    seen = {}
+
+    def fake_run(api_key, candles, degree, **kwargs):
+        seen.update(kwargs)
+        return _FakeAnalystResult([])
+
+    with patch.object(server_module, "run_analyst", side_effect=fake_run):
+        client.post("/api/ai/analyst", json={
+            "api_key": "AIza-test", "source": "synthetic", "cycles": 2,
+            "model": "gemini-4.0-pro-experimental", "max_steps": 7,
+        })
+    assert seen["model"] == "gemini-4.0-pro-experimental"
+    assert seen["max_steps"] == 7
+
+
+def test_analyst_step_budget_is_bounded_by_the_api_not_only_by_the_ui():
+    resp = client.post("/api/ai/analyst", json={
+        "api_key": "AIza-test", "source": "synthetic", "cycles": 2, "max_steps": 5000})
+    assert resp.status_code == 422
+
+
+def test_switching_to_the_analyst_tab_actually_reveals_its_chart():
+    """#analystChart is display:none in the stylesheet, so clearing the
+    inline style falls back to that rule and the tab shows an empty gap.
+    It has to be set to a real display value - caught in the browser, kept
+    here so it cannot come back."""
+    resp = client.get("/")
+    assert "onAnalyst ? 'block' : 'none'" in resp.text
+    assert "onAnalyst ? '' : 'none'" not in resp.text

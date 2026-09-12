@@ -51,6 +51,16 @@ import httpx
 DEFAULT_MODEL = "gemini-3.6-flash"
 API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
+# Output-token budgets. These were 400 and 2048, which was enough for the
+# answers themselves but NOT for the internal reasoning current models emit
+# first - so in production the second opinion arrived as half a sentence
+# and the wave count as "Unterminated string ... char 169". The budget is
+# now sized for reasoning plus answer, and a truncation that still happens
+# is reported as a truncation (see _extract_text) instead of as a JSON
+# parse error that sends you looking at the wrong thing.
+COMMENTARY_MAX_OUTPUT_TOKENS = 2048
+COUNT_MAX_OUTPUT_TOKENS = 8192
+
 ADVISOR_SYSTEM_PROMPT = (
     "You are a risk-aware trading assistant reviewing an Elliott Wave signal that has "
     "ALREADY been accepted or rejected by a rule-based engine. You cannot change that "
@@ -80,6 +90,12 @@ LABELLER_SYSTEM_PROMPT = (
 
 class AIAdvisorError(Exception):
     pass
+
+
+TRUNCATED_MESSAGE = (
+    "Gemini ran out of output tokens before finishing its answer (finishReason: MAX_TOKENS). "
+    "The answer was cut off mid-way - this is a budget problem, not a bad key or a bad model name."
+)
 
 
 @dataclass
@@ -152,21 +168,42 @@ def _post(api_key: str, model: str, payload: Dict[str, Any],
             http_client.close()
 
 
+def _finish_reason(data: Dict[str, Any]) -> str:
+    try:
+        return str(data["candidates"][0].get("finishReason") or "")
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
 def _extract_text(data: Dict[str, Any]) -> str:
     """Pull the text out of a generateContent response, failing loudly
     rather than returning an empty string - a silently blank answer in a
     trading tool reads as "the model had no concerns", which is the exact
-    opposite of "the call did not work"."""
+    opposite of "the call did not work".
+
+    A truncated answer is called out by name. Current Gemini models spend
+    output tokens on internal reasoning before they emit anything visible,
+    so a budget that looks generous for the answer alone can cut the answer
+    off mid-sentence - which surfaced in production as half a sentence of
+    commentary, and as "Unterminated string" when the answer was JSON. The
+    cause is the token budget, not the model's JSON formatting, and the
+    message has to say so or the next person debugs the wrong thing."""
     try:
         parts = data["candidates"][0]["content"]["parts"]
     except (KeyError, IndexError, TypeError):
         blocked = (data.get("promptFeedback") or {}).get("blockReason")
         if blocked:
             raise AIAdvisorError(f"Gemini refused to answer (blockReason: {blocked})")
+        if _finish_reason(data) == "MAX_TOKENS":
+            raise AIAdvisorError(TRUNCATED_MESSAGE)
         raise AIAdvisorError(f"Unexpected Gemini response shape: {json.dumps(data)[:300]}")
     text = "".join(part.get("text", "") for part in parts).strip()
     if not text:
+        if _finish_reason(data) == "MAX_TOKENS":
+            raise AIAdvisorError(TRUNCATED_MESSAGE)
         raise AIAdvisorError("Gemini returned an empty answer")
+    if _finish_reason(data) == "MAX_TOKENS":
+        raise AIAdvisorError(f"{TRUNCATED_MESSAGE} Partial answer: {text[:300]}")
     return text
 
 
@@ -177,7 +214,7 @@ def request_commentary(api_key: str, context: Dict[str, Any], model: str = DEFAU
         + json.dumps(context, indent=2, default=str)
     )
     payload = build_contents(ADVISOR_SYSTEM_PROMPT, user_content)
-    payload["generationConfig"] = {"temperature": 0.4, "maxOutputTokens": 400}
+    payload["generationConfig"] = {"temperature": 0.4, "maxOutputTokens": COMMENTARY_MAX_OUTPUT_TOKENS}
     data = _post(api_key, model, payload, client, timeout)
     return AdvisorResponse(text=_extract_text(data), model=model, raw=data)
 
@@ -215,7 +252,7 @@ def request_wave_count(api_key: str, pivots: List[Dict[str, Any]], direction: st
     payload = build_contents(LABELLER_SYSTEM_PROMPT, user_content)
     payload["generationConfig"] = {
         "temperature": 0.1,          # a count is an analysis, not a creative task
-        "maxOutputTokens": 2048,
+        "maxOutputTokens": COUNT_MAX_OUTPUT_TOKENS,
         "responseMimeType": "application/json",
     }
     data = _post(api_key, model, payload, client, timeout)
