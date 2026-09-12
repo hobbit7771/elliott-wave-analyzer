@@ -22,7 +22,7 @@ from typing import Dict, Optional
 
 import httpx
 from fastapi import Body, FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from t3_engine.ai_advisor.advisor import AIAdvisorError, request_commentary
@@ -136,9 +136,17 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
         _live_errors[symbol] = str(exc)
 
 
+# Bumped on every deploy made purely to prove a deploy actually reached
+# this running process - visible both here and as the yellow badge next
+# to the title in index.html, so a user and a developer checking Render's
+# logs/this endpoint can confirm they're looking at the same build without
+# any ambiguity from browser/proxy caching.
+BUILD_VERSION = "BUILD-CHECK-002"
+
+
 @app.get("/api/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "build": BUILD_VERSION}
 
 
 # --- symbol list cache: Binance lists ~400 perpetual futures symbols and
@@ -403,7 +411,10 @@ _NO_CACHE_HEADERS = {"Cache-Control": "no-store, no-cache, must-revalidate, max-
 
 @app.get("/")
 def index():
-    return FileResponse(os.path.join(_STATIC_DIR, "index.html"), headers=_NO_CACHE_HEADERS)
+    with open(os.path.join(_STATIC_DIR, "index.html"), encoding="utf-8") as f:
+        html = f.read()
+    html = html.replace("{{BUILD_VERSION}}", BUILD_VERSION)
+    return HTMLResponse(html, headers=_NO_CACHE_HEADERS)
 
 
 @app.get("/sw.js")
