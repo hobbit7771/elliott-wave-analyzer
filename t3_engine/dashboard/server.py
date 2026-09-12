@@ -45,6 +45,8 @@ from t3_engine.ai_advisor.advisor import (
     request_commentary,
     request_wave_count,
 )
+from t3_engine.ai_advisor.analyst import DEFAULT_MAX_STEPS, MAX_MAX_STEPS, run_analyst
+from t3_engine.ai_advisor.analyst_tools import ToolError
 from t3_engine.backtest.engine import BacktestConfig, BacktestEngine
 from t3_engine.backtest.metrics import compute_metrics, compute_metrics_by_wave
 from t3_engine.backtest.synthetic_data import generate_synthetic_series
@@ -136,7 +138,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-011"
+BUILD_VERSION = "BUILD-CHECK-012"
 
 
 @app.get("/api/health")
@@ -479,6 +481,63 @@ def ai_label(api_key: str = Body(..., embed=True), source: str = Body("synthetic
         "direction": direction.value,
         "pivot_count": len(pivots),
         "waves": [wave_to_dict(w) for w in validated.waves],
+    }
+
+
+@app.post("/api/ai/analyst")
+def ai_analyst(api_key: str = Body(..., embed=True), source: str = Body("synthetic", embed=True),
+               symbol: str = Body("SYNTHETIC", embed=True), timeframe: str = Body("5m", embed=True),
+               limit: int = Body(1500, embed=True, ge=100, le=10000),
+               cycles: int = Body(2, embed=True, ge=1, le=10),
+               model: str = Body(DEFAULT_GEMINI_MODEL, embed=True),
+               max_steps: int = Body(DEFAULT_MAX_STEPS, embed=True, ge=1, le=MAX_MAX_STEPS)):
+    """The AI analyst: label a CLEAN chart from scratch, as an agent.
+
+    Everything else in this app shows the deterministic engine's own count,
+    with the AI at most offering a second opinion on top of it. This
+    endpoint deliberately does the opposite: it loads the candles and hands
+    the model nothing else - no pivots, no BOS/CHoCH, no scenarios, no
+    Fibonacci - and lets it work the chart with the tools in
+    ai_advisor/analyst_tools.py until it submits a count.
+
+    That isolation is the point. A model shown an existing markup tends to
+    agree with it, which makes it useless as an independent read; a model
+    shown only price has to actually find the structure. Which is also why
+    the frontend gives this its own tab with its own bare chart: the two
+    counts must be comparable, not superimposed.
+
+    The answer is not trusted any more than before. Every structure the
+    agent submits is re-validated against the same hard Elliott rules
+    (elliott_engine/external_count.py) before it is returned, and anything
+    that breaks one comes back in `rejected` with the rule it broke rather
+    than being quietly dropped or quietly drawn."""
+    candles, symbol, tf = load_candles(source, symbol, timeframe, limit, cycles)
+
+    try:
+        result = run_analyst(api_key, candles, tf, symbol=symbol, model=model, max_steps=max_steps)
+    except ToolError as exc:
+        raise HTTPException(422, str(exc))
+    except AIAdvisorError as exc:
+        raise HTTPException(502, str(exc))
+
+    return {
+        "symbol": symbol,
+        "timeframe": tf.value,
+        "model": result.model,
+        "finished": result.finished,
+        "note": result.note,
+        "summary": result.summary,
+        "reasoning": result.reasoning,
+        "steps_used": result.steps_used,
+        "steps": [{"tool": call.name, "args": call.args, "result": call.result_summary}
+                  for call in result.steps],
+        "accepted": result.accepted,
+        "rejected": result.rejected,
+        "waves": result.waves,
+        # The clean chart this count belongs to. Returned with the answer so
+        # the analyst tab draws the EXACT series the agent analysed - not a
+        # separately-fetched one that could differ by a candle.
+        "candles": [candle_to_dict(c) for c in candles],
     }
 
 

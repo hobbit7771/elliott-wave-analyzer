@@ -83,6 +83,10 @@ class WaveLabel(str, Enum):
     A = "A"
     B = "B"
     C = "C"
+    # D and E exist only inside a triangle (A-B-C-D-E), the one
+    # corrective structure with five legs. Nothing else produces them.
+    D = "D"
+    E = "E"
     W = "W"
     X = "X"
     Y = "Y"

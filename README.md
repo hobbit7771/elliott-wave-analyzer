@@ -17,7 +17,7 @@
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine, live
 market data from Bybit USDT perpetuals (see "Mobile app + live Bybit"
-below for why Binance was dropped). 213 automated tests, all passing,
+below for why Binance was dropped). 260 automated tests, all passing,
 cover every module described below.
 
 ## Read this first: what "done" means here
@@ -85,10 +85,12 @@ t3_engine/
   pipeline/           live_loop.py - the section-20 event-driven real-time orchestrator
   dashboard/           FastAPI backend + static/index.html (lightweight-charts UI),
                       PWA manifest/service worker, live-pipeline start/stop/state endpoints
-  ai_advisor/         optional BYO-key Gemini second opinion + AI wave-labelling (never a decision-maker)
+  ai_advisor/         optional BYO-key Gemini layer: second opinion, one-shot wave-labelling,
+                      and the AI Analyst agent (playbook.py = the rulebook it is given,
+                      analyst_tools.py = the tools it may use). Never a decision-maker.
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                213 tests, one file per module above
+tests/                260 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Bybit in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -423,6 +425,61 @@ own colour so it can't be mistaken for the engine's own conclusion.
 `tests/test_external_count.py` is written from the attacker's side: each
 test is a shape of nonsense a model realistically returns.
 
+## The AI Analyst: a clean chart, an agent, and the same trust boundary
+
+The AI labelling above is one shot: the model is handed a pre-computed
+pivot list and returns a single count. If it misjudges the degree or
+breaks the overlap rule, nobody finds out until the whole answer is
+rejected and the chart stays empty.
+
+The **AI Analyst** tab is the other approach. It gets its own bare chart -
+candles and nothing else, no pivots, no BOS/CHoCH, no scenarios, no
+Fibonacci - and works it the way an analyst does, in a loop, using tools
+this server executes (`ai_advisor/analyst_tools.py`):
+
+| Tool | What it does |
+| --- | --- |
+| `list_pivots(deviation_pct)` | The swing skeleton at a chosen degree. Large deviation = the higher-degree structure, small = subwaves. |
+| `get_candles(start, end)` | Raw OHLC for a range, downsampled, for reading the shape inside a leg. |
+| `measure_move(...)` | Exact price distance, % move and bar count between two pivots. |
+| `fibonacci_levels(...)` | Retracements and extensions of a measured leg. |
+| `check_count(...)` | **Runs the real rule engine** and returns the rule that broke. |
+| `submit_count(...)` | The final answer - re-validated before it is accepted. |
+
+It is given the rulebook explicitly (`ai_advisor/playbook.py`), written out
+the way the literature separates it: the **hard rules** that make a count
+wrong (wave 2 never passes the start of wave 1; wave 3 is never the
+shortest; wave 4 never enters wave 1's territory - except in a diagonal,
+which must then be *labelled* a diagonal), and the **guidelines** that only
+change probability (alternation, equality, channelling, the Fibonacci
+ratios, wave personality, degree consistency). It knows impulses,
+extensions, truncated fifths, leading and ending diagonals, zigzags, flats
+(regular, expanded, running), triangles and combinations, and it is told to
+work top-down and to test each candidate count before committing to it.
+
+Two things this does **not** change:
+
+* **The trust boundary.** Every structure the agent submits is re-validated
+  against the same hard rules before it leaves the server - including
+  counts `check_count` already approved, because nothing forces a model to
+  submit the thing it tested. Corrections are validated as corrections:
+  `external_count.py` now carries the zigzag rules (B never passes the
+  start of A; C always carries beyond the end of A), the flat rule (B
+  retraces at least 61.8% of A, or it is a zigzag and not a flat - while
+  expanded and running flats stay legal), and the triangle rule (five legs
+  that contract throughout or expand throughout). An A-B-C cannot be
+  submitted through the impulse path or vice versa.
+* **What it may touch.** Six read-only functions over one candle series. No
+  trades, no settings, no state, no network. The worst a confused model can
+  do is waste its own steps.
+
+Rejected structures are shown in the panel with the rule they broke, next
+to a transcript of every tool call the agent made - the point being that
+you can audit *how* it got there, not just what it concluded. It has its
+own chart on purpose: a model shown an existing markup tends to agree with
+it, and the two counts are only worth comparing if they were reached
+independently.
+
 ## Deploying to Render
 
 1. Push this repo to your own GitHub, then in Render either:
@@ -480,7 +537,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (213 tests)
+# Run the automated test suite (260 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)
