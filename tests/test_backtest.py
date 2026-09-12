@@ -10,14 +10,16 @@ from t3_engine.common.types import Timeframe, TradeSide, WaveLabel
 
 
 def test_backtest_never_opens_trades_on_a_non_tradeable_timeframe():
-    """Spec section 21: only 5m/15m may ever originate a real entry - 1h/4h
-    is context/confirmation-only. The dashboard now lets a user pick ANY
-    timeframe just to view structure/wave counts (server.py's /api/run
-    `timeframe` param), so this guard is what stops that view-only pick
-    from silently opening real paper trades too - it must never fire a
-    signal at all here, not just skip opening a position from one."""
-    candles = [dataclasses.replace(c, timeframe=Timeframe.H1) for c in generate_synthetic_series(num_cycles=2)]
-    engine = BacktestEngine(BacktestConfig(symbol="TESTUSDT", entry_confidence_threshold=50.0, degree=Timeframe.H1))
+    """TRADEABLE_TIMEFRAMES is (M5, M15, H1, H4) - 1h/4h were added on the
+    project owner's explicit instruction to enable trading there too, so
+    1m/3m/seconds-level degrees are what remain confirmation-only now. The
+    dashboard lets a user pick ANY timeframe just to view structure/wave
+    counts (server.py's /api/run `timeframe` param), so this guard is what
+    stops a confirmation-only pick from silently opening real paper trades
+    too - it must never fire a signal at all here, not just skip opening a
+    position from one."""
+    candles = [dataclasses.replace(c, timeframe=Timeframe.M1) for c in generate_synthetic_series(num_cycles=2)]
+    engine = BacktestEngine(BacktestConfig(symbol="TESTUSDT", entry_confidence_threshold=50.0, degree=Timeframe.M1))
     result = engine.run(candles)
     assert result["signals"] == []
     assert result["closed_positions"] == []

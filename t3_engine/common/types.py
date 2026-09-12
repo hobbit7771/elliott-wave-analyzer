@@ -48,10 +48,18 @@ _TF_SECONDS = {
 }
 
 # Timeframes that are ALLOWED to originate a tradeable Elliott wave signal.
-# Everything else (seconds/1m/3m, 1h/4h) may only confirm or provide context.
-TRADEABLE_TIMEFRAMES = (Timeframe.M5, Timeframe.M15)
+# Originally just (M5, M15) per the spec's section 21 (sub-minute
+# confirmation drives entries on those two only, 1h/4h was context-only).
+# Widened to include H1/H4 on the project owner's explicit instruction, to
+# evaluate the same rule-based strategy on higher timeframes too - the
+# underlying signal/risk/execution logic is unchanged, only which degrees
+# are allowed to reach it. 1s-3m stays confirmation-only: those aren't
+# separate tradeable degrees, they're the sub-bar detail the 5m/15m/1h/4h
+# entries are supposed to (but, per the backtester's documented single-TF
+# simplification, don't yet) confirm against.
+TRADEABLE_TIMEFRAMES = (Timeframe.M5, Timeframe.M15, Timeframe.H1, Timeframe.H4)
 CONFIRMATION_TIMEFRAMES = (Timeframe.S1, Timeframe.S5, Timeframe.S15, Timeframe.S30, Timeframe.M1, Timeframe.M3)
-CONTEXT_TIMEFRAMES = (Timeframe.H1, Timeframe.H4)
+CONTEXT_TIMEFRAMES: tuple = ()
 
 
 class Direction(str, Enum):

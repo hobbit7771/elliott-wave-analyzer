@@ -155,6 +155,59 @@ def test_bybit_get_klines_parses_row_format_and_reverses_to_chronological_order(
     assert candles[1].close == 106.5
 
 
+def test_bybit_get_klines_paginates_beyond_the_1000_row_per_request_cap():
+    """Bybit caps a single kline request at 1000 rows - loading a real deep
+    history (dashboard follow-up: "load 10,000 candles") means walking
+    backwards in time across multiple requests via the `end` param and
+    reassembling them in chronological order, not silently capping at
+    whatever the first request returns."""
+    interval_ms = Timeframe.M5.seconds * 1000
+
+    def make_rows(start_index: int, count: int) -> list:
+        # Bybit returns newest-first within a page.
+        return [
+            [str(i * interval_ms), "100", "101", "99", "100.5", "1", "100"]
+            for i in range(start_index + count - 1, start_index - 1, -1)
+        ]
+
+    requests_seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests_seen.append(dict(request.url.params))
+        end = request.url.params.get("end")
+        if end is None:
+            rows = make_rows(500, 1000)  # first page: newest 1000 rows
+        else:
+            assert int(end) == 500 * interval_ms - 1
+            rows = make_rows(0, 500)  # second page: everything older
+        return httpx.Response(200, json={"retCode": 0, "result": {"list": rows}})
+
+    client = make_bybit_client(handler)
+    candles = client.get_klines("BTCUSDT", Timeframe.M5, limit=1500)
+    assert len(requests_seen) == 2
+    assert len(candles) == 1500
+    # Strictly chronological with no gap/duplicate across the page boundary.
+    assert [c.open_time for c in candles] == [i * interval_ms for i in range(1500)]
+
+
+def test_bybit_get_klines_stops_early_when_exchange_has_no_more_history():
+    """If a page comes back shorter than requested, that's the exchange
+    saying there's nothing older left - must stop paginating instead of
+    looping forever waiting for rows that will never arrive."""
+    interval_ms = Timeframe.M5.seconds * 1000
+    rows = [[str(i * interval_ms), "100", "101", "99", "100.5", "1", "100"] for i in range(299, -1, -1)]
+    call_count = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        call_count["n"] += 1
+        return httpx.Response(200, json={"retCode": 0, "result": {"list": rows}})
+
+    client = make_bybit_client(handler)
+    candles = client.get_klines("BTCUSDT", Timeframe.M5, limit=1500)
+    assert call_count["n"] == 1
+    assert len(candles) == 300
+
+
 def test_bybit_get_klines_rejects_unsupported_timeframe():
     client = make_bybit_client(lambda r: httpx.Response(200, json={"retCode": 0, "result": {"list": []}}))
     with pytest.raises(ValueError):

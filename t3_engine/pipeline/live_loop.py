@@ -54,14 +54,15 @@ from t3_engine.market_data.bybit_ws_client import BybitFuturesWebSocketClient, p
 
 logger = logging.getLogger(__name__)
 
-# Every timeframe the live dashboard chart can display (spec section 20/21:
-# 1m is confirmation-only, 1h/4h are context-only, and only 5m/15m may ever
-# originate a real entry - see TRADEABLE_TIMEFRAMES and the guard in
-# backtest/engine.py's _maybe_open_trade). Each of these still gets its own
-# full BacktestEngine so its candles/structure/scenario are real and
-# independently tracked, not derived/resampled from the 5m one - the guard
-# in _maybe_open_trade is what stops the non-tradeable ones from ever
-# opening a paper position, not their absence from this tuple.
+# Every timeframe the live dashboard chart can display. Only 1m is
+# confirmation-only now - TRADEABLE_TIMEFRAMES (common/types.py) is
+# (M5, M15, H1, H4), widened from the original spec-section-21 (M5, M15)
+# on the project owner's explicit instruction to enable 1h/4h trading too
+# (see backtest/engine.py's _maybe_open_trade guard). Each of these still
+# gets its own full BacktestEngine so its candles/structure/scenario are
+# real and independently tracked, not derived/resampled from the 5m one -
+# the guard in _maybe_open_trade is what stops 1m from ever opening a
+# paper position, not its absence from this tuple.
 DISPLAY_TIMEFRAMES = (Timeframe.M1, Timeframe.M5, Timeframe.M15, Timeframe.H1, Timeframe.H4)
 
 

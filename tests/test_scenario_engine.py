@@ -55,6 +55,43 @@ def test_scenario_engine_rebuild_produces_top3_or_fewer():
         assert scenarios[0].probability >= scenarios[1].probability
 
 
+def test_scenario_engine_accumulates_wave_history_across_rebuilds():
+    """rebuild() REPLACES `scenarios` from scratch every call (see its
+    docstring) - fine for "what's the current best count", but on its own
+    it means the chart only ever shows numbered waves at the tail of the
+    history, with every earlier wave silently discarded the moment a new
+    pivot confirms. `wave_history` is the fix: each wave the top scenario
+    ever confirms (i.e. is no longer its still-forming last wave) should
+    stay recorded permanently, so the chart can number waves across the
+    WHOLE history, not just the latest handful."""
+    engine = ScenarioEngine(degree=Timeframe.M5)
+    pivots = [
+        pivot(0, 100, "LOW"),
+        pivot(1, 150, "HIGH"),
+        pivot(2, 120, "LOW"),
+        pivot(3, 250, "HIGH"),
+        pivot(4, 200, "LOW"),
+        pivot(5, 280, "HIGH"),
+    ]
+
+    engine.rebuild(pivots[:4], Direction.UP)  # builds W1, W2, W3(forming)
+    assert set(engine.wave_history.keys()) == {("1", pivots[0].timestamp), ("2", pivots[1].timestamp)}
+
+    engine.rebuild(pivots[:5], Direction.UP)  # builds W1..W4(forming) - W3 now confirmed
+    assert set(engine.wave_history.keys()) == {
+        ("1", pivots[0].timestamp), ("2", pivots[1].timestamp), ("3", pivots[2].timestamp),
+    }
+
+    engine.rebuild(pivots, Direction.UP)  # full W1..W5(forming) - W4 now confirmed too
+    assert set(engine.wave_history.keys()) == {
+        ("1", pivots[0].timestamp), ("2", pivots[1].timestamp),
+        ("3", pivots[2].timestamp), ("4", pivots[3].timestamp),
+    }
+    # Never discarded once recorded, even though `scenarios` itself just
+    # got replaced again on this very call.
+    assert engine.wave_history[("1", pivots[0].timestamp)].start_price == 100
+
+
 def test_scenario_engine_invalidated_scenarios_get_zero_probability_and_excluded():
     engine = ScenarioEngine(degree=Timeframe.M5)
     pivots = [

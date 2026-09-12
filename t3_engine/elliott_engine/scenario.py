@@ -170,6 +170,21 @@ class ScenarioEngine:
     weight_microstructure: float = 0.10
 
     scenarios: List[Scenario] = field(default_factory=list)
+    # `rebuild()` REPLACES `scenarios` from scratch every time (see its own
+    # docstring) - correct for "what's the current best count", but it means
+    # every earlier wave that was ever labelled gets silently thrown away
+    # the moment a new pivot confirms, and a chart built only from
+    # `scenarios` shows numbered waves at the tail of the history with
+    # nothing behind them. This is a running, append-only log of every wave
+    # any TOP-ranked scenario ever confirmed, keyed by (label,
+    # start_timestamp) so re-adding the same wave on a later rebuild (the
+    # common case: the anchor is unchanged and the count just grew one more
+    # wave) is a no-op rather than a duplicate. The CURRENTLY-forming last
+    # wave of the top scenario is deliberately excluded each time - its end
+    # price/time is still provisional until the next pivot confirms it, so
+    # only once a rebuild adds a wave AFTER it does it become final and get
+    # recorded here.
+    wave_history: Dict[tuple, Wave] = field(default_factory=dict)
     _external_scores: Dict[str, Dict[str, float]] = field(default_factory=dict)
 
     def set_external_scores(self, scenario_id: str, *, price_action: float = 0.0, volume: float = 0.0,
@@ -229,7 +244,15 @@ class ScenarioEngine:
         survivors = [s for s in new_scenarios if s.probability > 0][: self.max_scenarios]
         self._scale_to_percent(survivors)
         self.scenarios = survivors
+        self._record_wave_history(survivors)
         return self.scenarios
+
+    def _record_wave_history(self, survivors: List[Scenario]) -> None:
+        if not survivors:
+            return
+        top = survivors[0]
+        for wave in top.waves[:-1]:
+            self.wave_history[(wave.label, wave.start_timestamp)] = wave
 
     def _weighted_score(self, s: Scenario) -> float:
         return (
