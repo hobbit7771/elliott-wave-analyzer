@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from t3_engine.common.types import Timeframe
+from t3_engine.market_data.bybit_rest_client import BybitAPIError, BybitFuturesREST
 from t3_engine.market_data.rest_client import BinanceFuturesREST
 from t3_engine.market_data.ws_client import BinanceFuturesWebSocketClient
 
@@ -120,6 +121,80 @@ def test_rest_client_raises_on_http_error():
     client = make_rest_client(handler)
     with pytest.raises(httpx.HTTPStatusError):
         client.get_klines("NOTASYMBOL", Timeframe.M5)
+
+
+# ---- Bybit REST client (fallback data source when Binance is unreachable) ----
+
+def make_bybit_client(handler):
+    transport = httpx.MockTransport(handler)
+    http_client = httpx.Client(transport=transport, base_url="https://api.bybit.com")
+    return BybitFuturesREST(client=http_client)
+
+
+def test_bybit_get_klines_parses_row_format_and_reverses_to_chronological_order():
+    # Bybit returns newest-first; row = [start, open, high, low, close, volume, turnover]
+    rows = [
+        ["1620000300000", "106.0", "107.0", "105.0", "106.5", "50.0", "5000"],
+        ["1620000000000", "100.5", "110.2", "99.1", "105.0", "1234.5", "120000"],
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v5/market/kline"
+        assert "category=linear" in str(request.url)
+        assert "symbol=BTCUSDT" in str(request.url)
+        assert "interval=5" in str(request.url)
+        return httpx.Response(200, json={"retCode": 0, "retMsg": "OK", "result": {"list": rows}})
+
+    client = make_bybit_client(handler)
+    candles = client.get_klines("BTCUSDT", Timeframe.M5, limit=10)
+    assert len(candles) == 2
+    assert candles[0].open_time == 1620000000000  # oldest first after reversal
+    assert candles[0].close == 105.0
+    assert candles[1].open_time == 1620000300000
+    assert candles[1].close == 106.5
+
+
+def test_bybit_get_klines_rejects_unsupported_timeframe():
+    client = make_bybit_client(lambda r: httpx.Response(200, json={"retCode": 0, "result": {"list": []}}))
+    with pytest.raises(ValueError):
+        client.get_klines("BTCUSDT", Timeframe.S1, limit=10)
+
+
+def test_bybit_list_symbols_filters_trading_linear_perpetuals():
+    sample = {
+        "retCode": 0, "retMsg": "OK",
+        "result": {"list": [
+            {"symbol": "BTCUSDT", "status": "Trading", "contractType": "LinearPerpetual", "quoteCoin": "USDT"},
+            {"symbol": "ETHUSDT", "status": "Trading", "contractType": "LinearPerpetual", "quoteCoin": "USDT"},
+            {"symbol": "DELISTEDUSDT", "status": "Closed", "contractType": "LinearPerpetual", "quoteCoin": "USDT"},
+            {"symbol": "BTCUSD", "status": "Trading", "contractType": "InversePerpetual", "quoteCoin": "USD"},
+        ]},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v5/market/instruments-info"
+        return httpx.Response(200, json=sample)
+
+    client = make_bybit_client(handler)
+    assert client.list_symbols() == ["BTCUSDT", "ETHUSDT"]
+
+
+def test_bybit_raises_on_nonzero_ret_code():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"retCode": 10001, "retMsg": "invalid symbol", "result": {}})
+
+    client = make_bybit_client(handler)
+    with pytest.raises(BybitAPIError):
+        client.get_klines("NOTASYMBOL", Timeframe.M5)
+
+
+def test_bybit_raises_on_http_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"retCode": 403, "retMsg": "forbidden"})
+
+    client = make_bybit_client(handler)
+    with pytest.raises(httpx.HTTPStatusError):
+        client.get_klines("BTCUSDT", Timeframe.M5)
 
 
 # ---- WebSocket client ----

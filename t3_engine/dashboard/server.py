@@ -37,6 +37,7 @@ from t3_engine.dashboard.serialization import (
     signal_to_dict,
     structure_event_to_dict,
 )
+from t3_engine.market_data.bybit_rest_client import BybitAPIError, BybitFuturesREST
 from t3_engine.market_data.fallback_symbols import FALLBACK_USDT_PERPETUAL_SYMBOLS
 from t3_engine.market_data.rest_client import BinanceFuturesREST
 from t3_engine.pipeline.live_loop import LiveTradingEngine
@@ -143,7 +144,7 @@ def health():
 # --- symbol list cache: Binance lists ~400 perpetual futures symbols and
 # that list barely changes minute to minute, so we cache it in-process
 # instead of hitting exchangeInfo on every dashboard page load. ---
-_symbols_cache: Dict[str, object] = {"symbols": None, "fetched_at": 0.0}
+_symbols_cache: Dict[str, object] = {"symbols": None, "fetched_at": 0.0, "source": "live"}
 _SYMBOLS_CACHE_TTL_SECONDS = 3600.0
 
 
@@ -151,54 +152,96 @@ _SYMBOLS_CACHE_TTL_SECONDS = 3600.0
 def list_symbols():
     now = time.time()
     if _symbols_cache["symbols"] is not None and (now - _symbols_cache["fetched_at"]) < _SYMBOLS_CACHE_TTL_SECONDS:
-        return {"symbols": _symbols_cache["symbols"], "cached": True, "source": "live"}
+        return {"symbols": _symbols_cache["symbols"], "cached": True, "source": _symbols_cache["source"]}
 
-    # Never let the picker come back empty just because Binance is
-    # temporarily unreachable (451/418/429/network error) - fall back to
-    # the static list (see fallback_symbols.py for why it's not
-    # exhaustive) instead of raising, so typing a letter always suggests
-    # something real while we wait this out.
+    binance_reason: Optional[str] = None
     if _binance_backoff_until > now:
-        return {"symbols": FALLBACK_USDT_PERPETUAL_SYMBOLS, "cached": False, "source": "fallback",
-                "reason": f"{_binance_backoff_message} ({_binance_backoff_until - now:.0f}s remaining in cooldown)"}
+        binance_reason = f"{_binance_backoff_message} ({_binance_backoff_until - now:.0f}s remaining in cooldown)"
+    else:
+        rest = BinanceFuturesREST()
+        try:
+            symbols = rest.list_symbols()
+            _symbols_cache["symbols"] = symbols
+            _symbols_cache["fetched_at"] = now
+            _symbols_cache["source"] = "live"
+            return {"symbols": symbols, "cached": False, "source": "live"}
+        except httpx.HTTPStatusError as exc:
+            _register_binance_failure(exc)
+            binance_reason = binance_error_message(exc)
+        except httpx.RequestError as exc:
+            binance_reason = f"Could not reach Binance: {exc}"
+        finally:
+            rest.close()
 
-    rest = BinanceFuturesREST()
+    # Binance is unavailable - Bybit is a different exchange on different
+    # infrastructure, so a Binance-side regional block or IP ban has no
+    # bearing on whether it's reachable. Try it before giving up to the
+    # static list, so the picker still gets a real, current symbol list
+    # during a Binance outage instead of the hand-picked fallback.
+    bybit = BybitFuturesREST()
     try:
-        symbols = rest.list_symbols()
-    except httpx.HTTPStatusError as exc:
-        _register_binance_failure(exc)
-        return {"symbols": FALLBACK_USDT_PERPETUAL_SYMBOLS, "cached": False, "source": "fallback",
-                "reason": binance_error_message(exc)}
-    except httpx.RequestError as exc:
-        return {"symbols": FALLBACK_USDT_PERPETUAL_SYMBOLS, "cached": False, "source": "fallback",
-                "reason": f"Could not reach Binance: {exc}"}
+        symbols = bybit.list_symbols()
+        _symbols_cache["symbols"] = symbols
+        _symbols_cache["fetched_at"] = now
+        _symbols_cache["source"] = "bybit"
+        return {"symbols": symbols, "cached": False, "source": "bybit",
+                "reason": f"Binance unavailable ({binance_reason}) - serving Bybit's live list instead"}
+    except (httpx.HTTPStatusError, httpx.RequestError, BybitAPIError):
+        pass
     finally:
-        rest.close()
+        bybit.close()
 
-    _symbols_cache["symbols"] = symbols
-    _symbols_cache["fetched_at"] = now
-    return {"symbols": symbols, "cached": False, "source": "live"}
+    return {"symbols": FALLBACK_USDT_PERPETUAL_SYMBOLS, "cached": False, "source": "fallback",
+            "reason": binance_reason}
 
 
 @app.get("/api/run")
 def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETIC"),
                   cycles: int = Query(2, ge=1, le=10), threshold: float = Query(60.0, ge=0, le=100),
                   limit: int = Query(1500, ge=100, le=1500)):
+    data_source = source
+    fallback_note = None
     if source == "binance":
         symbol = normalize_symbol(symbol)
         if not symbol:
             raise HTTPException(400, "Symbol is empty after normalization - expected something like BTCUSDT")
-        _check_binance_backoff()
-        rest = BinanceFuturesREST()
-        try:
-            candles = rest.get_klines(symbol, Timeframe.M5, limit=limit)
-        except httpx.HTTPStatusError as exc:
-            _register_binance_failure(exc)
-            raise HTTPException(exc.response.status_code, binance_error_message(exc))
-        except httpx.RequestError as exc:
-            raise HTTPException(502, f"Could not reach Binance: {exc}")
-        finally:
-            rest.close()
+
+        now = time.time()
+        candles = None
+        binance_status = None
+        binance_message = None
+        if _binance_backoff_until > now:
+            binance_status = 429
+            binance_message = (f"{_binance_backoff_message} "
+                                f"({_binance_backoff_until - now:.0f}s remaining in cooldown)")
+        else:
+            rest = BinanceFuturesREST()
+            try:
+                candles = rest.get_klines(symbol, Timeframe.M5, limit=limit)
+            except httpx.HTTPStatusError as exc:
+                _register_binance_failure(exc)
+                binance_status = exc.response.status_code
+                binance_message = binance_error_message(exc)
+            except httpx.RequestError as exc:
+                binance_status = 502
+                binance_message = f"Could not reach Binance: {exc}"
+            finally:
+                rest.close()
+
+        if candles is None:
+            # Binance unavailable - Bybit runs on separate infrastructure,
+            # so a Binance-side ban/regional block doesn't affect it. Try
+            # it before surfacing an error, so analysis keeps working on
+            # real market data through a Binance outage.
+            bybit = BybitFuturesREST()
+            try:
+                candles = bybit.get_klines(symbol, Timeframe.M5, limit=limit)
+                data_source = "bybit"
+                fallback_note = f"Binance unavailable ({binance_message}) - served from Bybit instead."
+            except (httpx.HTTPStatusError, httpx.RequestError, BybitAPIError, ValueError):
+                raise HTTPException(binance_status, binance_message)
+            finally:
+                bybit.close()
     else:
         candles = generate_synthetic_series(num_cycles=cycles)
         symbol = symbol if symbol != "SYNTHETIC" else "SYNTHETIC-DEMO"
@@ -212,6 +255,7 @@ def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETI
     return {
         "symbol": symbol,
         "source": source,
+        "data_source": data_source,
         "candles": [candle_to_dict(c) for c in candles],
         "scenarios": [scenario_to_dict(s) for s in engine.scenario_engine.scenarios],
         "structure_events": [structure_event_to_dict(e) for e in engine.structure.events],
@@ -224,10 +268,11 @@ def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETI
             "by_wave": {k: dataclass_metrics_to_dict(v) for k, v in metrics_by_wave.items()},
         },
         "note": (
+            fallback_note if source == "binance" else
             "Candles are a SYNTHETIC, clearly-labelled demo fixture (see backtest/synthetic_data.py) "
             "because this build environment cannot reach Binance. Pass source=binance&symbol=... "
             "to use real historical data when running somewhere with normal internet access."
-        ) if source != "binance" else None,
+        ),
     }
 
 

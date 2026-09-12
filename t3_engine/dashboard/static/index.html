@@ -523,7 +523,10 @@ async function loadSymbolList() {
     const data = await resp.json();
     const listEl = document.getElementById('symbolsList');
     listEl.innerHTML = data.symbols.map(s => `<option value="${s}"></option>`).join('');
-    symbolInput.title = `${data.symbols.length} symbols loaded - type to filter, or enter any symbol manually`;
+    const sourceNote = data.source === 'live' ? ''
+      : data.source === 'bybit' ? ' (Binance unavailable - served from Bybit)'
+      : ' (Binance & Bybit unavailable - showing a static common-symbols list)';
+    symbolInput.title = `${data.symbols.length} symbols loaded${sourceNote} - type to filter, or enter any symbol manually`;
   } catch (e) {
     symbolInput.title = `Coin list unavailable: ${e.message}`;
     console.warn('GET /api/symbols failed:', e);
