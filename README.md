@@ -104,14 +104,23 @@ desktop web page:
   Store/Google Play submission needed - that's the fast/simple path to a
   "mobile app" versus building and shipping a separate native app.
 - **Live public WebSocket mode**: pick "Binance (live, public WS)" as the
-  source, hit "Start live". This calls `POST /api/live/start`, which spins
-  up the real `pipeline/live_loop.py` orchestrator against Binance's
-  **public** market-data WebSocket (aggTrade/bookTicker/markPrice) for that
-  symbol - no API key required, since market data isn't account data. This
-  build's own sandbox blocks that connection (see "Known limitations"
-  above), which is exactly why the dashboard didn't connect when you tried
-  it here; deployed on Render (or any host with normal internet), it
-  connects for real. Runs in PAPER mode only (simulated fills).
+  source, enter a symbol in plain Binance format (e.g. `BTCUSDT` - no
+  slash, no quote-currency separator: `UNI/USDC` or `SOL/USDT` are rejected/
+  normalized, since Binance symbols are just one alphanumeric string) and
+  hit "Start live". This calls `POST /api/live/start`, which spins up the
+  real `pipeline/live_loop.py` orchestrator against Binance's **public**
+  market-data WebSocket (aggTrade/bookTicker/markPrice) for that symbol -
+  no API key required, since market data isn't account data.
+  **Binance blocks entire regions from its API with HTTP 451** (confirmed
+  in production logs of a Render deployment of this exact app, hosted in
+  Render's default `oregon` (US) region) - this is Binance's own
+  regulatory IP block, not a bug here, and it affects the REST history
+  endpoint the same way it affects the live WebSocket. If "Binance
+  (history)" or "Binance (live)" don't return data, redeploy this service
+  in a **non-US Render region** (`frankfurt` or `singapore` - see
+  `render.yaml`'s `region` field, or the region picker when creating the
+  service manually); this build's own sandbox separately blocks Binance
+  entirely regardless of region (see "Known limitations" above).
 - **AI Advisor tab**: paste your own OpenAI API key (your ChatGPT/OpenAI
   subscription/credits - stored only in your browser's `localStorage`,
   forwarded per-request to `/api/ai/advice` and never written to disk

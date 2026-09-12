@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 from typing import Dict
 
+import httpx
 from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -52,6 +54,33 @@ _live_started_at: Dict[str, int] = {}
 _live_errors: Dict[str, str] = {}
 
 
+_SYMBOL_STRIP_RE = re.compile(r"[^A-Za-z0-9]")
+
+
+def normalize_symbol(raw: str) -> str:
+    """Binance symbols are plain alphanumeric strings (e.g. `BTCUSDT`) -
+    no slash, no space, no lowercase-vs-uppercase distinction. Users
+    naturally type things like "BTC/USDT", "btc usdt" or paste a
+    lowercase ticker; reject silently-wrong requests instead of sending
+    garbage straight to Binance (or, worse, to a half-typed partial
+    string on every keystroke - see the frontend's debounce/commit-on-
+    start fix for the other half of this)."""
+    return _SYMBOL_STRIP_RE.sub("", raw).upper()
+
+
+def binance_error_message(exc: httpx.HTTPStatusError) -> str:
+    status = exc.response.status_code
+    if status == 451:
+        return (
+            "Binance returned HTTP 451 (Unavailable For Legal Reasons) - it blocks API access "
+            "from this server's IP/region entirely, regardless of symbol or request. This is a "
+            "regional restriction on Binance's side, not a bug: it commonly affects servers hosted "
+            "in the US (e.g. Render's default 'oregon' region). Redeploying this service in a "
+            "non-US region (e.g. Render's 'frankfurt' or 'singapore') is the known workaround."
+        )
+    return f"Binance API returned HTTP {status}: {exc.response.text[:300]}"
+
+
 async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
     try:
         await engine.run_live_binance()
@@ -71,9 +100,14 @@ def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETI
                   cycles: int = Query(2, ge=1, le=10), threshold: float = Query(60.0, ge=0, le=100),
                   limit: int = Query(1500, ge=100, le=1500)):
     if source == "binance":
+        symbol = normalize_symbol(symbol)
+        if not symbol:
+            raise HTTPException(400, "Symbol is empty after normalization - expected something like BTCUSDT")
         rest = BinanceFuturesREST()
         try:
             candles = rest.get_klines(symbol, Timeframe.M5, limit=limit)
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(exc.response.status_code, binance_error_message(exc))
         finally:
             rest.close()
     else:
@@ -114,7 +148,9 @@ async def start_live(symbol: str = Body(..., embed=True), equity: float = Body(1
     """Starts a live pipeline against Binance's PUBLIC WebSocket streams
     (aggTrade etc.) for `symbol` - no API key required, this is public
     market data, not account access. Runs in PAPER mode only."""
-    symbol = symbol.upper()
+    symbol = normalize_symbol(symbol)
+    if not symbol:
+        raise HTTPException(400, "Symbol is empty after normalization - expected something like BTCUSDT")
     if symbol in _live_engines:
         return {"status": "already_running", "symbol": symbol}
 
@@ -128,7 +164,7 @@ async def start_live(symbol: str = Body(..., embed=True), equity: float = Body(1
 
 @app.post("/api/live/stop")
 async def stop_live(symbol: str = Body(..., embed=True)):
-    symbol = symbol.upper()
+    symbol = normalize_symbol(symbol)
     task = _live_tasks.pop(symbol, None)
     _live_engines.pop(symbol, None)
     _live_started_at.pop(symbol, None)
@@ -153,7 +189,7 @@ def live_status():
 
 @app.get("/api/live/state")
 def live_state(symbol: str = Query(...), timeframe: str = Query("5m")):
-    symbol = symbol.upper()
+    symbol = normalize_symbol(symbol)
     engine = _live_engines.get(symbol)
     if engine is None:
         raise HTTPException(404, f"No live engine running for {symbol} - POST /api/live/start first")
@@ -165,11 +201,19 @@ def live_state(symbol: str = Query(...), timeframe: str = Query("5m")):
         raise HTTPException(400, f"{symbol} is not tracking {timeframe} (tracked: {[t.value for t in engine.engines]})")
 
     tf_engine = engine.engines[tf]
-    candles = engine.history[tf]
+    candles = list(engine.history[tf])
+    # The current, still-forming bar isn't in `history` yet (it only gets
+    # appended once its bucket closes - see candle_builder/aggregator.py's
+    # no-lookahead guarantee), but a live chart should still show it
+    # updating in real time rather than sit empty until the first bar closes.
+    forming = engine.candle_builder.current_candle(tf)
+    if forming is not None:
+        candles = candles + [forming]
     return {
         "symbol": symbol,
         "timeframe": tf.value,
         "candles": [candle_to_dict(c) for c in candles],
+        "waiting_for_first_candle": len(candles) == 0,
         "scenarios": [scenario_to_dict(s) for s in tf_engine.scenario_engine.scenarios],
         "structure_events": [structure_event_to_dict(e) for e in tf_engine.structure.events],
         "signals": [signal_to_dict(s) for s in tf_engine.signals[-50:]],

@@ -1,16 +1,19 @@
 # Render Blueprint - one-click deploy of the T3 dashboard.
 # https://render.com/docs/blueprint-spec
 #
-# On Render (unlike this project's own build/CI sandbox) outbound access
-# to Binance's public WebSocket/REST is unrestricted, so the "Binance
-# (live, public WS)" source in the dashboard will connect for real here -
-# no API key needed for public market data.
-#
+# region is pinned to frankfurt, NOT Render's "oregon" default: production
+# logs from an earlier deploy of this exact app in "oregon" showed Binance
+# returning HTTP 451 (Unavailable For Legal Reasons) on every request -
+# Binance blocks API access (REST klines AND the public WebSocket) from
+# US-region IPs at the network edge, regardless of symbol/auth. Frankfurt/
+# Singapore are not subject to that specific block. See README "Deploying
+# to Render" for the full story if you still see 451s after this.
 services:
   - type: web
     name: t3-elliott-wave-engine
     runtime: python
     plan: free
+    region: frankfurt
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn t3_engine.dashboard.server:app --host 0.0.0.0 --port $PORT
     envVars:

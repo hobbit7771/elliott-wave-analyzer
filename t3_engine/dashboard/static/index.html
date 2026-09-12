@@ -44,6 +44,7 @@
   .signal.accepted { border-color:#22543d; }
   .signal.rejected { border-color:#4a1f24; opacity:.75; }
   .note { background:#1b2028; border:1px solid #2c3140; border-radius:8px; padding:8px; font-size:11.5px; color:#9aa3b2; margin-bottom:10px; }
+  .note.error { border-color:#7f1d1d; color:#fca5a5; background:#2a1414; }
   table { width:100%; border-collapse: collapse; font-size:11.5px; }
   td, th { padding:3px 4px; border-bottom:1px solid #232733; text-align:right; }
   th:first-child, td:first-child { text-align:left; }
@@ -252,16 +253,36 @@ function renderDebugPanel(data) {
   }
 
   const noteEl = document.getElementById('note');
-  if (data.note) { noteEl.style.display = 'block'; noteEl.textContent = data.note; }
-  else { noteEl.style.display = 'none'; }
+  noteEl.classList.remove('error');
+  if (data.waiting_for_first_candle) {
+    noteEl.style.display = 'block';
+    noteEl.textContent = 'Connected - no candle has closed yet for this timeframe. This is normal: '
+      + 'a 5m/15m bar only appears once a full interval has actually elapsed after Start.';
+  } else if (data.note) {
+    noteEl.style.display = 'block';
+    noteEl.textContent = data.note;
+  } else {
+    noteEl.style.display = 'none';
+  }
+}
+
+function normalizeSymbol(raw) {
+  return (raw || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
 }
 
 function applyChartData(data) {
   candleSeries.setData(data.candles);
   clearOverlays();
-  data.scenarios.forEach(sc => drawWaves(sc.waves));
+  // Only the PRIMARY (highest-probability) scenario's waves are drawn as
+  // chart overlays - alternates are still listed with their probabilities
+  // in the "Primary Scenario" text panel below. Drawing every alternate's
+  // wave count on the chart at once produced overlapping, crossing lines
+  // over the same candles that read as visual noise / "broken" rather
+  // than as useful alternative counts.
+  const primary = data.scenarios && data.scenarios[0];
+  if (primary) drawWaves(primary.waves);
   drawTradeLevels(data.signals);
-  markers(data.structure_events || [], data.scenarios);
+  markers(data.structure_events || [], primary ? [primary] : []);
   chart.timeScale().fitContent();
   renderDebugPanel(data);
   lastData = data;
@@ -269,27 +290,53 @@ function applyChartData(data) {
 
 function stopLivePolling() {
   if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+  liveSymbol = null;
 }
 
+function showError(message) {
+  document.getElementById('status').textContent = 'error';
+  const noteEl = document.getElementById('note');
+  noteEl.style.display = 'block';
+  noteEl.textContent = message;
+  noteEl.classList.add('error');
+}
+
+async function parseErrorDetail(resp) {
+  try {
+    const body = await resp.json();
+    return body.detail || `HTTP ${resp.status}`;
+  } catch (e) {
+    return `HTTP ${resp.status}`;
+  }
+}
+
+let liveSymbol = null;
+
 async function fetchLiveState() {
-  const symbol = document.getElementById('symbol').value;
   const timeframe = document.getElementById('timeframe').value;
-  const resp = await fetch(`/api/live/state?symbol=${encodeURIComponent(symbol)}&timeframe=${timeframe}`);
+  const resp = await fetch(`/api/live/state?symbol=${encodeURIComponent(liveSymbol)}&timeframe=${timeframe}`);
   if (!resp.ok) {
-    document.getElementById('status').textContent = 'not started - click "Start live"';
+    showError(await parseErrorDetail(resp));
     return;
   }
   const data = await resp.json();
-  document.getElementById('status').textContent = `${data.candles.length} candles (live)`;
+  document.getElementById('status').textContent = data.waiting_for_first_candle
+    ? `connected - waiting for the first ${timeframe} candle to close…`
+    : `${data.candles.length} candles (live)`;
   applyChartData(data);
 }
 
 async function run() {
   const source = document.getElementById('source').value;
-  const symbol = document.getElementById('symbol').value;
+  const symbol = normalizeSymbol(document.getElementById('symbol').value);
+  document.getElementById('symbol').value = symbol;
   stopLivePolling();
 
   if (source === 'live') {
+    if (!symbol) { showError('Enter a symbol first, e.g. BTCUSDT.'); return; }
+    liveSymbol = symbol; // captured once - editing the input afterwards
+                         // does NOT redirect an already-running poll loop
+                         // at a half-typed symbol.
     await fetchLiveState();
     liveTimer = setInterval(fetchLiveState, 4000);
     return;
@@ -299,6 +346,10 @@ async function run() {
   const threshold = document.getElementById('threshold').value;
   document.getElementById('status').textContent = 'running…';
   const resp = await fetch(`/api/run?source=${source}&symbol=${encodeURIComponent(symbol)}&cycles=${cycles}&threshold=${threshold}`);
+  if (!resp.ok) {
+    showError(await parseErrorDetail(resp));
+    return;
+  }
   const data = await resp.json();
   document.getElementById('status').textContent = `${data.candles.length} candles`;
   applyChartData(data);
@@ -307,27 +358,39 @@ async function run() {
 function updateSourceUI() {
   const source = document.getElementById('source').value;
   const isLive = source === 'live';
+  const needsRealSymbol = source !== 'synthetic';
   document.getElementById('cyclesField').style.display = source === 'synthetic' ? '' : 'none';
   document.getElementById('tfField').style.display = isLive ? '' : 'none';
   document.getElementById('liveStart').style.display = isLive ? '' : 'none';
   document.getElementById('liveStop').style.display = isLive ? '' : 'none';
   if (!isLive) stopLivePolling();
+
+  const symbolInput = document.getElementById('symbol');
+  if (needsRealSymbol && (symbolInput.value === 'SYNTHETIC-DEMO' || symbolInput.value === '')) {
+    symbolInput.value = 'BTCUSDT';
+  } else if (!needsRealSymbol && symbolInput.value === 'BTCUSDT') {
+    symbolInput.value = 'SYNTHETIC-DEMO';
+  }
+  symbolInput.placeholder = needsRealSymbol ? 'e.g. BTCUSDT (no slash, USDT-margined futures symbol)' : '';
 }
 
 document.getElementById('source').addEventListener('change', updateSourceUI);
 document.getElementById('run').addEventListener('click', run);
 document.getElementById('liveStart').addEventListener('click', async () => {
-  const symbol = document.getElementById('symbol').value;
+  const symbol = normalizeSymbol(document.getElementById('symbol').value);
+  document.getElementById('symbol').value = symbol;
+  if (!symbol) { showError('Enter a symbol first, e.g. BTCUSDT.'); return; }
   const threshold = Number(document.getElementById('threshold').value);
   document.getElementById('status').textContent = 'starting live pipeline…';
-  await fetch('/api/live/start', {
+  const resp = await fetch('/api/live/start', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ symbol, threshold }),
   });
+  if (!resp.ok) { showError(await parseErrorDetail(resp)); return; }
   run();
 });
 document.getElementById('liveStop').addEventListener('click', async () => {
-  const symbol = document.getElementById('symbol').value;
+  const symbol = liveSymbol || normalizeSymbol(document.getElementById('symbol').value);
   stopLivePolling();
   await fetch('/api/live/stop', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
