@@ -74,7 +74,10 @@
       <option value="live">Binance (live, public WS)</option>
     </select>
   </label>
-  <label id="symbolField">Symbol <input id="symbol" value="SYNTHETIC-DEMO" size="12" /></label>
+  <label id="symbolField">Symbol
+    <input id="symbol" value="SYNTHETIC-DEMO" size="12" list="symbolsList" autocomplete="off" />
+    <datalist id="symbolsList"></datalist>
+  </label>
   <label id="cyclesField">Cycles <input id="cycles" type="number" value="2" min="1" max="10" size="3" /></label>
   <label>Threshold <input id="threshold" type="number" value="60" min="0" max="100" size="3" /></label>
   <label id="tfField" style="display:none;">TF
@@ -310,11 +313,43 @@ async function parseErrorDetail(resp) {
   }
 }
 
+const COLD_START_MESSAGE = 'Still waiting on the server. Free-tier hosting (e.g. Render) puts a '
+  + 'sleeping service to sleep after ~15 minutes idle - the first request after that can take up '
+  + 'to a minute to wake it back up. This is normal, not a stuck connection; it will resolve on its '
+  + 'own shortly, or try again in a few seconds.';
+
+// Every request that hits the backend goes through this instead of bare
+// fetch() - a request that used to just hang in the UI forever (looking
+// exactly like a broken/"infinite connecting" app) now times out and says
+// WHY, instead of leaving the user staring at a spinner with no idea
+// whether anything is happening.
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      throw new Error(COLD_START_MESSAGE);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 let liveSymbol = null;
 
 async function fetchLiveState() {
   const timeframe = document.getElementById('timeframe').value;
-  const resp = await fetch(`/api/live/state?symbol=${encodeURIComponent(liveSymbol)}&timeframe=${timeframe}`);
+  let resp;
+  try {
+    resp = await fetchWithTimeout(`/api/live/state?symbol=${encodeURIComponent(liveSymbol)}&timeframe=${timeframe}`, {}, 45000);
+  } catch (e) {
+    document.getElementById('status').textContent = 'waking up server…';
+    showError(e.message);
+    return;
+  }
   if (!resp.ok) {
     showError(await parseErrorDetail(resp));
     return;
@@ -337,6 +372,7 @@ async function run() {
     liveSymbol = symbol; // captured once - editing the input afterwards
                          // does NOT redirect an already-running poll loop
                          // at a half-typed symbol.
+    document.getElementById('status').textContent = 'connecting… (can take up to a minute on a cold server)';
     await fetchLiveState();
     liveTimer = setInterval(fetchLiveState, 4000);
     return;
@@ -344,8 +380,16 @@ async function run() {
 
   const cycles = document.getElementById('cycles').value;
   const threshold = document.getElementById('threshold').value;
-  document.getElementById('status').textContent = 'running…';
-  const resp = await fetch(`/api/run?source=${source}&symbol=${encodeURIComponent(symbol)}&cycles=${cycles}&threshold=${threshold}`);
+  document.getElementById('status').textContent = 'running… (can take up to a minute on a cold server)';
+  let resp;
+  try {
+    resp = await fetchWithTimeout(
+      `/api/run?source=${source}&symbol=${encodeURIComponent(symbol)}&cycles=${cycles}&threshold=${threshold}`,
+      {}, 45000);
+  } catch (e) {
+    showError(e.message);
+    return;
+  }
   if (!resp.ok) {
     showError(await parseErrorDetail(resp));
     return;
@@ -381,11 +425,17 @@ document.getElementById('liveStart').addEventListener('click', async () => {
   document.getElementById('symbol').value = symbol;
   if (!symbol) { showError('Enter a symbol first, e.g. BTCUSDT.'); return; }
   const threshold = Number(document.getElementById('threshold').value);
-  document.getElementById('status').textContent = 'starting live pipeline…';
-  const resp = await fetch('/api/live/start', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ symbol, threshold }),
-  });
+  document.getElementById('status').textContent = 'starting live pipeline… (can take up to a minute on a cold server)';
+  let resp;
+  try {
+    resp = await fetchWithTimeout('/api/live/start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol, threshold }),
+    }, 45000);
+  } catch (e) {
+    showError(e.message);
+    return;
+  }
   if (!resp.ok) { showError(await parseErrorDetail(resp)); return; }
   run();
 });
@@ -456,8 +506,25 @@ document.getElementById('askAi').addEventListener('click', async () => {
   }
 });
 
+// ---- symbol list (populates the datalist so users pick a real Binance
+// symbol instead of guessing a format). Best-effort: if this fails (e.g.
+// Binance 451-blocked, or the server is still asleep/cold-starting), the
+// symbol field just stays a plain text input - never a hard blocker. ----
+async function loadSymbolList() {
+  try {
+    const resp = await fetchWithTimeout('/api/symbols', {}, 20000);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const listEl = document.getElementById('symbolsList');
+    listEl.innerHTML = data.symbols.map(s => `<option value="${s}"></option>`).join('');
+  } catch (e) {
+    // silently ignore - free-text symbol entry still works
+  }
+}
+
 updateSourceUI();
 run();
+loadSymbolList();
 </script>
 </body>
 </html>

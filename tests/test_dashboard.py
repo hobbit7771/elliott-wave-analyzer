@@ -154,6 +154,44 @@ def test_live_stop_when_not_running():
     assert resp.json()["status"] == "not_running"
 
 
+# ---- symbol list ----
+
+def test_list_symbols_returns_and_caches():
+    server_module._symbols_cache["symbols"] = None
+    server_module._symbols_cache["fetched_at"] = 0.0
+
+    with patch.object(server_module.BinanceFuturesREST, "list_symbols", return_value=["BTCUSDT", "ETHUSDT"]) as mock_list:
+        resp1 = client.get("/api/symbols")
+        assert resp1.status_code == 200
+        assert resp1.json() == {"symbols": ["BTCUSDT", "ETHUSDT"], "cached": False}
+
+        resp2 = client.get("/api/symbols")
+        assert resp2.json()["cached"] is True
+        mock_list.assert_called_once()  # second call served from cache, no second Binance hit
+
+
+def test_list_symbols_surfaces_network_error():
+    server_module._symbols_cache["symbols"] = None
+    server_module._symbols_cache["fetched_at"] = 0.0
+    request = httpx.Request("GET", "https://fapi.binance.com/fapi/v1/exchangeInfo")
+
+    with patch.object(server_module.BinanceFuturesREST, "list_symbols", side_effect=httpx.ConnectError("boom", request=request)):
+        resp = client.get("/api/symbols")
+    assert resp.status_code == 502
+
+
+def test_list_symbols_surfaces_451():
+    server_module._symbols_cache["symbols"] = None
+    server_module._symbols_cache["fetched_at"] = 0.0
+    request = httpx.Request("GET", "https://fapi.binance.com/fapi/v1/exchangeInfo")
+    response = httpx.Response(451, request=request, text="blocked")
+    error = httpx.HTTPStatusError("451", request=request, response=response)
+
+    with patch.object(server_module.BinanceFuturesREST, "list_symbols", side_effect=error):
+        resp = client.get("/api/symbols")
+    assert resp.status_code == 451
+
+
 # ---- AI advisor endpoint ----
 
 def test_ai_advice_requires_key():

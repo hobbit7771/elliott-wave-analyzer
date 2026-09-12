@@ -121,6 +121,20 @@ desktop web page:
   `render.yaml`'s `region` field, or the region picker when creating the
   service manually); this build's own sandbox separately blocks Binance
   entirely regardless of region (see "Known limitations" above).
+- **Symbol picker**: the symbol field is backed by `GET /api/symbols`
+  (cached in-process for an hour), which lists every actively-tradeable
+  Binance USDT-M perpetual futures symbol via `/fapi/v1/exchangeInfo` -
+  type to filter instead of guessing a ticker format. This is best-effort:
+  if it can't reach Binance (451-blocked region, or the free-tier instance
+  is still cold-starting), the field just falls back to plain text entry.
+- **Render free-tier cold starts**: a free Render web service spins down
+  after ~15 minutes with no HTTP traffic and takes up to roughly a minute
+  to wake back up on the next request - this looks exactly like an
+  "infinite connecting" hang if nothing tells you what's happening. Every
+  dashboard request now times out after 45s and shows a message explaining
+  this instead of spinning forever; if you hit it, the fix is just to wait
+  and retry, not to redeploy. A paid Render plan (or pinging the service
+  periodically) avoids the sleep entirely.
 - **AI Advisor tab**: paste your own OpenAI API key (your ChatGPT/OpenAI
   subscription/credits - stored only in your browser's `localStorage`,
   forwarded per-request to `/api/ai/advice` and never written to disk

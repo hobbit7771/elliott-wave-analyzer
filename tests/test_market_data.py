@@ -66,6 +66,25 @@ def test_get_open_interest_parses_value():
     assert client.get_open_interest("BTCUSDT") == 12345.6
 
 
+def test_list_symbols_filters_trading_perpetuals():
+    sample = {
+        "symbols": [
+            {"symbol": "BTCUSDT", "status": "TRADING", "contractType": "PERPETUAL", "quoteAsset": "USDT"},
+            {"symbol": "ETHUSDT", "status": "TRADING", "contractType": "PERPETUAL", "quoteAsset": "USDT"},
+            {"symbol": "DELISTEDUSDT", "status": "BREAK", "contractType": "PERPETUAL", "quoteAsset": "USDT"},
+            {"symbol": "BTCUSDT_240329", "status": "TRADING", "contractType": "CURRENT_QUARTER", "quoteAsset": "USDT"},
+        ]
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/fapi/v1/exchangeInfo"
+        return httpx.Response(200, json=sample)
+
+    client = make_rest_client(handler)
+    symbols = client.list_symbols()
+    assert symbols == ["BTCUSDT", "ETHUSDT"]
+
+
 def test_rest_client_raises_on_http_error():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(451, json={"code": -1121, "msg": "bad symbol"})
