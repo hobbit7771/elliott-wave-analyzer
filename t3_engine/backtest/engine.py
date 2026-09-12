@@ -87,10 +87,14 @@ class BacktestEngine:
         self.adx = ADX()
         self.ema9 = EMA(9)
         self.ema18 = EMA(18)
-        # Every subwave ever built for a confirmed motive wave, keyed the
-        # same way ScenarioEngine.wave_history is (label, start_timestamp)
-        # so the chart can draw them alongside the top-level wave numbers.
-        self.subwave_history: Dict[tuple, object] = {}
+        # Subwaves, grouped under the confirmed-chain wave they belong to.
+        # Keyed by (parent_label, parent_start_timestamp) rather than by
+        # parent wave_id because rebuild() recreates Wave objects (and
+        # therefore ids) on every pivot - label+start is what stays stable
+        # for the same logical wave. Grouping this way is also what makes
+        # pruning possible: when the chain truncates, the subwaves of the
+        # waves it dropped go with them instead of outliving their parent.
+        self.subwaves_by_parent: Dict[tuple, List] = {}
         self._subwaves_attempted: set = set()
 
     def run(self, candles: List[Candle]) -> Dict:
@@ -130,14 +134,33 @@ class BacktestEngine:
             self._update_subwaves(history)
             self._maybe_open_trade(scenarios, direction, candle, index, history)
 
+    @property
+    def subwave_history(self) -> List:
+        """Every subwave currently attached to a wave still in the
+        confirmed chain, oldest first."""
+        flat = [sub for subs in self.subwaves_by_parent.values() for sub in subs]
+        return sorted(flat, key=lambda w: w.start_timestamp)
+
     def _update_subwaves(self, history: List[Candle]) -> None:
-        """Once a motive wave (1/3/5) is archived into wave_history - i.e.
-        the top-level count has already moved past it, so its own start/
-        end are permanently fixed - subdivide it into its own i-ii-iii-iv-v
-        count. Each wave is attempted exactly once (its candle range never
-        changes after archival, so a retry could never produce a different
-        result) whether or not it actually yields a valid count."""
-        for key, wave in list(self.scenario_engine.wave_history.items()):
+        """Subdivide each motive (1/3/5) wave of the confirmed chain into
+        its own i-ii-iii-iv-v count, and drop the subwaves of any wave the
+        chain no longer contains.
+
+        A wave only enters the chain once the top-level count has moved
+        past it, so its candle range is already fixed and the subdivision
+        is a one-shot computation - attempted exactly once per wave. The
+        pruning half matters just as much: when a re-anchor truncates the
+        chain, the subwaves underneath the dropped waves have to go too,
+        or they'd outlive the count they were derived from and become
+        exactly the kind of orphaned label the chain exists to prevent."""
+        chain_keys = {(w.label, w.start_timestamp) for w in self.scenario_engine.confirmed_chain}
+
+        for stale_key in set(self.subwaves_by_parent) - chain_keys:
+            del self.subwaves_by_parent[stale_key]
+        self._subwaves_attempted &= chain_keys
+
+        for wave in self.scenario_engine.confirmed_chain:
+            key = (wave.label, wave.start_timestamp)
             if key in self._subwaves_attempted:
                 continue
             self._subwaves_attempted.add(key)
@@ -147,8 +170,8 @@ class BacktestEngine:
             if len(wave_candles) < _MIN_CANDLES_FOR_SUBWAVES:
                 continue
             built = build_subwaves(wave_candles, wave, self.config.subwave_deviation_pct)
-            for subwave in built["waves"]:
-                self.subwave_history[(subwave.label, subwave.start_timestamp)] = subwave
+            if built["waves"]:
+                self.subwaves_by_parent[key] = built["waves"]
 
     def _update_open_positions(self, candle: Candle) -> None:
         for position_id in list(self.position_manager.positions.keys()):

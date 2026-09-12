@@ -39,12 +39,20 @@ from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from t3_engine.ai_advisor.advisor import AIAdvisorError, request_commentary
+from t3_engine.ai_advisor.advisor import (
+    DEFAULT_MODEL as DEFAULT_GEMINI_MODEL,
+    AIAdvisorError,
+    request_commentary,
+    request_wave_count,
+)
 from t3_engine.backtest.engine import BacktestConfig, BacktestEngine
 from t3_engine.backtest.metrics import compute_metrics, compute_metrics_by_wave
 from t3_engine.backtest.synthetic_data import generate_synthetic_series
 from t3_engine.common.models import Scenario
-from t3_engine.common.types import TRADEABLE_TIMEFRAMES, Timeframe, WaveLabel
+from t3_engine.common.types import TRADEABLE_TIMEFRAMES, Direction, Timeframe, WaveLabel
+from t3_engine.elliott_engine.external_count import ExternalCountRejected, validate_external_count
+from t3_engine.market_structure.pivots import ZigZagPivotDetector
+from t3_engine.market_structure.structure import MarketStructureTracker
 from t3_engine.dashboard.serialization import (
     candle_to_dict,
     pivot_to_dict,
@@ -128,7 +136,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-009"
+BUILD_VERSION = "BUILD-CHECK-010"
 
 
 @app.get("/api/health")
@@ -167,11 +175,14 @@ def list_symbols():
         bybit.close()
 
 
-@app.get("/api/run")
-def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETIC"),
-                  cycles: int = Query(2, ge=1, le=10), threshold: float = Query(60.0, ge=0, le=100),
-                  limit: int = Query(1500, ge=100, le=10000), timeframe: str = Query("5m"),
-                  equity: float = Query(10_000.0, gt=0, le=1_000_000_000)):
+def load_candles(source: str, symbol: str, timeframe: str, limit: int, cycles: int):
+    """Resolve a data request into (candles, symbol, timeframe).
+
+    Shared by /api/run and /api/ai/label so the AI labelling path analyses
+    the EXACT same series - and therefore the exact same server-computed
+    pivots - that the deterministic engine does. If the two loaded data
+    differently, "the server validated the model's indices" would be a
+    claim about a different chart than the one on screen."""
     try:
         tf = Timeframe(timeframe)
     except ValueError:
@@ -197,6 +208,16 @@ def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETI
         candles = generate_synthetic_series(num_cycles=cycles)
         symbol = symbol if symbol != "SYNTHETIC" else "SYNTHETIC-DEMO"
         tf = Timeframe.M5
+
+    return candles, symbol, tf
+
+
+@app.get("/api/run")
+def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETIC"),
+                  cycles: int = Query(2, ge=1, le=10), threshold: float = Query(60.0, ge=0, le=100),
+                  limit: int = Query(1500, ge=100, le=10000), timeframe: str = Query("5m"),
+                  equity: float = Query(10_000.0, gt=0, le=1_000_000_000)):
+    candles, symbol, tf = load_candles(source, symbol, timeframe, limit, cycles)
 
     # "Unlimited capital" (a follow-up request) isn't a real lever in a
     # %-of-equity risk model: risk_per_wave is a FRACTION of equity, so
@@ -239,21 +260,16 @@ def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETI
         # the chart show the whole swing structure leading up to today,
         # not just a handful of numbered waves floating with no context.
         "pivots": [pivot_to_dict(p) for p in engine.pivot_detector.pivots],
-        # Every wave any top-ranked scenario ever confirmed over the whole
-        # run (see ScenarioEngine.wave_history) - lets the chart number
-        # waves across the ENTIRE loaded history, not just the handful the
-        # current/latest scenario happens to still be holding.
-        "wave_history": [
-            wave_to_dict(w) for w in
-            sorted(engine.scenario_engine.wave_history.values(), key=lambda w: w.start_timestamp)
-        ],
-        # Each motive (1/3/5) wave's own i-ii-iii-iv-v subdivision (see
-        # BacktestEngine._update_subwaves / elliott_engine/scenario.py's
-        # build_subwaves) - "waves and subwaves should be accounted for".
-        "subwave_history": [
-            wave_to_dict(w) for w in
-            sorted(engine.subwave_history.values(), key=lambda w: w.start_timestamp)
-        ],
+        # THE single globally consistent chain of confirmed structures (see
+        # ScenarioEngine.confirmed_chain) - at most one wave covers any
+        # given moment, so re-anchoring truncates and re-extends rather
+        # than layering a second contradictory reading over the same
+        # candles. The current, still-developing count is `scenarios[0]`.
+        "confirmed_chain": [wave_to_dict(w) for w in engine.scenario_engine.confirmed_chain],
+        # Each motive (1/3/5) chain wave's own i-ii-iii-iv-v subdivision
+        # (see BacktestEngine._update_subwaves / build_subwaves), pruned
+        # alongside the chain so a subwave never outlives its parent.
+        "subwave_history": [wave_to_dict(w) for w in engine.subwave_history],
         # Fibonacci projection for whichever wave is expected next - see
         # fibonacci_levels_for_scenario for why this is a persistent
         # overlay now, not just an accepted-signal's TP/SL lines.
@@ -356,14 +372,8 @@ def live_state(symbol: str = Query(...), timeframe: str = Query("5m")):
         "scenarios": [scenario_to_dict(s) for s in tf_engine.scenario_engine.scenarios],
         "structure_events": [structure_event_to_dict(e) for e in tf_engine.structure.events],
         "pivots": [pivot_to_dict(p) for p in tf_engine.pivot_detector.pivots],
-        "wave_history": [
-            wave_to_dict(w) for w in
-            sorted(tf_engine.scenario_engine.wave_history.values(), key=lambda w: w.start_timestamp)
-        ],
-        "subwave_history": [
-            wave_to_dict(w) for w in
-            sorted(tf_engine.subwave_history.values(), key=lambda w: w.start_timestamp)
-        ],
+        "confirmed_chain": [wave_to_dict(w) for w in tf_engine.scenario_engine.confirmed_chain],
+        "subwave_history": [wave_to_dict(w) for w in tf_engine.subwave_history],
         "fibonacci_levels": fibonacci_levels_for_scenario(
             tf_engine.scenario_engine.scenarios[0] if tf_engine.scenario_engine.scenarios else None
         ),
@@ -378,16 +388,98 @@ def live_state(symbol: str = Query(...), timeframe: str = Query("5m")):
 
 @app.post("/api/ai/advice")
 def ai_advice(api_key: str = Body(..., embed=True), context: dict = Body(..., embed=True),
-              model: str = Body("gpt-4o-mini", embed=True)):
-    """BYO-key GPT second opinion (spec follow-up: 'подключить мой купленный
-    ChatGPT'). The key is used for exactly one outbound request and never
-    written to disk/DB/logs - see ai_advisor/advisor.py docstring for why
-    this only ever produces commentary, never a trading decision."""
+              model: str = Body(DEFAULT_GEMINI_MODEL, embed=True)):
+    """BYO-key Gemini second opinion. The key is used for exactly one
+    outbound request and never written to disk/DB/logs - see
+    ai_advisor/advisor.py's docstring for why this only ever produces
+    commentary, never a trading decision."""
     try:
         result = request_commentary(api_key, context, model=model)
     except AIAdvisorError as exc:
         raise HTTPException(502, str(exc))
     return {"commentary": result.text, "model": result.model}
+
+
+@app.post("/api/ai/label")
+def ai_label(api_key: str = Body(..., embed=True), source: str = Body("synthetic", embed=True),
+             symbol: str = Body("SYNTHETIC", embed=True), timeframe: str = Body("5m", embed=True),
+             limit: int = Body(1500, embed=True, ge=100, le=10000),
+             cycles: int = Body(2, embed=True, ge=1, le=10),
+             model: str = Body(DEFAULT_GEMINI_MODEL, embed=True)):
+    """AI wave-labelling mode: Gemini proposes a count over the WHOLE
+    loaded history - the one thing the deterministic engine deliberately
+    won't do, since it only ever anchors on recent pivots.
+
+    The model's answer never reaches the chart unchecked. This endpoint
+    recomputes the pivots ITSELF from the same series /api/run uses (via
+    load_candles + the same ZigZag detector and deviation), hands the
+    model only indices into that server-owned list, and then runs whatever
+    comes back through elliott_engine/external_count.py - existence, order,
+    contiguity, alternation, causality, and the same hard Elliott rules the
+    internal engine enforces. A mathematically impossible wave cannot be
+    drawn by this path: it comes back as `valid: false` with the rule it
+    broke, which is a useful answer rather than a silent failure.
+
+    Note what is NOT accepted from the client: pivots. If the caller could
+    supply those, "the server validated the indices" would be a statement
+    about the caller's own data rather than about the chart."""
+    candles, symbol, tf = load_candles(source, symbol, timeframe, limit, cycles)
+
+    config = BacktestConfig(symbol=symbol, degree=tf)
+    detector = ZigZagPivotDetector(deviation_pct=config.pivot_deviation_pct)
+    structure = MarketStructureTracker(min_break_pct=config.structure_min_break_pct)
+    for index, candle in enumerate(candles):
+        found = detector.update(index, candle)
+        if found is not None:
+            structure.on_pivot(found)
+    pivots = detector.pivots
+    direction = structure.trend or Direction.UP
+
+    if len(pivots) < 2:
+        raise HTTPException(
+            422,
+            f"Only {len(pivots)} confirmed swing pivots in this history - not enough to count waves over. "
+            "Load more candles or pick a lower timeframe.",
+        )
+
+    try:
+        proposal = request_wave_count(
+            api_key,
+            [{"index": i, "time": p.timestamp // 1000, "price": p.price, "kind": p.kind}
+             for i, p in enumerate(pivots)],
+            direction.value,
+            model=model,
+        )
+    except AIAdvisorError as exc:
+        raise HTTPException(502, str(exc))
+
+    try:
+        validated = validate_external_count(pivots, proposal.waves, direction, tf)
+    except ExternalCountRejected as exc:
+        # Structurally impossible - not a count at all. 200 with an
+        # explicit rejection rather than a 4xx: the request was fine, the
+        # model's answer wasn't, and the UI needs to say which.
+        return {
+            "valid": False,
+            "rejected": True,
+            "reason": str(exc),
+            "model": proposal.model,
+            "reasoning": proposal.reasoning,
+            "proposed_raw": proposal.waves,
+            "waves": [],
+        }
+
+    return {
+        "valid": validated.valid,
+        "rejected": False,
+        "broken_rule": validated.broken_rule,
+        "reason": validated.notes,
+        "model": proposal.model,
+        "reasoning": proposal.reasoning,
+        "direction": direction.value,
+        "pivot_count": len(pivots),
+        "waves": [wave_to_dict(w) for w in validated.waves],
+    }
 
 
 def dataclass_metrics_to_dict(m) -> dict:

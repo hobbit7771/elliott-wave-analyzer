@@ -70,63 +70,81 @@ def _make_wave(label: WaveLabel, degree: Timeframe, start: Pivot, end: Pivot,
     )
 
 
-def _rescue_as_diagonal(result, waves: List[Wave], wave5: Optional[Wave], direction: Direction) -> bool:
-    """A wave-4/wave-1 overlap is only ever a diagonal, never a plain
-    relabel, per rules_diagonal.py's own docstring: the overlap exception
-    applies ONLY if the leg ALSO satisfies the diagonal-specific
-    contracting/expanding shape rules (D3/D4) - a standard impulse that
-    merely fails the overlap check is still invalidated below if this
-    returns False. Tags all 5 legs DIAGONAL_ENDING on success (the far
-    more common variant per that module's docstring - this engine has no
-    parent-degree context to distinguish a leading vs. ending diagonal, a
-    documented simplification, not a silent guess)."""
-    if result.broken_rule != "WAVE4_OVERLAPS_WAVE1":
-        return False
-    diagonal_result = validate_diagonal(waves[0], waves[1], waves[2], waves[3], wave5, direction)
-    if not diagonal_result.valid:
-        return False
-    for w in waves:
-        w.structure_type = StructureType.DIAGONAL_ENDING
-    return True
+STRUCTURE_IMPULSE = "IMPULSE"
+STRUCTURE_DIAGONAL_CONTRACTING = "DIAGONAL_CONTRACTING"
+STRUCTURE_DIAGONAL_EXPANDING = "DIAGONAL_EXPANDING"
 
 
 def build_candidate_waves(pivots: List[Pivot], direction: Direction, degree: Timeframe,
-                          parent_wave_id: Optional[str] = None, labels: Optional[List[WaveLabel]] = None) -> Dict:
+                          parent_wave_id: Optional[str] = None, labels: Optional[List[WaveLabel]] = None,
+                          structure: str = STRUCTURE_IMPULSE) -> Dict:
     """Build as many labelled waves as `pivots` allows (up to a full
     1-2-3-4-5-A-B-C, or - via `labels=_MICRO_LABELS` from build_subwaves() -
-    a single motive leg's own i-ii-iii-iv-v subdivision), validating
-    impulse hard rules as we go. `pivots[0]` is the anchor (start of the
-    first wave). Returns a dict with the wave list and invalidity info;
-    stops adding waves the instant a hard rule breaks.
+    a single motive leg's own i-ii-iii-iv-v subdivision), validating the
+    hard rules as we go. `pivots[0]` is the anchor (start of the first
+    wave). Returns a dict with the wave list and invalidity info; stops
+    adding waves the instant a hard rule breaks.
 
-    The wave-4/wave-5 hard-rule checks below trigger on POSITION (the 4th
-    and 5th wave built), not on the digit labels themselves, precisely so
-    this same function and the same rules work unchanged for the micro
-    label scheme - a subwave count is held to the identical Elliott rules
-    as the primary count, not a looser cosmetic approximation."""
+    `structure` decides WHICH hard-rule set the motive legs are held to,
+    and it is chosen UP FRONT by the caller, never switched mid-count:
+
+      IMPULSE              -> rules_impulse.validate_impulse. A wave-4
+                              overlap here is fatal, full stop.
+      DIAGONAL_CONTRACTING -> rules_diagonal.validate_diagonal. The
+      DIAGONAL_EXPANDING      overlap exception applies, but ONLY together
+                              with the diagonal's own shape rules (D3/D4).
+
+    An earlier version "rescued" a broken impulse by silently relabelling
+    it a diagonal the moment it failed the overlap rule. That inverted the
+    burden of proof (rules_diagonal.py's own docstring: a diagonal must be
+    PROVEN, not assumed) and let a count that had already failed its rules
+    stay on the chart under a different name. Now a diagonal is a separate,
+    independently-generated hypothesis that has to earn its place against
+    the impulse reading on its own merits - a failed impulse just dies.
+
+    The motive hard-rule checks trigger on POSITION (the 4th and 5th wave
+    built), not on the digit labels themselves, precisely so this same
+    function and the same rules work unchanged for the micro label scheme -
+    a subwave count is held to the identical Elliott rules as the primary
+    count, not a looser cosmetic approximation."""
     waves: List[Wave] = []
     broken_rule = None
+    motive_validated = False
     labels = labels if labels is not None else (_IMPULSE_LABELS + _ABC_LABELS)
+    is_diagonal = structure != STRUCTURE_IMPULSE
+    variant = "EXPANDING" if structure == STRUCTURE_DIAGONAL_EXPANDING else "CONTRACTING"
 
     for i in range(min(len(pivots) - 1, len(labels))):
-        start, end = pivots[i], pivots[i + 1]
         label = labels[i]
+        # A corrective A-B-C only exists as the correction OF something.
+        # Without a motive structure that has already PASSED its own hard
+        # rules underneath it, there is nothing to correct, so these labels
+        # are never appended on spec - previously this held only by
+        # accident (the loop happened to break earlier on a broken motive),
+        # which is not the same as being enforced.
+        if label in _ABC_LABELS and not motive_validated:
+            break
+
+        start, end = pivots[i], pivots[i + 1]
         wave_direction = direction if label in _SAME_DIRECTION_AS_TREND else direction.opposite()
         wave = _make_wave(label, degree, start, end, wave_direction, parent_wave_id)
         waves.append(wave)
 
         if len(waves) == 4:
-            result = validate_impulse(waves[0], waves[1], waves[2], waves[3], None, direction)
+            result = (validate_diagonal(waves[0], waves[1], waves[2], waves[3], None, direction, variant)
+                      if is_diagonal else
+                      validate_impulse(waves[0], waves[1], waves[2], waves[3], None, direction))
             if not result.valid:
-                if not _rescue_as_diagonal(result, waves, None, direction):
-                    broken_rule = result
-                    break
+                broken_rule = result
+                break
         elif len(waves) == 5:
-            result = validate_impulse(waves[0], waves[1], waves[2], waves[3], waves[4], direction)
+            result = (validate_diagonal(waves[0], waves[1], waves[2], waves[3], waves[4], direction, variant)
+                      if is_diagonal else
+                      validate_impulse(waves[0], waves[1], waves[2], waves[3], waves[4], direction))
             if not result.valid:
-                if not _rescue_as_diagonal(result, waves, waves[4], direction):
-                    broken_rule = result
-                    break
+                broken_rule = result
+                break
+            motive_validated = True
         elif label == WaveLabel.C:
             wave_a = next((w for w in waves if w.label == WaveLabel.A), None)
             wave_b = next((w for w in waves if w.label == WaveLabel.B), None)
@@ -136,14 +154,21 @@ def build_candidate_waves(pivots: List[Pivot], direction: Direction, degree: Tim
                 # this engine's fixed 8-label anchor scheme doesn't build
                 # (see build_candidate_waves' `labels`), so those remain
                 # UNKNOWN_CORRECTION for now rather than silently mislabelled.
-                structure = classify_correction([wave_a, wave_b, wave])
+                structure_type = classify_correction([wave_a, wave_b, wave])
                 for w in (wave_a, wave_b, wave):
-                    w.structure_type = structure
+                    w.structure_type = structure_type
 
     if broken_rule is not None:
         waves[-1].status = WaveStatus.INVALIDATED
+    elif is_diagonal:
+        # This engine has no parent-degree context to tell a leading from
+        # an ending diagonal, so it tags the far more common variant rather
+        # than guessing - a documented simplification, not a silent claim.
+        for w in waves[:5]:
+            w.structure_type = StructureType.DIAGONAL_ENDING
 
-    return {"waves": waves, "broken_rule": broken_rule}
+    return {"waves": waves, "broken_rule": broken_rule, "structure": structure,
+            "motive_validated": motive_validated}
 
 
 def build_subwaves(candles: List[Candle], parent_wave: Wave, deviation_pct: float) -> Dict:
@@ -225,21 +250,27 @@ class ScenarioEngine:
     weight_microstructure: float = 0.10
 
     scenarios: List[Scenario] = field(default_factory=list)
-    # `rebuild()` REPLACES `scenarios` from scratch every time (see its own
-    # docstring) - correct for "what's the current best count", but it means
-    # every earlier wave that was ever labelled gets silently thrown away
-    # the moment a new pivot confirms, and a chart built only from
-    # `scenarios` shows numbered waves at the tail of the history with
-    # nothing behind them. This is a running, append-only log of every wave
-    # any TOP-ranked scenario ever confirmed, keyed by (label,
-    # start_timestamp) so re-adding the same wave on a later rebuild (the
-    # common case: the anchor is unchanged and the count just grew one more
-    # wave) is a no-op rather than a duplicate. The CURRENTLY-forming last
-    # wave of the top scenario is deliberately excluded each time - its end
-    # price/time is still provisional until the next pivot confirms it, so
-    # only once a rebuild adds a wave AFTER it does it become final and get
-    # recorded here.
-    wave_history: Dict[tuple, Wave] = field(default_factory=dict)
+    # ONE globally consistent chain of confirmed structures - never an
+    # archive of every local guess.
+    #
+    # `rebuild()` REPLACES `scenarios` from scratch on every new pivot, so
+    # something has to remember what came before or the chart shows numbers
+    # only at the tail. The previous attempt at that was an append-only log
+    # keyed by (label, start_timestamp), which was wrong in a way that only
+    # shows up on a long chart: when the engine re-anchors, the NEW count
+    # disagrees with the old one about the same stretch of time, and both
+    # readings stayed on the chart forever - two contradictory "wave 3"s
+    # over the same candles, accumulating with every re-anchor.
+    #
+    # The invariant now: every point in time is covered by AT MOST ONE
+    # wave. `_extend_confirmed_chain` drops any chain entry the current
+    # reading overlaps before appending that reading's completed waves, so
+    # re-anchoring truncates history back to the divergence point instead
+    # of layering another guess on top of it. The still-forming last wave
+    # of the top scenario is deliberately excluded - its end is provisional
+    # until a later pivot confirms it - so the chain only ever holds waves
+    # whose geometry is already fixed.
+    confirmed_chain: List[Wave] = field(default_factory=list)
     _external_scores: Dict[str, Dict[str, float]] = field(default_factory=dict)
 
     def set_external_scores(self, scenario_id: str, *, price_action: float = 0.0, volume: float = 0.0,
@@ -266,48 +297,90 @@ class ScenarioEngine:
             sub_pivots = pivot_history[anchor_idx:]
             if len(sub_pivots) < 2:
                 continue
-            built = build_candidate_waves(sub_pivots, direction, self.degree)
-            waves = built["waves"]
-            if not waves:
-                continue
-
-            scenario_id = next_id("scenario")
-            invalidated = built["broken_rule"] is not None
-            fib_score = score_fibonacci(waves)
-            ext = self._external_scores.get(scenario_id, {})
-
-            elliott_validity = 0.0 if invalidated else min(1.0, 0.5 + 0.1 * len(waves))
-            scenario = Scenario(
-                scenario_id=scenario_id,
-                degree=self.degree,
-                waves=waves,
-                elliott_validity=elliott_validity,
-                fib_score=fib_score,
-                price_action_score=ext.get("price_action", 0.5),
-                volume_score=ext.get("volume", 0.5),
-                momentum_score=ext.get("momentum", 0.5),
-                microstructure_score=ext.get("microstructure", 0.5),
-                derivatives_score=ext.get("derivatives", 0.5),
-                status=WaveStatus.INVALIDATED if invalidated else WaveStatus.DEVELOPING,
-                invalidation=self._invalidation_level(waves, direction),
-                next_expected_label=_next_label(waves[-1].label) if waves else None,
-            )
-            scenario.probability = 0.0 if invalidated else self._weighted_score(scenario)
-            new_scenarios.append(scenario)
+            # Impulse and diagonal are generated as INDEPENDENT hypotheses
+            # over the same pivots, each validated by its own rule set, and
+            # then left to compete on probability. A diagonal is never a
+            # fallback applied to a count that already failed the impulse
+            # rules (see build_candidate_waves' docstring).
+            for structure in (STRUCTURE_IMPULSE, STRUCTURE_DIAGONAL_CONTRACTING, STRUCTURE_DIAGONAL_EXPANDING):
+                built = build_candidate_waves(sub_pivots, direction, self.degree, structure=structure)
+                scenario = self._score_candidate(built, direction)
+                if scenario is not None:
+                    new_scenarios.append(scenario)
 
         new_scenarios.sort(key=lambda s: s.probability, reverse=True)
-        survivors = [s for s in new_scenarios if s.probability > 0][: self.max_scenarios]
+        survivors = [s for s in new_scenarios if s.probability > 0]
+        survivors = self._drop_duplicate_geometry(survivors)[: self.max_scenarios]
         self._scale_to_percent(survivors)
         self.scenarios = survivors
-        self._record_wave_history(survivors)
+        self._extend_confirmed_chain(survivors)
         return self.scenarios
 
-    def _record_wave_history(self, survivors: List[Scenario]) -> None:
+    def _score_candidate(self, built: Dict, direction: Direction) -> Optional[Scenario]:
+        waves = built["waves"]
+        if not waves:
+            return None
+
+        scenario_id = next_id("scenario")
+        invalidated = built["broken_rule"] is not None
+        fib_score = score_fibonacci(waves)
+        ext = self._external_scores.get(scenario_id, {})
+
+        elliott_validity = 0.0 if invalidated else min(1.0, 0.5 + 0.1 * len(waves))
+        scenario = Scenario(
+            scenario_id=scenario_id,
+            degree=self.degree,
+            waves=waves,
+            elliott_validity=elliott_validity,
+            fib_score=fib_score,
+            price_action_score=ext.get("price_action", 0.5),
+            volume_score=ext.get("volume", 0.5),
+            momentum_score=ext.get("momentum", 0.5),
+            microstructure_score=ext.get("microstructure", 0.5),
+            derivatives_score=ext.get("derivatives", 0.5),
+            status=WaveStatus.INVALIDATED if invalidated else WaveStatus.DEVELOPING,
+            invalidation=self._invalidation_level(waves, direction),
+            next_expected_label=_next_label(waves[-1].label),
+        )
+        scenario.probability = 0.0 if invalidated else self._weighted_score(scenario)
+        return scenario
+
+    @staticmethod
+    def _drop_duplicate_geometry(scenarios: List[Scenario]) -> List[Scenario]:
+        """Until a count reaches its 4th wave, the impulse and diagonal
+        readings of the same pivots are the same lines on the chart (no
+        rule has distinguished them yet). Keeping both would just render
+        one overlay twice and crowd out a genuinely different anchor, so
+        only the highest-scoring reading of any given geometry survives -
+        scenarios are already sorted by probability here."""
+        seen = set()
+        unique = []
+        for s in scenarios:
+            geometry = tuple((w.label, w.start_timestamp, w.end_timestamp) for w in s.waves)
+            if geometry in seen:
+                continue
+            seen.add(geometry)
+            unique.append(s)
+        return unique
+
+    def _extend_confirmed_chain(self, survivors: List[Scenario]) -> None:
+        """Fold the top scenario's already-fixed waves into the single
+        consistent chain, dropping whatever the new reading supersedes.
+
+        Time, not label identity, is what makes this consistent: any chain
+        entry that runs into the stretch the current count now covers is a
+        superseded interpretation of those same candles, so it's removed
+        rather than left to contradict the new one. Entries that end at or
+        before the new count's anchor describe earlier structures the
+        current count says nothing about, and are kept untouched."""
         if not survivors:
             return
-        top = survivors[0]
-        for wave in top.waves[:-1]:
-            self.wave_history[(wave.label, wave.start_timestamp)] = wave
+        completed = survivors[0].waves[:-1]  # last wave's end is still provisional
+        if not completed:
+            return
+        segment_start = completed[0].start_timestamp
+        self.confirmed_chain = [w for w in self.confirmed_chain if w.end_timestamp <= segment_start]
+        self.confirmed_chain.extend(completed)
 
     def _weighted_score(self, s: Scenario) -> float:
         return (
