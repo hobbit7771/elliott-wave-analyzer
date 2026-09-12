@@ -218,6 +218,16 @@ def test_index_exposes_the_ai_labelling_mode():
     assert "/api/ai/label" in resp.text
 
 
+def test_index_lets_the_model_name_be_edited_without_a_redeploy():
+    """Google retires model names for NEW keys while existing ones keep
+    working - gemini-2.5-flash 404'd in production this way. The correct
+    model is a property of whose key it is, not of this deployment, so it
+    has to be editable in the browser."""
+    resp = client.get("/")
+    assert "geminiModel" in resp.text
+    assert server_module.DEFAULT_GEMINI_MODEL in resp.text
+
+
 def test_index_uses_custom_symbol_dropdown_not_native_datalist():
     """Mobile Safari accepts <input list="..."> silently but never
     actually renders the native datalist suggestion popup - a long-
@@ -416,7 +426,7 @@ def test_ai_advice_requires_key():
 def test_ai_advice_success_with_mocked_gemini():
     class FakeResponse:
         text = "Looks like a reasonable wave 3 setup, watch for extension risk."
-        model = "gemini-2.5-flash"
+        model = "gemini-3.6-flash"
         raw = {}
 
     with patch.object(server_module, "request_commentary", return_value=FakeResponse()):
@@ -435,7 +445,7 @@ class _FakeProposal:
     def __init__(self, waves, reasoning="because"):
         self.waves = waves
         self.reasoning = reasoning
-        self.model = "gemini-2.5-flash"
+        self.model = "gemini-3.6-flash"
         self.raw = {}
 
 

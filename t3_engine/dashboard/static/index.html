@@ -147,6 +147,16 @@
       </div>
       <div class="hint">Saved only in this browser (localStorage), never sent anywhere except your own backend.</div>
 
+      <h2>Model</h2>
+      <div class="field-row">
+        <input id="geminiModel" type="text" placeholder="gemini-3.6-flash" />
+      </div>
+      <div class="hint">
+        Editable because Google retires model names for new keys while old keys keep working — if a call
+        comes back <code>404 NOT_FOUND</code>, its message names the current model; paste that here.
+        Saved with the key, no redeploy needed.
+      </div>
+
       <h2>Ask Gemini about the current setup</h2>
       <button class="panel-btn" id="askAi">Ask for a second opinion</button>
       <div class="hint" id="aiStatus"></div>
@@ -717,13 +727,27 @@ document.querySelectorAll('#tabs button').forEach(btn => {
 
 // ---- AI advisor + labelling (BYO Gemini key) ----
 const KEY_STORAGE = 't3_gemini_key';
+const MODEL_STORAGE = 't3_gemini_model';
+const DEFAULT_GEMINI_MODEL = 'gemini-3.6-flash';
+
 function geminiKey() {
   return localStorage.getItem(KEY_STORAGE) || document.getElementById('geminiKey').value.trim();
 }
+// The model name travels with every request rather than being baked into
+// the server: Google retires names for NEW keys while existing ones keep
+// working, so the correct model is a property of whose key it is, not of
+// this deployment.
+function geminiModel() {
+  return document.getElementById('geminiModel').value.trim()
+    || localStorage.getItem(MODEL_STORAGE)
+    || DEFAULT_GEMINI_MODEL;
+}
 document.getElementById('geminiKey').value = localStorage.getItem(KEY_STORAGE) || '';
+document.getElementById('geminiModel').value = localStorage.getItem(MODEL_STORAGE) || DEFAULT_GEMINI_MODEL;
 document.getElementById('saveKey').addEventListener('click', () => {
   localStorage.setItem(KEY_STORAGE, document.getElementById('geminiKey').value.trim());
-  document.getElementById('aiStatus').textContent = 'Key saved in this browser.';
+  localStorage.setItem(MODEL_STORAGE, geminiModel());
+  document.getElementById('aiStatus').textContent = 'Key and model saved in this browser.';
 });
 
 document.getElementById('askAi').addEventListener('click', async () => {
@@ -753,7 +777,7 @@ document.getElementById('askAi').addEventListener('click', async () => {
   try {
     const resp = await fetch('/api/ai/advice', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ api_key: apiKey, context }),
+      body: JSON.stringify({ api_key: apiKey, context, model: geminiModel() }),
     });
     const data = await resp.json();
     if (!resp.ok) { statusEl.textContent = data.detail || 'Request failed.'; return; }
@@ -787,6 +811,7 @@ document.getElementById('askAiLabel').addEventListener('click', async () => {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         api_key: apiKey,
+        model: geminiModel(),
         source,
         symbol: normalizeSymbol(document.getElementById('symbol').value),
         timeframe: document.getElementById('timeframe').value,

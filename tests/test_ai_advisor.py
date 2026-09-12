@@ -64,6 +64,55 @@ def test_request_commentary_raises_on_api_error():
         request_commentary("AIza-bad", {"wave": "3"}, client=make_client(handler))
 
 
+def test_a_retired_model_404_is_passed_through_verbatim_with_a_usable_hint():
+    """This happened in production: gemini-2.5-flash was retired for NEW
+    keys while existing ones kept working, so the call 404'd with Google
+    naming the replacement. The user needs BOTH halves - Google's message
+    (which names the model) and where to put it - so neither may be
+    swallowed into a generic "AI unavailable"."""
+    google_message = ('{"error": {"code": 404, "message": "models/gemini-2.5-flash is no longer available '
+                      'for new users. Please update your code to use models/gemini-3.6-flash", '
+                      '"status": "NOT_FOUND"}}')
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text=google_message)
+
+    with pytest.raises(AIAdvisorError) as excinfo:
+        request_commentary("AIza-test", {"wave": "3"}, model="gemini-2.5-flash",
+                           client=make_client(handler))
+    message = str(excinfo.value)
+    assert "gemini-3.6-flash" in message          # Google's own replacement name survives
+    assert "NOT_FOUND" in message
+    assert "Model field" in message               # and where to act on it
+
+
+def test_auth_and_rate_limit_errors_point_at_the_right_cause():
+    def unauthorized(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="permission denied")
+
+    with pytest.raises(AIAdvisorError, match="Check the API key itself"):
+        request_commentary("AIza-test", {"wave": "3"}, client=make_client(unauthorized))
+
+    def throttled(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, text="quota exceeded")
+
+    with pytest.raises(AIAdvisorError, match="Rate limited"):
+        request_commentary("AIza-test", {"wave": "3"}, client=make_client(throttled))
+
+
+def test_the_model_name_actually_reaches_the_url():
+    """The Model field is only useful if it's what gets called."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        return gemini_text_response("ok")
+
+    request_commentary("AIza-test", {"wave": "3"}, model="gemini-3.6-flash",
+                       client=make_client(handler))
+    assert "models/gemini-3.6-flash:generateContent" in seen["url"]
+
+
 def test_blocked_prompt_surfaces_as_an_error_not_an_empty_answer():
     """A blank second opinion reads as "no concerns", which is the
     opposite of "the call did not work"."""

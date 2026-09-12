@@ -17,7 +17,7 @@
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine, live
 market data from Bybit USDT perpetuals (see "Mobile app + live Bybit"
-below for why Binance was dropped). 209 automated tests, all passing,
+below for why Binance was dropped). 213 automated tests, all passing,
 cover every module described below.
 
 ## Read this first: what "done" means here
@@ -88,7 +88,7 @@ t3_engine/
   ai_advisor/         optional BYO-key Gemini second opinion + AI wave-labelling (never a decision-maker)
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                209 tests, one file per module above
+tests/                213 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Bybit in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -342,6 +342,18 @@ desktop web page:
     See "An external model proposes, the server disposes" below for why
     this is safe to expose at all.
 
+  The **model name is editable in the AI tab** (saved next to the key in
+  `localStorage`) rather than pinned in the code, because Google retires
+  model names for NEW keys while existing keys keep working - the same
+  build can therefore work for one person and 404 for another. This is not
+  hypothetical: `gemini-2.5-flash` was the default until production
+  returned `404 NOT_FOUND` with *"no longer available for new users...
+  update your code to use models/gemini-3.6-flash"*. The default moved to
+  what Google's own error named, and the API's error text is now surfaced
+  verbatim plus a hint pointing at that field - so the next rename is a
+  paste, not a redeploy. The correct model is a property of whose key it
+  is, not of this deployment.
+
 ## The wave-count model: one chain, one current count
 
 Two properties the engine now guarantees, both of them fixes to real bugs
@@ -468,7 +480,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (209 tests)
+# Run the automated test suite (213 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)

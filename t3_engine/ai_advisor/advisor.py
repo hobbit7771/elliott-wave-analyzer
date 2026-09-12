@@ -41,7 +41,14 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-DEFAULT_MODEL = "gemini-2.5-flash"
+# Model names churn, and Google retires them for NEW keys before old ones:
+# `gemini-2.5-flash` returned 404 NOT_FOUND in production with "no longer
+# available for new users... update your code to use models/gemini-3.6-flash".
+# That message is the authority here, not anything hardcoded - which is
+# also why the dashboard lets you edit the model name without a redeploy,
+# and why the API's own error text is surfaced verbatim rather than
+# flattened into "AI unavailable".
+DEFAULT_MODEL = "gemini-3.6-flash"
 API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
 ADVISOR_SYSTEM_PROMPT = (
@@ -100,6 +107,28 @@ def build_contents(system_prompt: str, user_content: str) -> Dict[str, Any]:
     }
 
 
+def _api_error_message(resp: httpx.Response, model: str) -> str:
+    """Pass Google's own error through verbatim, and add the one piece of
+    context it can't know: that this app has a Model field you can edit.
+
+    A 404 here almost always means the model name is stale rather than the
+    key being wrong - Google retires names for NEW keys while existing
+    ones keep working, so the same code can break for one user and not
+    another. Their message names the replacement; the hint tells you where
+    to put it."""
+    detail = resp.text[:400]
+    hint = ""
+    if resp.status_code == 404:
+        hint = (f" | This usually means the model name '{model}' is retired for your key rather than "
+                "anything being wrong with the key. Google's message above names the current model - "
+                "put that name in the dashboard's Model field (AI tab) and try again.")
+    elif resp.status_code in (401, 403):
+        hint = " | Check the API key itself - it may be invalid, revoked, or missing Generative Language API access."
+    elif resp.status_code == 429:
+        hint = " | Rate limited by Google. Wait a moment, or use a model/tier with more quota."
+    return f"Gemini API error {resp.status_code}: {detail}{hint}"
+
+
 def _post(api_key: str, model: str, payload: Dict[str, Any],
           client: Optional[httpx.Client], timeout: float) -> Dict[str, Any]:
     if not api_key:
@@ -114,7 +143,7 @@ def _post(api_key: str, model: str, payload: Dict[str, Any],
             json=payload,
         )
         if resp.status_code != 200:
-            raise AIAdvisorError(f"Gemini API error {resp.status_code}: {resp.text[:300]}")
+            raise AIAdvisorError(_api_error_message(resp, model))
         return resp.json()
     except httpx.RequestError as exc:
         raise AIAdvisorError(f"Could not reach the Gemini API: {exc}")

@@ -28,7 +28,7 @@ class _FakeProposal:
     def __init__(self, waves, reasoning="recorded"):
         self.waves = waves
         self.reasoning = reasoning
-        self.model = "gemini-2.5-flash"
+        self.model = "gemini-3.6-flash"
         self.raw = {}
 
 
