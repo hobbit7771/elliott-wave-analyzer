@@ -95,6 +95,34 @@ def health():
     return {"status": "ok"}
 
 
+# --- symbol list cache: Binance lists ~400 perpetual futures symbols and
+# that list barely changes minute to minute, so we cache it in-process
+# instead of hitting exchangeInfo on every dashboard page load. ---
+_symbols_cache: Dict[str, object] = {"symbols": None, "fetched_at": 0.0}
+_SYMBOLS_CACHE_TTL_SECONDS = 3600.0
+
+
+@app.get("/api/symbols")
+def list_symbols():
+    now = time.time()
+    if _symbols_cache["symbols"] is not None and (now - _symbols_cache["fetched_at"]) < _SYMBOLS_CACHE_TTL_SECONDS:
+        return {"symbols": _symbols_cache["symbols"], "cached": True}
+
+    rest = BinanceFuturesREST()
+    try:
+        symbols = rest.list_symbols()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(exc.response.status_code, binance_error_message(exc))
+    except httpx.RequestError as exc:
+        raise HTTPException(502, f"Could not reach Binance: {exc}")
+    finally:
+        rest.close()
+
+    _symbols_cache["symbols"] = symbols
+    _symbols_cache["fetched_at"] = now
+    return {"symbols": symbols, "cached": False}
+
+
 @app.get("/api/run")
 def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETIC"),
                   cycles: int = Query(2, ge=1, le=10), threshold: float = Query(60.0, ge=0, le=100),
@@ -108,6 +136,8 @@ def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETI
             candles = rest.get_klines(symbol, Timeframe.M5, limit=limit)
         except httpx.HTTPStatusError as exc:
             raise HTTPException(exc.response.status_code, binance_error_message(exc))
+        except httpx.RequestError as exc:
+            raise HTTPException(502, f"Could not reach Binance: {exc}")
         finally:
             rest.close()
     else:

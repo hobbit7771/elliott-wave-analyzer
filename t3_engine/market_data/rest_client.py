@@ -116,3 +116,27 @@ class BinanceFuturesREST:
                                  params={"symbol": symbol, "period": period, "limit": limit})
         resp.raise_for_status()
         return resp.json()
+
+    def get_exchange_info(self) -> dict:
+        resp = self._client.get("/fapi/v1/exchangeInfo")
+        resp.raise_for_status()
+        return resp.json()
+
+    def list_symbols(self, quote_asset: Optional[str] = None, contract_type: str = "PERPETUAL") -> List[str]:
+        """All actively-tradeable USDT-M futures symbols (e.g. BTCUSDT),
+        used to populate the dashboard's symbol picker so users choose from
+        what Binance actually lists instead of guessing a format. Filters
+        to `status == "TRADING"` (delisted/pre-launch symbols excluded) and
+        `contractType == "PERPETUAL"` by default (this app only trades
+        perpetuals, not dated futures)."""
+        info = self.get_exchange_info()
+        symbols = []
+        for s in info.get("symbols", []):
+            if s.get("status") != "TRADING":
+                continue
+            if contract_type and s.get("contractType") != contract_type:
+                continue
+            if quote_asset and s.get("quoteAsset") != quote_asset:
+                continue
+            symbols.append(s["symbol"])
+        return sorted(symbols)
