@@ -128,7 +128,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-008"
+BUILD_VERSION = "BUILD-CHECK-009"
 
 
 @app.get("/api/health")
@@ -170,7 +170,8 @@ def list_symbols():
 @app.get("/api/run")
 def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETIC"),
                   cycles: int = Query(2, ge=1, le=10), threshold: float = Query(60.0, ge=0, le=100),
-                  limit: int = Query(1500, ge=100, le=10000), timeframe: str = Query("5m")):
+                  limit: int = Query(1500, ge=100, le=10000), timeframe: str = Query("5m"),
+                  equity: float = Query(10_000.0, gt=0, le=1_000_000_000)):
     try:
         tf = Timeframe(timeframe)
     except ValueError:
@@ -197,7 +198,16 @@ def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETI
         symbol = symbol if symbol != "SYNTHETIC" else "SYNTHETIC-DEMO"
         tf = Timeframe.M5
 
-    engine = BacktestEngine(BacktestConfig(symbol=symbol, entry_confidence_threshold=threshold, degree=tf))
+    # "Unlimited capital" (a follow-up request) isn't a real lever in a
+    # %-of-equity risk model: risk_per_wave is a FRACTION of equity, so
+    # position sizing, PnL and drawdown all scale proportionally with
+    # whatever `equity` is - a $10k account risking 1% behaves identically
+    # (in R-multiple terms) to a $10M one risking 1%. What "unlimited"
+    # honestly reduces to is "let me start from a much bigger number",
+    # which this exposes directly rather than pretending capital caps were
+    # ever a constraint on the strategy's own logic.
+    engine = BacktestEngine(BacktestConfig(symbol=symbol, initial_equity=equity,
+                                            entry_confidence_threshold=threshold, degree=tf))
     result = engine.run(candles)
 
     metrics = compute_metrics(result["closed_positions"])
@@ -236,6 +246,13 @@ def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETI
         "wave_history": [
             wave_to_dict(w) for w in
             sorted(engine.scenario_engine.wave_history.values(), key=lambda w: w.start_timestamp)
+        ],
+        # Each motive (1/3/5) wave's own i-ii-iii-iv-v subdivision (see
+        # BacktestEngine._update_subwaves / elliott_engine/scenario.py's
+        # build_subwaves) - "waves and subwaves should be accounted for".
+        "subwave_history": [
+            wave_to_dict(w) for w in
+            sorted(engine.subwave_history.values(), key=lambda w: w.start_timestamp)
         ],
         # Fibonacci projection for whichever wave is expected next - see
         # fibonacci_levels_for_scenario for why this is a persistent
@@ -342,6 +359,10 @@ def live_state(symbol: str = Query(...), timeframe: str = Query("5m")):
         "wave_history": [
             wave_to_dict(w) for w in
             sorted(tf_engine.scenario_engine.wave_history.values(), key=lambda w: w.start_timestamp)
+        ],
+        "subwave_history": [
+            wave_to_dict(w) for w in
+            sorted(tf_engine.subwave_history.values(), key=lambda w: w.start_timestamp)
         ],
         "fibonacci_levels": fibonacci_levels_for_scenario(
             tf_engine.scenario_engine.scenarios[0] if tf_engine.scenario_engine.scenarios else None

@@ -70,13 +70,29 @@ class PositionManager:
         if pos is None or pos.closed:
             return None
 
+        # MAE/MFE track the actual adverse/favorable EXCURSION within the
+        # bar - this must stay the raw wick extreme (`price`), unlike the
+        # fill prices below, since its whole purpose is showing how far
+        # price actually moved against/for the trade.
         favorable = (price - pos.entry_price) if pos.side == TradeSide.LONG else (pos.entry_price - price)
         pos.mfe = max(pos.mfe, favorable)
         pos.mae = max(pos.mae, -favorable)
 
         stop_hit = (price <= pos.stop_loss) if pos.side == TradeSide.LONG else (price >= pos.stop_loss)
         if stop_hit:
-            self._close(pos, price, now_ms, "STOP_LOSS")
+            # Fill AT the stop level, not at whatever wick extreme
+            # (candle.low/.high) happened to trigger it. The caller only
+            # ever passes a bar's full high/low - on a wide bar (routine
+            # on 1h/4h, which is exactly what surfaced this: R multiples
+            # of -50 or worse on trades whose intended risk was ~1%) that
+            # extreme can be dramatically further from entry than the
+            # actual stop distance the position was sized against, which
+            # silently turned every stop-out into a much larger loss than
+            # the risk engine ever intended - not "the market was against
+            # us", a bug. This is the standard, conservative backtesting
+            # assumption (a stop order fills at its trigger price) absent
+            # real tick-level gap data to model slippage through it.
+            self._close(pos, pos.stop_loss, now_ms, "STOP_LOSS")
             return "STOP_LOSS"
 
         for tp in pos.take_profits:
@@ -84,7 +100,11 @@ class PositionManager:
                 continue
             tp_hit = (price >= tp.price) if pos.side == TradeSide.LONG else (price <= tp.price)
             if tp_hit:
-                self._partial_close(pos, tp, price, now_ms)
+                # Same reasoning as the stop fill above, symmetrically: fill
+                # AT the take-profit level, not at a wick that happened to
+                # run further - otherwise wins get overstated by the exact
+                # same bug that was overstating losses on stops.
+                self._partial_close(pos, tp, tp.price, now_ms)
                 return f"TP_HIT:{tp.label}"
 
         return None

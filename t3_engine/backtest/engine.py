@@ -38,7 +38,7 @@ from t3_engine.common.types import (
     TRADEABLE_WAVES,
     WaveLabel,
 )
-from t3_engine.elliott_engine.scenario import ScenarioEngine
+from t3_engine.elliott_engine.scenario import ScenarioEngine, build_subwaves
 from t3_engine.execution.paper import PaperExecutionEngine
 from t3_engine.market_structure.pivots import ZigZagPivotDetector
 from t3_engine.market_structure.structure import MarketStructureTracker
@@ -58,6 +58,19 @@ class BacktestConfig:
     structure_min_break_pct: float = 0.05
     entry_confidence_threshold: float = 75.0
     degree: Timeframe = Timeframe.M5
+    # Subwave detection (spec follow-up: "waves and subwaves should be
+    # accounted for") re-runs pivot detection at a FINER deviation than the
+    # primary count over just one motive wave's own candle range - this is
+    # that finer threshold. Half the primary one by default: a subwave is,
+    # by definition, a smaller move than the wave it subdivides.
+    subwave_deviation_pct: float = 0.5
+
+# Only motive waves (1, 3, 5) subdivide into a 5-wave count in Elliott
+# theory - corrective waves (2, 4, A, B, C) subdivide into 3, which this
+# engine doesn't build subwave labels for yet (see WaveLabel's docstring:
+# only i-v micro-labels exist, no micro a-b-c).
+_MOTIVE_LABELS_FOR_SUBWAVES = (WaveLabel.W1, WaveLabel.W3, WaveLabel.W5)
+_MIN_CANDLES_FOR_SUBWAVES = 6  # need at least enough bars for 5 legs' worth of pivots
 
 
 class BacktestEngine:
@@ -74,6 +87,11 @@ class BacktestEngine:
         self.adx = ADX()
         self.ema9 = EMA(9)
         self.ema18 = EMA(18)
+        # Every subwave ever built for a confirmed motive wave, keyed the
+        # same way ScenarioEngine.wave_history is (label, start_timestamp)
+        # so the chart can draw them alongside the top-level wave numbers.
+        self.subwave_history: Dict[tuple, object] = {}
+        self._subwaves_attempted: set = set()
 
     def run(self, candles: List[Candle]) -> Dict:
         for i, candle in enumerate(candles):
@@ -109,7 +127,28 @@ class BacktestEngine:
             self.structure.on_pivot(pivot)
             direction = self.structure.trend or Direction.UP
             scenarios = self.scenario_engine.rebuild(self.pivot_detector.pivots[:index + 1], direction)
+            self._update_subwaves(history)
             self._maybe_open_trade(scenarios, direction, candle, index, history)
+
+    def _update_subwaves(self, history: List[Candle]) -> None:
+        """Once a motive wave (1/3/5) is archived into wave_history - i.e.
+        the top-level count has already moved past it, so its own start/
+        end are permanently fixed - subdivide it into its own i-ii-iii-iv-v
+        count. Each wave is attempted exactly once (its candle range never
+        changes after archival, so a retry could never produce a different
+        result) whether or not it actually yields a valid count."""
+        for key, wave in list(self.scenario_engine.wave_history.items()):
+            if key in self._subwaves_attempted:
+                continue
+            self._subwaves_attempted.add(key)
+            if wave.label not in _MOTIVE_LABELS_FOR_SUBWAVES:
+                continue
+            wave_candles = [c for c in history if wave.start_timestamp <= c.open_time <= wave.end_timestamp]
+            if len(wave_candles) < _MIN_CANDLES_FOR_SUBWAVES:
+                continue
+            built = build_subwaves(wave_candles, wave, self.config.subwave_deviation_pct)
+            for subwave in built["waves"]:
+                self.subwave_history[(subwave.label, subwave.start_timestamp)] = subwave
 
     def _update_open_positions(self, candle: Candle) -> None:
         for position_id in list(self.position_manager.positions.keys()):
