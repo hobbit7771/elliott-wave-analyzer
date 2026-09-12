@@ -201,6 +201,23 @@ def test_index_reloads_when_a_new_service_worker_takes_control():
     assert "controllerchange" in resp.text
 
 
+def test_index_ai_tab_is_wired_to_gemini_not_openai():
+    """The provider swap has to reach the UI too - a page still asking for
+    an sk-... key while the backend talks to Google is a broken feature
+    that looks like a working one."""
+    resp = client.get("/")
+    assert "geminiKey" in resp.text
+    assert "aistudio.google.com" in resp.text
+    assert "openaiKey" not in resp.text
+    assert "sk-..." not in resp.text
+
+
+def test_index_exposes_the_ai_labelling_mode():
+    resp = client.get("/")
+    assert "askAiLabel" in resp.text
+    assert "/api/ai/label" in resp.text
+
+
 def test_index_uses_custom_symbol_dropdown_not_native_datalist():
     """Mobile Safari accepts <input list="..."> silently but never
     actually renders the native datalist suggestion popup - a long-
@@ -396,13 +413,119 @@ def test_ai_advice_requires_key():
     assert resp.status_code == 502
 
 
-def test_ai_advice_success_with_mocked_openai():
+def test_ai_advice_success_with_mocked_gemini():
     class FakeResponse:
         text = "Looks like a reasonable wave 3 setup, watch for extension risk."
-        model = "gpt-4o-mini"
+        model = "gemini-2.5-flash"
         raw = {}
 
     with patch.object(server_module, "request_commentary", return_value=FakeResponse()):
-        resp = client.post("/api/ai/advice", json={"api_key": "sk-test", "context": {"wave": "3"}})
+        resp = client.post("/api/ai/advice", json={"api_key": "AIza-test", "context": {"wave": "3"}})
         assert resp.status_code == 200
         assert "wave 3" in resp.json()["commentary"].lower()
+
+
+# ---- AI labelling endpoint ----
+# The whole design claim here is "the model proposes, the server
+# disposes". These tests mock the model's answer and check what the
+# ENDPOINT does with it - a proposal is only ever as good as the
+# validation standing behind it.
+
+class _FakeProposal:
+    def __init__(self, waves, reasoning="because"):
+        self.waves = waves
+        self.reasoning = reasoning
+        self.model = "gemini-2.5-flash"
+        self.raw = {}
+
+
+def test_ai_label_requires_key():
+    resp = client.post("/api/ai/label", json={"api_key": "", "source": "synthetic", "cycles": 1})
+    assert resp.status_code == 502
+
+
+def test_ai_label_rejects_a_hallucinated_pivot_index_instead_of_drawing_it():
+    """The headline guarantee: an index the model invented cannot become a
+    wave on the chart. It comes back rejected, with a reason."""
+    nonsense = [{"label": "1", "start_pivot_index": 0, "end_pivot_index": 99999}]
+
+    with patch.object(server_module, "request_wave_count", return_value=_FakeProposal(nonsense)):
+        resp = client.post("/api/ai/label", json={"api_key": "AIza-test", "source": "synthetic", "cycles": 2})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["valid"] is False
+    assert data["rejected"] is True
+    assert "does not exist" in data["reason"]
+    assert data["waves"] == []
+
+
+def _first_index_of_kind(pivots, kind):
+    return next(i for i, p in enumerate(pivots) if p["kind"] == kind)
+
+
+def test_ai_label_rejects_a_count_that_breaks_a_hard_elliott_rule():
+    """Structurally well-formed but mathematically impossible: real pivot
+    indices, canonical labels, correct alternation - and an impulse whose
+    wave 2 retraces straight past the start of wave 1. The server rebuilds
+    it from its OWN pivots, the hard rules fire, and the answer is a
+    labelled failure rather than a drawn wave."""
+    def label_five_consecutive(api_key, pivots, direction, model=None):
+        start = _first_index_of_kind(pivots, "HIGH" if direction == "DOWN" else "LOW")
+        return _FakeProposal([
+            {"label": label, "start_pivot_index": start + i, "end_pivot_index": start + i + 1}
+            for i, label in enumerate(["1", "2", "3", "4", "5"])
+        ])
+
+    with patch.object(server_module, "request_wave_count", side_effect=label_five_consecutive):
+        resp = client.post("/api/ai/label", json={"api_key": "AIza-test", "source": "synthetic", "cycles": 2})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["valid"] is False
+    assert data["rejected"] is False          # well-formed input, illegal count
+    assert data["broken_rule"] == "WAVE2_OVER_100_PCT"
+    # The partial waves come back for explanation, but `valid` is what
+    # gates drawing them as a count - it is never True here.
+    assert len(data["waves"]) < 5
+
+
+def test_ai_label_accepts_and_returns_server_built_waves_for_a_legal_count():
+    """On the happy path the waves handed back are built from the
+    server's pivots - the model supplied indices, never prices."""
+    captured = {}
+
+    def label_from_real_pivots(api_key, pivots, direction, model=None):
+        captured["pivots"] = pivots
+        captured["direction"] = direction
+        start = _first_index_of_kind(pivots, "HIGH" if direction == "DOWN" else "LOW")
+        return _FakeProposal([{"label": "1", "start_pivot_index": start, "end_pivot_index": start + 1}])
+
+    with patch.object(server_module, "request_wave_count", side_effect=label_from_real_pivots):
+        resp = client.post("/api/ai/label", json={"api_key": "AIza-test", "source": "synthetic", "cycles": 2})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["rejected"] is False
+    assert data["valid"] is True
+    assert len(data["waves"]) == 1
+    # The model was handed indices into the server's own pivot list.
+    assert captured["pivots"][0]["index"] == 0
+    assert set(captured["pivots"][0]) == {"index", "time", "price", "kind"}
+    # And the wave's prices came back from those pivots, not from the model.
+    start = _first_index_of_kind(captured["pivots"], "HIGH" if captured["direction"] == "DOWN" else "LOW")
+    assert data["waves"][0]["start_price"] == captured["pivots"][start]["price"]
+
+
+def test_ai_label_never_takes_pivots_from_the_caller():
+    """If the client could supply pivots, "the server validated the
+    indices" would be a claim about the caller's data, not the chart.
+    Client-sent pivots must be ignored outright."""
+    def echo_pivot_count(api_key, pivots, direction, model=None):
+        return _FakeProposal([{"label": "1", "start_pivot_index": 0, "end_pivot_index": 1}],
+                             reasoning=f"saw {len(pivots)} pivots")
+
+    with patch.object(server_module, "request_wave_count", side_effect=echo_pivot_count):
+        resp = client.post("/api/ai/label", json={
+            "api_key": "AIza-test", "source": "synthetic", "cycles": 2,
+            "pivots": [{"index": 0, "price": 1.0, "kind": "LOW"}],  # attacker-supplied, must be ignored
+        })
+    assert resp.status_code == 200
+    assert "saw 1 pivots" not in resp.json()["reasoning"]

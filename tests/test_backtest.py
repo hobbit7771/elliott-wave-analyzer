@@ -31,17 +31,37 @@ def test_backtest_never_opens_trades_on_a_non_tradeable_timeframe():
 
 def test_backtest_engine_builds_subwave_history_for_motive_waves():
     """Spec follow-up: "waves and subwaves should be accounted for". Once
-    a motive (1/3/5) wave is archived into ScenarioEngine.wave_history,
-    BacktestEngine._update_subwaves should have subdivided it into its own
-    i-ii-iii-iv-v count over that wave's own candle range - the full
-    end-to-end wiring, not just the isolated build_subwaves() unit."""
+    a motive (1/3/5) wave joins the confirmed chain, _update_subwaves
+    should have subdivided it into its own i-ii-iii-iv-v count over that
+    wave's own candle range - the full end-to-end wiring, not just the
+    isolated build_subwaves() unit."""
     candles = generate_synthetic_series(num_cycles=2)
     engine = BacktestEngine(BacktestConfig(symbol="TESTUSDT", entry_confidence_threshold=50.0))
     engine.run(candles)
-    assert len(engine.scenario_engine.wave_history) > 0  # sanity: the primary count did confirm waves
-    for (label, _start_ts), subwave in engine.subwave_history.items():
-        assert label == subwave.label
+    assert len(engine.scenario_engine.confirmed_chain) > 0  # sanity: the primary count did confirm waves
+    for subwave in engine.subwave_history:
         assert subwave.parent_wave_id is not None
+
+
+def test_subwaves_never_outlive_the_chain_wave_they_belong_to():
+    """A subwave is only meaningful as a subdivision OF its parent. When a
+    re-anchor truncates the confirmed chain, the subwaves under the waves
+    it dropped must be pruned with them - otherwise they'd hang on the
+    chart as orphaned i-ii-iii labels under a count that no longer
+    exists, which is the same class of bug the chain replaced."""
+    candles = generate_synthetic_series(num_cycles=2)
+    engine = BacktestEngine(BacktestConfig(symbol="TESTUSDT", entry_confidence_threshold=50.0))
+    engine.run(candles)
+
+    chain_keys = {(w.label, w.start_timestamp) for w in engine.scenario_engine.confirmed_chain}
+    assert set(engine.subwaves_by_parent).issubset(chain_keys)
+
+    # Force a truncation: drop the chain entirely and re-run the pruning
+    # pass - every subwave must go with it.
+    engine.scenario_engine.confirmed_chain = []
+    engine._update_subwaves(candles)
+    assert engine.subwaves_by_parent == {}
+    assert engine.subwave_history == []
 
 
 def test_backtester_rejects_unclosed_candles():

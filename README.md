@@ -17,7 +17,7 @@
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine, live
 market data from Bybit USDT perpetuals (see "Mobile app + live Bybit"
-below for why Binance was dropped). 169 automated tests, all passing,
+below for why Binance was dropped). 209 automated tests, all passing,
 cover every module described below.
 
 ## Read this first: what "done" means here
@@ -85,10 +85,10 @@ t3_engine/
   pipeline/           live_loop.py - the section-20 event-driven real-time orchestrator
   dashboard/           FastAPI backend + static/index.html (lightweight-charts UI),
                       PWA manifest/service worker, live-pipeline start/stop/state endpoints
-  ai_advisor/         optional BYO-key GPT second-opinion commentary (never a decision-maker)
+  ai_advisor/         optional BYO-key Gemini second opinion + AI wave-labelling (never a decision-maker)
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                169 tests, one file per module above
+tests/                209 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Bybit in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -327,13 +327,89 @@ desktop web page:
   import time so every module's logger actually reaches stdout. This is
   exactly what surfaced the Bybit fallback working in production (see the
   first bullet above).
-- **AI Advisor tab**: paste your own OpenAI API key (your ChatGPT/OpenAI
-  subscription/credits - stored only in your browser's `localStorage`,
-  forwarded per-request to `/api/ai/advice` and never written to disk
-  server-side, see `ai_advisor/advisor.py`). It asks GPT for a skeptical
-  second opinion on the current scenario/signal in plain text. This is
-  strictly advisory: GPT can never accept/reject a trade or move a stop -
-  the rule-based engine already made that call before GPT ever sees it.
+- **AI tab (Gemini, BYO key)**: paste your own Google AI Studio key (free
+  at `aistudio.google.com/apikey` - stored only in your browser's
+  `localStorage`, forwarded per-request and never written to disk
+  server-side, see `ai_advisor/advisor.py`). Two separate features, with
+  deliberately different amounts of trust:
+  - **Second opinion** (`/api/ai/advice`): a skeptical plain-text critique
+    of the current scenario/signal. Strictly advisory - it can never
+    accept/reject a trade or move a stop; the rule-based engine already
+    made that call before the model ever sees it.
+  - **AI wave labelling** (`/api/ai/label`): the model proposes a count
+    across the WHOLE loaded history - the one thing the deterministic
+    engine deliberately won't do, since it only anchors on recent pivots.
+    See "An external model proposes, the server disposes" below for why
+    this is safe to expose at all.
+
+## The wave-count model: one chain, one current count
+
+Two properties the engine now guarantees, both of them fixes to real bugs
+rather than features:
+
+**History is a single consistent chain, not an archive of guesses.** An
+earlier version kept every wave label it had ever produced, keyed by
+(label, start time). That sounds harmless and isn't: when the engine
+re-anchors - which it does constantly, since `ScenarioEngine.rebuild()`
+regenerates candidates from the most recent pivots - the new count
+disagrees with the old one about the same stretch of candles, and BOTH
+readings stayed on the chart forever. Old, incompatible 1/2/3/4/5s piled
+up with every re-anchor. `confirmed_chain` replaces it with one invariant:
+**at most one wave may cover any given moment**. A new reading supersedes
+whatever it overlaps (truncate back to the divergence point, then extend),
+so the chart shows one coherent history plus one current count, and
+`tests/test_scenario_engine.py` asserts the no-overlap property directly.
+Subwaves are pruned with their parent, so an `i-ii-iii` can never outlive
+the wave it subdivides.
+
+**A failed impulse dies; it is not relabelled.** `rules_diagonal.py` has
+always said a diagonal must be PROVEN, not assumed - but the engine used
+to "rescue" any impulse that broke the wave-4 overlap rule by silently
+retagging it a diagonal, which inverts exactly that burden of proof. Now
+impulse and diagonal are independent hypotheses generated over the same
+pivots, each validated by its own rule set, competing on probability. A
+broken impulse is simply invalid. Diagonals are still detected - as
+diagonals, on their own merits. In the same spirit, A-B-C labels are now
+only ever appended on top of a motive count that has already PASSED its
+hard rules; before, that held by accident of control flow rather than by
+rule.
+
+## An external model proposes, the server disposes
+
+AI labelling is useful precisely because a language model will read the
+whole history at once. It is also completely untrusted: models routinely
+return pivot indices that don't exist, waves that run backwards, or a
+"1-2-3-4-5" whose wave 4 sits deep inside wave 1.
+
+So the model never sends prices, labels-with-coordinates, or anything
+drawable. It sends **indices into a pivot list the server computed
+itself** (`/api/ai/label` recomputes pivots from the same series `/api/run`
+uses - client-supplied pivots are ignored outright, or "the server
+validated the indices" would be a claim about the caller's data rather
+than about the chart). Everything that comes back goes through
+`elliott_engine/external_count.py`, which checks, in order:
+
+1. shape (a list of at most 8 legs);
+2. canonical labels 1,2,3,4,5[,A,B,C] - no skipping, reordering or
+   inventing, and no A-B-C without a full 1-5 in front of it;
+3. indices that exist, run forward, and chain end-to-start (a count is one
+   continuous structure, not disjoint fragments);
+4. **causality** - every referenced pivot must have been confirmed at or
+   before the caller's cutoff candle, so the external path cannot
+   reintroduce the lookahead the rest of the engine is built to prevent;
+5. alternation (each leg runs HIGH→LOW or LOW→HIGH, and leg 1 starts on
+   the kind the trend requires);
+6. the same hard Elliott rules as an internal count - by calling the same
+   `build_candidate_waves()`, not a second copy of the rules that could
+   drift from it.
+
+A structurally impossible proposal is rejected outright; a well-formed but
+rule-breaking one comes back with the rule it broke, which is a useful
+answer ("you can connect those pivots, but that is not a legal impulse")
+rather than a silent failure. Only a validated count is ever drawn, in its
+own colour so it can't be mistaken for the engine's own conclusion.
+`tests/test_external_count.py` is written from the attacker's side: each
+test is a shape of nonsense a model realistically returns.
 
 ## Deploying to Render
 
@@ -353,9 +429,9 @@ desktop web page:
    trade history that persists, add a Render Postgres instance and set
    `T3_DATABASE_URL` to its connection string (see `.env.example`).
 4. Nothing here needs a Bybit API key (market data is public). If you
-   later want the AI Advisor tab to work, you (or your users) just paste
-   an OpenAI key into the browser - no server-side config needed for that
-   either.
+   later want the AI tab to work, you (or your users) just paste a Gemini
+   key into the browser - no server-side config needed for that either,
+   and the deterministic path runs fully without one.
 
 ### Troubleshooting: "Exited with status 1 while building your code" /
 ### "Build aborted: the NumPy Cython headers require Cython 3.0.0 or newer"
@@ -392,7 +468,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (169 tests)
+# Run the automated test suite (209 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)

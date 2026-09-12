@@ -135,21 +135,34 @@
     </div>
     <div id="tab-ai" style="display:none;">
       <div class="note">
-        Bring your own OpenAI API key (your ChatGPT/OpenAI subscription). It is sent directly to the backend
-        for this one request only, forwarded to OpenAI, and never stored server-side — see
-        <code>ai_advisor/advisor.py</code>. GPT only gives a second opinion in plain text; it can never
-        override the rule-based engine's accept/reject decision.
+        Bring your own Gemini API key (free at <code>aistudio.google.com/apikey</code>). It is sent to your own
+        backend for one request at a time, forwarded to Google, and never stored server-side — see
+        <code>ai_advisor/advisor.py</code>. Gemini can give a second opinion and propose a wave count;
+        it can never override the rule-based engine's accept/reject decision.
       </div>
-      <h2>OpenAI API key</h2>
+      <h2>Gemini API key</h2>
       <div class="field-row">
-        <input id="openaiKey" type="password" placeholder="sk-..." />
+        <input id="geminiKey" type="password" placeholder="AIza..." />
         <button class="panel-btn" id="saveKey">Save</button>
       </div>
       <div class="hint">Saved only in this browser (localStorage), never sent anywhere except your own backend.</div>
-      <h2>Ask GPT about the current setup</h2>
-      <button class="panel-btn" id="askAi">Ask GPT for a second opinion</button>
+
+      <h2>Ask Gemini about the current setup</h2>
+      <button class="panel-btn" id="askAi">Ask for a second opinion</button>
       <div class="hint" id="aiStatus"></div>
       <div class="signal" id="ai-answer" style="margin-top:10px; display:none;"></div>
+
+      <h2>AI wave labelling</h2>
+      <div class="note">
+        Gemini proposes a count across the whole loaded history — the one thing the deterministic engine
+        deliberately won't do, since it only anchors on recent pivots. The model only ever names
+        <em>pivot indices</em>; the server recomputes those pivots itself and re-checks existence, order,
+        contiguity, alternation, causality and the hard Elliott rules before anything is drawn. A
+        mathematically impossible wave comes back rejected, with the rule it broke.
+      </div>
+      <button class="panel-btn" id="askAiLabel">Propose a count for this history</button>
+      <div class="hint" id="aiLabelStatus"></div>
+      <div class="signal" id="ai-label-answer" style="margin-top:10px; display:none;"></div>
     </div>
   </div>
 </div>
@@ -192,6 +205,11 @@ const candleSeries = chart.addCandlestickSeries({
 let overlayLines = [];
 let lastData = null;
 let liveTimer = null;
+// The AI labelling mode's current count, and ONLY ever one the server
+// validated (see the AI tab's handler). Declared up here with the rest of
+// the chart state because applyChartData draws it - a proposal that was
+// rejected leaves this empty, so nothing unvalidated can be on screen.
+let aiLabelWaves = [];
 
 function clearOverlays() {
   overlayLines.forEach(s => s.removeSeries ? s.removeSeries() : chart.removeSeries(s));
@@ -213,6 +231,27 @@ function drawStructureZigzag(pivots) {
   });
   series.setData(pivots.map(p => ({ time: p.time, value: p.price })));
   overlayLines.push(series);
+}
+
+// A wave count proposed by the AI labelling mode and ALREADY validated
+// server-side (existence, order, contiguity, alternation, causality, hard
+// Elliott rules - see elliott_engine/external_count.py). Drawn dashed and
+// in its own colour because it is a second opinion over the whole
+// history, not the deterministic engine's own count - the two must never
+// be mistaken for each other on the chart.
+function drawAiCount(waves) {
+  if (!waves || !waves.length) return;
+  waves.forEach(w => {
+    const series = chart.addLineSeries({
+      color: '#e879f9', lineWidth: 2, lineStyle: 2,
+      lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false,
+    });
+    series.setData([
+      { time: w.start_time, value: w.start_price },
+      { time: w.end_time, value: w.end_price },
+    ]);
+    overlayLines.push(series);
+  });
 }
 
 function drawWaves(waves) {
@@ -270,7 +309,7 @@ const MAX_STRUCTURE_MARKERS = 30;
 // long session would otherwise choke the chart's marker rendering.
 const MAX_WAVE_LABELS = 500;
 
-function markers(events, scenarios, waveHistory, subwaveHistory) {
+function markers(events, scenarios, confirmedChain, subwaveHistory) {
   const m = [];
   events.slice(-MAX_STRUCTURE_MARKERS).forEach(e => {
     m.push({ time: e.time, position: e.direction === 'UP' ? 'belowBar' : 'aboveBar',
@@ -278,12 +317,19 @@ function markers(events, scenarios, waveHistory, subwaveHistory) {
              text: e.kind });
   });
 
-  // Every wave any top-ranked scenario ever confirmed across the WHOLE
-  // history (backend: ScenarioEngine.wave_history), plus the current
-  // scenario's own (possibly still-forming) waves - deduped by
-  // label+start_time so the still-open tail wave isn't drawn twice once
-  // it's later archived into wave_history. This is what numbers waves
-  // throughout the chart instead of only at the very end.
+  // TWO things get numbered, and only two: the single globally consistent
+  // chain of confirmed structures (backend: ScenarioEngine.confirmed_chain,
+  // where at most one wave covers any given moment), and the current
+  // count's own still-developing waves on top of it. Deduped by
+  // label+start_time because the current count's already-fixed waves are
+  // in the chain too.
+  //
+  // This replaced an append-only archive of every label the engine ever
+  // considered, which left contradictory readings of the same candles on
+  // the chart forever - each re-anchor added another "wave 3" over a
+  // stretch that already had one. The backend now supersedes by time
+  // instead of accumulating, so nothing here has to guess which of two
+  // conflicting labels is the live one.
   const seen = new Set();
   const waveLabels = [];
   const addWave = w => {
@@ -292,7 +338,7 @@ function markers(events, scenarios, waveHistory, subwaveHistory) {
     seen.add(key);
     waveLabels.push(w);
   };
-  (waveHistory || []).forEach(addWave);
+  (confirmedChain || []).forEach(addWave);
   scenarios.forEach(sc => sc.waves.forEach(addWave));
   waveLabels.sort((a, b) => a.end_time - b.end_time);
   waveLabels.slice(-MAX_WAVE_LABELS).forEach(w => {
@@ -466,9 +512,14 @@ function applyChartData(data) {
   // than as useful alternative counts.
   const primary = data.scenarios && data.scenarios[0];
   if (primary) drawWaves(primary.waves);
+  // A server-VALIDATED AI count, if one has been accepted, drawn in its
+  // own colour so it never reads as the engine's own conclusion. An
+  // unvalidated or rejected proposal never gets here - aiLabelWaves is
+  // only ever filled from a response whose `valid` was true.
+  drawAiCount(aiLabelWaves);
   drawTradeLevels(data.signals);
   drawFibonacciLevels(data.fibonacci_levels);
-  markers(data.structure_events || [], primary ? [primary] : [], data.wave_history || [], data.subwave_history || []);
+  markers(data.structure_events || [], primary ? [primary] : [], data.confirmed_chain || [], data.subwave_history || []);
   if (shouldFitOnNextData) {
     chart.timeScale().fitContent();
     shouldFitOnNextData = false;
@@ -664,19 +715,22 @@ document.querySelectorAll('#tabs button').forEach(btn => {
   });
 });
 
-// ---- AI advisor (BYO OpenAI key) ----
-const KEY_STORAGE = 't3_openai_key';
-document.getElementById('openaiKey').value = localStorage.getItem(KEY_STORAGE) || '';
+// ---- AI advisor + labelling (BYO Gemini key) ----
+const KEY_STORAGE = 't3_gemini_key';
+function geminiKey() {
+  return localStorage.getItem(KEY_STORAGE) || document.getElementById('geminiKey').value.trim();
+}
+document.getElementById('geminiKey').value = localStorage.getItem(KEY_STORAGE) || '';
 document.getElementById('saveKey').addEventListener('click', () => {
-  localStorage.setItem(KEY_STORAGE, document.getElementById('openaiKey').value.trim());
+  localStorage.setItem(KEY_STORAGE, document.getElementById('geminiKey').value.trim());
   document.getElementById('aiStatus').textContent = 'Key saved in this browser.';
 });
 
 document.getElementById('askAi').addEventListener('click', async () => {
-  const apiKey = localStorage.getItem(KEY_STORAGE) || document.getElementById('openaiKey').value.trim();
+  const apiKey = geminiKey();
   const statusEl = document.getElementById('aiStatus');
   const answerEl = document.getElementById('ai-answer');
-  if (!apiKey) { statusEl.textContent = 'Enter and save your OpenAI API key first.'; return; }
+  if (!apiKey) { statusEl.textContent = 'Enter and save your Gemini API key first.'; return; }
   if (!lastData) { statusEl.textContent = 'Run an analysis first.'; return; }
 
   const primary = lastData.scenarios[0];
@@ -694,7 +748,7 @@ document.getElementById('askAi').addEventListener('click', async () => {
     } : null,
   };
 
-  statusEl.textContent = 'Asking GPT…';
+  statusEl.textContent = 'Asking Gemini…';
   answerEl.style.display = 'none';
   try {
     const resp = await fetch('/api/ai/advice', {
@@ -707,7 +761,64 @@ document.getElementById('askAi').addEventListener('click', async () => {
     answerEl.style.display = '';
     answerEl.textContent = data.commentary;
   } catch (e) {
-    statusEl.textContent = 'Network error asking GPT.';
+    statusEl.textContent = 'Network error asking Gemini.';
+  }
+});
+
+// AI wave labelling. The server owns the pivots and the rules - this only
+// asks, renders whatever survived validation, and says plainly when a
+// proposal was thrown out (and why). A rejected count draws nothing.
+document.getElementById('askAiLabel').addEventListener('click', async () => {
+  const apiKey = geminiKey();
+  const statusEl = document.getElementById('aiLabelStatus');
+  const answerEl = document.getElementById('ai-label-answer');
+  if (!apiKey) { statusEl.textContent = 'Enter and save your Gemini API key first.'; return; }
+
+  const source = document.getElementById('source').value;
+  if (source === 'live') {
+    statusEl.textContent = 'Switch to Synthetic or Bybit (history) - labelling runs over a loaded history, not a live stream.';
+    return;
+  }
+
+  statusEl.textContent = 'Asking Gemini for a count over the whole history…';
+  answerEl.style.display = 'none';
+  try {
+    const resp = await fetchWithTimeout('/api/ai/label', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_key: apiKey,
+        source,
+        symbol: normalizeSymbol(document.getElementById('symbol').value),
+        timeframe: document.getElementById('timeframe').value,
+        limit: Number(document.getElementById('limit').value),
+        cycles: Number(document.getElementById('cycles').value),
+      }),
+    }, 90000);
+    const data = await resp.json();
+    if (!resp.ok) { statusEl.textContent = data.detail || 'Request failed.'; return; }
+
+    answerEl.style.display = '';
+    if (data.valid) {
+      aiLabelWaves = data.waves;
+      statusEl.textContent = `Accepted: ${data.waves.length} waves passed server validation.`;
+      answerEl.innerHTML = `<div class="row"><span class="k">Count</span><span class="v">`
+        + `${data.waves.map(w => w.label).join(' → ')}</span></div>`
+        + `<div class="row"><span class="k">Model</span><span class="v">${data.model}</span></div>`
+        + `<div class="row"><span class="k">Reasoning</span><span class="v" style="text-align:left;max-width:200px;">`
+        + `${data.reasoning || '—'}</span></div>`;
+      if (lastData) applyChartData(lastData);  // redraw with the AI overlay on top
+    } else {
+      aiLabelWaves = [];
+      const why = data.rejected
+        ? `Rejected before any rule check: ${data.reason}`
+        : `Broke a hard Elliott rule (${data.broken_rule}): ${data.reason || ''}`;
+      statusEl.textContent = 'Not drawn - the proposal did not survive validation.';
+      answerEl.innerHTML = `<div class="row"><span class="k">Model</span><span class="v">${data.model}</span></div>`
+        + `<div class="row"><span class="k">Why</span><span class="v" style="text-align:left;max-width:200px;">${why}</span></div>`;
+      if (lastData) applyChartData(lastData);
+    }
+  } catch (e) {
+    statusEl.textContent = e.message || 'Network error asking Gemini.';
   }
 });
 

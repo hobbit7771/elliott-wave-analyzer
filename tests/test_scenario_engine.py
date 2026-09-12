@@ -1,7 +1,12 @@
 from t3_engine.backtest.synthetic_data import generate_synthetic_impulse_cycle
 from t3_engine.common.models import Pivot, Wave
 from t3_engine.common.types import Direction, StructureType, Timeframe, WaveLabel, WaveStatus
-from t3_engine.elliott_engine.scenario import ScenarioEngine, build_candidate_waves, build_subwaves
+from t3_engine.elliott_engine.scenario import (
+    STRUCTURE_DIAGONAL_CONTRACTING,
+    ScenarioEngine,
+    build_candidate_waves,
+    build_subwaves,
+)
 
 
 def pivot(i, price, kind):
@@ -56,15 +61,16 @@ def test_scenario_engine_rebuild_produces_top3_or_fewer():
         assert scenarios[0].probability >= scenarios[1].probability
 
 
-def test_scenario_engine_accumulates_wave_history_across_rebuilds():
-    """rebuild() REPLACES `scenarios` from scratch every call (see its
-    docstring) - fine for "what's the current best count", but on its own
-    it means the chart only ever shows numbered waves at the tail of the
-    history, with every earlier wave silently discarded the moment a new
-    pivot confirms. `wave_history` is the fix: each wave the top scenario
-    ever confirms (i.e. is no longer its still-forming last wave) should
-    stay recorded permanently, so the chart can number waves across the
-    WHOLE history, not just the latest handful."""
+def _chain_keys(engine):
+    return [(w.label.value, w.start_timestamp) for w in engine.confirmed_chain]
+
+
+def test_confirmed_chain_grows_as_waves_stop_being_provisional():
+    """rebuild() REPLACES `scenarios` from scratch every call - fine for
+    "what's the current best count", but on its own the chart only ever
+    shows numbers at the tail. The confirmed chain carries the rest: each
+    wave enters it once it is no longer the still-forming last wave, so
+    its geometry is already fixed."""
     engine = ScenarioEngine(degree=Timeframe.M5)
     pivots = [
         pivot(0, 100, "LOW"),
@@ -76,21 +82,48 @@ def test_scenario_engine_accumulates_wave_history_across_rebuilds():
     ]
 
     engine.rebuild(pivots[:4], Direction.UP)  # builds W1, W2, W3(forming)
-    assert set(engine.wave_history.keys()) == {("1", pivots[0].timestamp), ("2", pivots[1].timestamp)}
+    assert _chain_keys(engine) == [("1", pivots[0].timestamp), ("2", pivots[1].timestamp)]
 
-    engine.rebuild(pivots[:5], Direction.UP)  # builds W1..W4(forming) - W3 now confirmed
-    assert set(engine.wave_history.keys()) == {
-        ("1", pivots[0].timestamp), ("2", pivots[1].timestamp), ("3", pivots[2].timestamp),
-    }
+    engine.rebuild(pivots[:5], Direction.UP)  # W1..W4(forming) - W3 now fixed
+    assert _chain_keys(engine) == [("1", pivots[0].timestamp), ("2", pivots[1].timestamp),
+                                   ("3", pivots[2].timestamp)]
 
-    engine.rebuild(pivots, Direction.UP)  # full W1..W5(forming) - W4 now confirmed too
-    assert set(engine.wave_history.keys()) == {
-        ("1", pivots[0].timestamp), ("2", pivots[1].timestamp),
-        ("3", pivots[2].timestamp), ("4", pivots[3].timestamp),
-    }
-    # Never discarded once recorded, even though `scenarios` itself just
-    # got replaced again on this very call.
-    assert engine.wave_history[("1", pivots[0].timestamp)].start_price == 100
+    engine.rebuild(pivots, Direction.UP)  # W1..W5(forming) - W4 now fixed too
+    assert _chain_keys(engine) == [("1", pivots[0].timestamp), ("2", pivots[1].timestamp),
+                                   ("3", pivots[2].timestamp), ("4", pivots[3].timestamp)]
+    assert engine.confirmed_chain[0].start_price == 100
+
+
+def test_confirmed_chain_is_time_consistent_never_two_labels_over_one_stretch():
+    """The bug this replaced: history used to be an append-only archive
+    keyed by (label, start_timestamp), so when the engine re-anchored, the
+    OLD reading of a stretch of candles and the NEW one both stayed on the
+    chart forever - contradictory counts piling up with every re-anchor.
+    The chain must instead supersede: at most one wave may cover any given
+    moment, so re-anchoring truncates back to the divergence point."""
+    engine = ScenarioEngine(degree=Timeframe.M5)
+    first_read = [
+        pivot(0, 100, "LOW"), pivot(1, 150, "HIGH"), pivot(2, 120, "LOW"),
+        pivot(3, 250, "HIGH"), pivot(4, 200, "LOW"),
+    ]
+    engine.rebuild(first_read, Direction.UP)
+    assert engine.confirmed_chain, "sanity: the first reading populated the chain"
+
+    # A later, differently-anchored reading covering the SAME stretch: the
+    # count now starts at pivot 2 instead of pivot 0.
+    second_read = [
+        pivot(2, 120, "LOW"), pivot(3, 250, "HIGH"), pivot(4, 200, "LOW"),
+        pivot(5, 400, "HIGH"), pivot(6, 350, "LOW"),
+    ]
+    engine.rebuild(second_read, Direction.UP)
+
+    spans = sorted((w.start_timestamp, w.end_timestamp) for w in engine.confirmed_chain)
+    for (_, earlier_end), (later_start, _) in zip(spans, spans[1:]):
+        assert earlier_end <= later_start, f"chain overlaps itself: {spans}"
+    labels_per_start = {}
+    for w in engine.confirmed_chain:
+        labels_per_start.setdefault(w.start_timestamp, set()).add(w.label)
+    assert all(len(v) == 1 for v in labels_per_start.values()), "two labels claim one point in time"
 
 
 def test_scenario_engine_invalidated_scenarios_get_zero_probability_and_excluded():
@@ -108,27 +141,10 @@ def test_scenario_engine_invalidated_scenarios_get_zero_probability_and_excluded
         assert s.probability > 0
 
 
-def test_wave_to_dict_exposes_structure_type():
-    """The classification wiring is only useful if it actually reaches the
-    API response - not just an internal field nobody serializes."""
-    from t3_engine.dashboard.serialization import wave_to_dict
-
-    pivots = [
-        pivot(0, 100, "LOW"), pivot(1, 140, "HIGH"), pivot(2, 110, "LOW"),
-        pivot(3, 130, "HIGH"), pivot(4, 115, "LOW"), pivot(5, 125, "HIGH"),
-    ]
-    result = build_candidate_waves(pivots, Direction.UP, Timeframe.M5)
-    d = wave_to_dict(result["waves"][0])
-    assert d["structure_type"] == "DIAGONAL_ENDING"
-
-
-def test_wave4_overlap_rescued_as_diagonal_when_shape_actually_contracts():
-    """A wave4/wave1 overlap must NOT be automatically relabelled a
-    diagonal - only rescued when the leg ALSO satisfies the diagonal
-    shape rules (contracting: |3|<|1|, |5|<|3|). This pivot set overlaps
-    AND genuinely contracts, so it should survive as a tagged diagonal
-    instead of being invalidated."""
-    pivots = [
+def _contracting_diagonal_pivots():
+    """Overlaps wave 1 AND genuinely contracts (|3|<|1|, |5|<|3|) - i.e.
+    invalid as an impulse, valid as a contracting diagonal."""
+    return [
         pivot(0, 100, "LOW"),
         pivot(1, 140, "HIGH"),   # wave1, length 40
         pivot(2, 110, "LOW"),    # wave2 (doesn't retrace past 100)
@@ -136,10 +152,73 @@ def test_wave4_overlap_rescued_as_diagonal_when_shape_actually_contracts():
         pivot(4, 115, "LOW"),    # wave4, overlaps wave1 (115 <= wave1.high 140)
         pivot(5, 125, "HIGH"),   # wave5, length 10 (< wave3's 20)
     ]
+
+
+def test_wave_to_dict_exposes_structure_type():
+    """The classification wiring is only useful if it actually reaches the
+    API response - not just an internal field nobody serializes."""
+    from t3_engine.dashboard.serialization import wave_to_dict
+
+    result = build_candidate_waves(_contracting_diagonal_pivots(), Direction.UP, Timeframe.M5,
+                                    structure=STRUCTURE_DIAGONAL_CONTRACTING)
+    d = wave_to_dict(result["waves"][0])
+    assert d["structure_type"] == "DIAGONAL_ENDING"
+
+
+def test_overlapping_impulse_is_invalid_and_is_never_relabelled_a_diagonal():
+    """The burden of proof runs one way only (rules_diagonal.py's own
+    docstring: a diagonal must be PROVEN, not assumed). An impulse count
+    that breaks the wave-4 overlap rule is dead as an impulse - it must not
+    be silently rescued into a diagonal just because the shape happens to
+    also fit one. The diagonal reading has to be asked for explicitly, and
+    then it stands on its own rule set."""
+    pivots = _contracting_diagonal_pivots()
+
+    as_impulse = build_candidate_waves(pivots, Direction.UP, Timeframe.M5)
+    assert as_impulse["broken_rule"] is not None
+    assert as_impulse["broken_rule"].broken_rule == "WAVE4_OVERLAPS_WAVE1"
+    assert as_impulse["waves"][-1].status == WaveStatus.INVALIDATED
+    assert all(w.structure_type != StructureType.DIAGONAL_ENDING for w in as_impulse["waves"])
+
+    as_diagonal = build_candidate_waves(pivots, Direction.UP, Timeframe.M5,
+                                         structure=STRUCTURE_DIAGONAL_CONTRACTING)
+    assert as_diagonal["broken_rule"] is None
+    assert len(as_diagonal["waves"]) == 5
+    assert all(w.structure_type == StructureType.DIAGONAL_ENDING for w in as_diagonal["waves"])
+
+
+def test_rebuild_still_finds_a_real_diagonal_as_its_own_hypothesis():
+    """Dropping the rescue must not mean diagonals stop being detected -
+    rebuild() generates the diagonal reading independently, so a genuine
+    contracting diagonal still survives with a real probability."""
+    engine = ScenarioEngine(degree=Timeframe.M5)
+    scenarios = engine.rebuild(_contracting_diagonal_pivots(), Direction.UP)
+    diagonals = [s for s in scenarios
+                 if any(w.structure_type == StructureType.DIAGONAL_ENDING for w in s.waves)]
+    assert diagonals, "a genuine contracting diagonal should still be found"
+    assert diagonals[0].probability > 0
+
+
+def test_abc_is_never_labelled_without_a_validated_motive_underneath_it():
+    """A correction is the correction OF something - A/B/C on top of a
+    motive count that never passed its hard rules is meaningless. Wave 3
+    here is the shortest of 1/3/5, so the motive dies at wave 5 and the
+    three further pivots must NOT become A-B-C."""
+    pivots = [
+        pivot(0, 100, "LOW"),
+        pivot(1, 200, "HIGH"),   # wave1, length 100
+        pivot(2, 180, "LOW"),
+        pivot(3, 210, "HIGH"),   # wave3, length 30 - the shortest
+        pivot(4, 205, "LOW"),
+        pivot(5, 400, "HIGH"),   # wave5, length 195 -> wave3 is shortest, invalid
+        pivot(6, 300, "LOW"),    # would have become A
+        pivot(7, 350, "HIGH"),   # would have become B
+        pivot(8, 250, "LOW"),    # would have become C
+    ]
     result = build_candidate_waves(pivots, Direction.UP, Timeframe.M5)
-    assert result["broken_rule"] is None
-    assert len(result["waves"]) == 5
-    assert all(w.structure_type == StructureType.DIAGONAL_ENDING for w in result["waves"])
+    assert result["broken_rule"] is not None
+    assert result["motive_validated"] is False
+    assert not any(w.label in (WaveLabel.A, WaveLabel.B, WaveLabel.C) for w in result["waves"])
 
 
 def test_wave4_overlap_not_rescued_when_shape_does_not_contract():
