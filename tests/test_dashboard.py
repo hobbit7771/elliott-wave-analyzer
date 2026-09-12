@@ -1,12 +1,50 @@
 import asyncio
 from unittest.mock import patch
 
+import httpx
 from fastapi.testclient import TestClient
 
 import t3_engine.dashboard.server as server_module
-from t3_engine.dashboard.server import app
+from t3_engine.dashboard.server import app, normalize_symbol
 
 client = TestClient(app)
+
+
+# ---- symbol normalization (spec follow-up: dashboard accepted garbage like
+# "UNI/USDC" and re-read the input field on every live-poll tick, sending a
+# request for whatever partial string the user had typed so far) ----
+
+def test_normalize_symbol_strips_slash_and_uppercases():
+    assert normalize_symbol("uni/usdc") == "UNIUSDC"
+    assert normalize_symbol("BTC/USDT") == "BTCUSDT"
+    assert normalize_symbol(" btc usdt ") == "BTCUSDT"
+    assert normalize_symbol("BTCUSDT") == "BTCUSDT"
+    assert normalize_symbol("") == ""
+
+
+def test_run_backtest_binance_source_rejects_empty_symbol():
+    resp = client.get("/api/run", params={"source": "binance", "symbol": "///"})
+    assert resp.status_code == 400
+
+
+def test_live_start_normalizes_symbol_with_slash():
+    resp = client.post("/api/live/stop", json={"symbol": "uni/usdc"})
+    assert resp.status_code == 200  # normalizes fine even when nothing is running
+
+
+def test_run_backtest_binance_source_surfaces_451_region_block_clearly():
+    """Reproduces the exact failure seen in production logs: Binance
+    returns HTTP 451 for requests from a blocked region (e.g. a US-hosted
+    Render service). The dashboard must surface this as a clear, actionable
+    message instead of a generic 500/stack trace."""
+    request = httpx.Request("GET", "https://fapi.binance.com/fapi/v1/klines")
+    response = httpx.Response(451, request=request, text="Unavailable For Legal Reasons")
+    error = httpx.HTTPStatusError("451", request=request, response=response)
+
+    with patch.object(server_module.BinanceFuturesREST, "get_klines", side_effect=error):
+        resp = client.get("/api/run", params={"source": "binance", "symbol": "BTCUSDT"})
+    assert resp.status_code == 451
+    assert "region" in resp.json()["detail"].lower()
 
 
 def test_health():
@@ -88,6 +126,27 @@ def test_live_start_status_stop_lifecycle():
 
             status_after = c.get("/api/live/status").json()
             assert "TESTUSDT" not in status_after
+
+
+def test_live_state_includes_forming_candle_before_first_close():
+    """The very first bar of a live session hasn't closed yet (a 15m bar
+    only appears after 15 real minutes) - the chart should still show the
+    in-progress bar updating, and the response should say so explicitly,
+    rather than the frontend just showing '0 candles' with no explanation."""
+    with patch.object(server_module.LiveTradingEngine, "run_live_binance", _fake_run_live_binance):
+        with TestClient(app) as c:
+            c.post("/api/live/start", json={"symbol": "formingusdt"})
+
+            from t3_engine.candle_builder.aggregator import Trade
+            engine = server_module._live_engines["FORMINGUSDT"]
+            engine.candle_builder.on_trade(Trade(timestamp=0, price=100.0, quantity=1.0, is_buyer_maker=False))
+
+            state = c.get("/api/live/state", params={"symbol": "formingusdt", "timeframe": "5m"}).json()
+            assert len(state["candles"]) == 1
+            assert state["candles"][0]["close"] == 100.0
+            assert state["waiting_for_first_candle"] is False
+
+            c.post("/api/live/stop", json={"symbol": "formingusdt"})
 
 
 def test_live_stop_when_not_running():
