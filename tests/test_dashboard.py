@@ -1,4 +1,5 @@
 import asyncio
+import time
 from unittest.mock import patch
 
 import httpx
@@ -156,9 +157,15 @@ def test_live_stop_when_not_running():
 
 # ---- symbol list ----
 
-def test_list_symbols_returns_and_caches():
+def _reset_binance_state():
     server_module._symbols_cache["symbols"] = None
     server_module._symbols_cache["fetched_at"] = 0.0
+    server_module._binance_backoff_until = 0.0
+    server_module._binance_backoff_message = None
+
+
+def test_list_symbols_returns_and_caches():
+    _reset_binance_state()
 
     with patch.object(server_module.BinanceFuturesREST, "list_symbols", return_value=["BTCUSDT", "ETHUSDT"]) as mock_list:
         resp1 = client.get("/api/symbols")
@@ -171,8 +178,7 @@ def test_list_symbols_returns_and_caches():
 
 
 def test_list_symbols_surfaces_network_error():
-    server_module._symbols_cache["symbols"] = None
-    server_module._symbols_cache["fetched_at"] = 0.0
+    _reset_binance_state()
     request = httpx.Request("GET", "https://fapi.binance.com/fapi/v1/exchangeInfo")
 
     with patch.object(server_module.BinanceFuturesREST, "list_symbols", side_effect=httpx.ConnectError("boom", request=request)):
@@ -181,8 +187,7 @@ def test_list_symbols_surfaces_network_error():
 
 
 def test_list_symbols_surfaces_451():
-    server_module._symbols_cache["symbols"] = None
-    server_module._symbols_cache["fetched_at"] = 0.0
+    _reset_binance_state()
     request = httpx.Request("GET", "https://fapi.binance.com/fapi/v1/exchangeInfo")
     response = httpx.Response(451, request=request, text="blocked")
     error = httpx.HTTPStatusError("451", request=request, response=response)
@@ -190,6 +195,52 @@ def test_list_symbols_surfaces_451():
     with patch.object(server_module.BinanceFuturesREST, "list_symbols", side_effect=error):
         resp = client.get("/api/symbols")
     assert resp.status_code == 451
+
+
+def test_418_triggers_shared_backoff_across_endpoints():
+    """A 418 ('I'm a teapot' - Binance's documented IP-ban response) must
+    stop ALL Binance-touching endpoints from calling out again until the
+    cooldown expires - repeating requests during a ban is what turns a
+    short ban into a long one, per Binance's own rate-limit docs."""
+    _reset_binance_state()
+    request = httpx.Request("GET", "https://fapi.binance.com/fapi/v1/exchangeInfo")
+    response = httpx.Response(418, request=request, text="teapot", headers={"Retry-After": "30"})
+    error = httpx.HTTPStatusError("418", request=request, response=response)
+
+    with patch.object(server_module.BinanceFuturesREST, "list_symbols", side_effect=error) as mock_list:
+        first = client.get("/api/symbols")
+        assert first.status_code == 418
+        assert "teapot" in first.json()["detail"].lower() or "banned" in first.json()["detail"].lower()
+
+        # second call must NOT hit Binance again - it's blocked by the
+        # in-process cooldown the first 418 just registered
+        second = client.get("/api/symbols")
+        assert second.status_code == 429
+        assert "remaining" in second.json()["detail"].lower()
+        mock_list.assert_called_once()
+
+    # the cooldown is shared: /api/run's binance path is blocked too,
+    # without ever touching BinanceFuturesREST.get_klines
+    with patch.object(server_module.BinanceFuturesREST, "get_klines") as mock_klines:
+        resp = client.get("/api/run", params={"source": "binance", "symbol": "BTCUSDT"})
+        assert resp.status_code == 429
+        mock_klines.assert_not_called()
+
+    _reset_binance_state()
+
+
+def test_retry_after_header_sets_backoff_duration():
+    _reset_binance_state()
+    request = httpx.Request("GET", "https://fapi.binance.com/fapi/v1/exchangeInfo")
+    response = httpx.Response(418, request=request, text="teapot", headers={"Retry-After": "5"})
+    error = httpx.HTTPStatusError("418", request=request, response=response)
+
+    with patch.object(server_module.BinanceFuturesREST, "list_symbols", side_effect=error):
+        client.get("/api/symbols")
+
+    remaining = server_module._binance_backoff_until - time.time()
+    assert 0 < remaining <= 5.5
+    _reset_binance_state()
 
 
 # ---- AI advisor endpoint ----

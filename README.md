@@ -135,6 +135,21 @@ desktop web page:
   this instead of spinning forever; if you hit it, the fix is just to wait
   and retry, not to redeploy. A paid Render plan (or pinging the service
   periodically) avoids the sleep entirely.
+- **Binance HTTP 418 ("I'm a teapot")**: Binance's documented response for
+  an IP that's been temporarily auto-banned for exceeding its request rate
+  limit. On shared hosting (Render's free/shared plans included), your
+  service's outbound IP can be shared with other tenants, so a ban can be
+  inherited from traffic you never sent yourself - this was observed in
+  practice on a fresh Frankfurt deploy of this app that had made exactly
+  one prior Binance request. The dashboard now tracks this with a shared,
+  process-wide cooldown (`server.py`'s `_binance_backoff_until`): the
+  moment any endpoint sees a 418/429, every Binance-touching endpoint
+  backs off for the `Retry-After` duration Binance sent (or 120s if it
+  didn't send one) instead of hammering Binance again immediately, which
+  is exactly what turns a short ban into a long one per Binance's own
+  rate-limit rules. If this keeps recurring, a Render plan with a
+  dedicated/static outbound IP address stops the ban-inheritance problem
+  at the root (you stop sharing an IP with whoever triggered the ban).
 - **AI Advisor tab**: paste your own OpenAI API key (your ChatGPT/OpenAI
   subscription/credits - stored only in your browser's `localStorage`,
   forwarded per-request to `/api/ai/advice` and never written to disk

@@ -511,14 +511,22 @@ document.getElementById('askAi').addEventListener('click', async () => {
 // Binance 451-blocked, or the server is still asleep/cold-starting), the
 // symbol field just stays a plain text input - never a hard blocker. ----
 async function loadSymbolList() {
+  const symbolInput = document.getElementById('symbol');
   try {
     const resp = await fetchWithTimeout('/api/symbols', {}, 20000);
-    if (!resp.ok) return;
+    if (!resp.ok) {
+      const detail = await parseErrorDetail(resp);
+      symbolInput.title = `Coin list unavailable: ${detail}`;
+      console.warn('GET /api/symbols failed:', detail);
+      return;
+    }
     const data = await resp.json();
     const listEl = document.getElementById('symbolsList');
     listEl.innerHTML = data.symbols.map(s => `<option value="${s}"></option>`).join('');
+    symbolInput.title = `${data.symbols.length} symbols loaded - type to filter, or enter any symbol manually`;
   } catch (e) {
-    // silently ignore - free-text symbol entry still works
+    symbolInput.title = `Coin list unavailable: ${e.message}`;
+    console.warn('GET /api/symbols failed:', e);
   }
 }
 

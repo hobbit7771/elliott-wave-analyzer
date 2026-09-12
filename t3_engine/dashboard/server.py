@@ -18,7 +18,7 @@ import asyncio
 import os
 import re
 import time
-from typing import Dict
+from typing import Dict, Optional
 
 import httpx
 from fastapi import Body, FastAPI, HTTPException, Query
@@ -78,7 +78,51 @@ def binance_error_message(exc: httpx.HTTPStatusError) -> str:
             "in the US (e.g. Render's default 'oregon' region). Redeploying this service in a "
             "non-US region (e.g. Render's 'frankfurt' or 'singapore') is the known workaround."
         )
+    if status == 418:
+        return (
+            "Binance returned HTTP 418 ('I'm a teapot') - this is Binance's documented response "
+            "for an IP that has been temporarily auto-banned for exceeding its request rate limit. "
+            "On shared hosting (Render's free/shared plans included), this IP address can be shared "
+            "with other tenants, so a ban can be inherited from traffic you never sent. Requests are "
+            "now paused for a cooldown instead of retrying immediately - repeating requests during a "
+            "ban is what turns a short ban into a much longer one, per Binance's own rate-limit rules. "
+            "If this persists, a Render plan with a dedicated/static outbound IP avoids inheriting "
+            "other tenants' bans."
+        )
+    if status == 429:
+        return "Binance returned HTTP 429 (rate limited) - requests are paused for a cooldown before retrying."
     return f"Binance API returned HTTP {status}: {exc.response.text[:300]}"
+
+
+# --- shared Binance backoff: 418/429 responses mean STOP calling Binance
+# for a while, from ANY endpoint - continuing to hit it during a ban is
+# exactly what Binance's docs say escalates a short ban into a long one.
+# This is process-wide (not per-endpoint) since the ban is IP-wide. ---
+_binance_backoff_until: float = 0.0
+_binance_backoff_message: Optional[str] = None
+
+
+def _parse_retry_after(resp: httpx.Response) -> float:
+    raw = resp.headers.get("Retry-After")
+    if raw is None:
+        return 120.0  # Binance's shortest documented ban window
+    try:
+        return max(float(raw), 1.0)
+    except ValueError:
+        return 120.0  # Retry-After was an HTTP-date, not a delta - fall back
+
+
+def _register_binance_failure(exc: httpx.HTTPStatusError) -> None:
+    global _binance_backoff_until, _binance_backoff_message
+    if exc.response.status_code in (418, 429):
+        _binance_backoff_until = time.time() + _parse_retry_after(exc.response)
+        _binance_backoff_message = binance_error_message(exc)
+
+
+def _check_binance_backoff() -> None:
+    remaining = _binance_backoff_until - time.time()
+    if remaining > 0:
+        raise HTTPException(429, f"{_binance_backoff_message} ({remaining:.0f}s remaining in cooldown)")
 
 
 async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
@@ -108,10 +152,12 @@ def list_symbols():
     if _symbols_cache["symbols"] is not None and (now - _symbols_cache["fetched_at"]) < _SYMBOLS_CACHE_TTL_SECONDS:
         return {"symbols": _symbols_cache["symbols"], "cached": True}
 
+    _check_binance_backoff()
     rest = BinanceFuturesREST()
     try:
         symbols = rest.list_symbols()
     except httpx.HTTPStatusError as exc:
+        _register_binance_failure(exc)
         raise HTTPException(exc.response.status_code, binance_error_message(exc))
     except httpx.RequestError as exc:
         raise HTTPException(502, f"Could not reach Binance: {exc}")
@@ -131,10 +177,12 @@ def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETI
         symbol = normalize_symbol(symbol)
         if not symbol:
             raise HTTPException(400, "Symbol is empty after normalization - expected something like BTCUSDT")
+        _check_binance_backoff()
         rest = BinanceFuturesREST()
         try:
             candles = rest.get_klines(symbol, Timeframe.M5, limit=limit)
         except httpx.HTTPStatusError as exc:
+            _register_binance_failure(exc)
             raise HTTPException(exc.response.status_code, binance_error_message(exc))
         except httpx.RequestError as exc:
             raise HTTPException(502, f"Could not reach Binance: {exc}")
