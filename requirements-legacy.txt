@@ -1,0 +1,20 @@
+# Dependencies for the legacy app.py prototype (single-timeframe REST
+# analysis + matplotlib chart, predates the T3 engine work).
+#
+# app.py currently imports binance_connector.py, elliott_wave_analyzer.py,
+# fibonacci_calculator.py, visualizer.py - none of which exist in this
+# repository, so app.py does not run even with these installed. Kept here,
+# out of the main requirements.txt, only so the exact old pins aren't lost
+# if someone wants to resurrect/fix that prototype later. Do NOT point any
+# deployment at this file - see requirements.txt / README for why.
+flask==3.0.0
+flask-cors==4.0.0
+python-binance==1.0.17
+pandas==2.1.0
+numpy==1.26.0
+matplotlib==3.8.1
+scipy==1.11.4
+websocket-client==1.6.4
+ta==0.10.2
+gunicorn==21.2.0
+Pillow==10.0.1

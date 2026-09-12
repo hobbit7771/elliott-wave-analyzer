@@ -61,6 +61,10 @@ local_settings.py
 db.sqlite3
 db.sqlite3-journal
 
+# T3 engine local state
+t3_engine.db
+/logs/
+
 # Flask stuff:
 instance/
 .webassets-cache

@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0e1117" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="T3 Engine" />
+<link rel="manifest" href="/static/manifest.json" />
+<link rel="apple-touch-icon" href="/static/icons/icon-192.png" />
+<link rel="icon" href="/static/icons/icon-192.png" />
+<title>T3 - Elliott Wave Trading Engine</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: -apple-system, Segoe UI, Roboto, sans-serif; background:#0e1117; color:#d7dbe0;
+         -webkit-tap-highlight-color: transparent; }
+  header { padding: 10px 12px; border-bottom: 1px solid #232733; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size: 14px; margin:0; font-weight:600; color:#f2f4f8; white-space:nowrap; }
+  header label { font-size: 12px; color:#9aa3b2; display:flex; align-items:center; gap:4px; }
+  header select, header input, header button, .panel-btn {
+    background:#1b2028; color:#e6e9ef; border:1px solid #2c3140; border-radius:6px; padding:6px 9px; font-size:12px;
+  }
+  header button, .panel-btn { cursor:pointer; min-height:30px; }
+  header button:active, .panel-btn:active { background:#232a36; }
+  #tabs { display:flex; gap:6px; padding: 0 12px 8px; border-bottom:1px solid #232733; }
+  #tabs button { background:none; border:none; color:#8891a3; font-size:12px; padding:6px 10px; border-radius:6px; cursor:pointer; }
+  #tabs button.active { background:#1b2028; color:#f2f4f8; }
+  #layout { display:flex; height: calc(100vh - 96px); }
+  #chart { flex: 1 1 auto; min-width:0; }
+  #panel { width: 340px; flex-shrink:0; border-left:1px solid #232733; padding:12px; overflow-y:auto; font-size:12.5px; }
+  #panel h2 { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:#8891a3; margin:14px 0 6px; }
+  #panel h2:first-child { margin-top:0; }
+  .row { display:flex; justify-content:space-between; padding:2px 0; gap:8px; }
+  .row .k { color:#9aa3b2; }
+  .row .v { color:#e6e9ef; font-weight:500; text-align:right; }
+  .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; }
+  .pill.up { background:#123a2c; color:#4ade80; }
+  .pill.down { background:#3a1414; color:#f87171; }
+  .signal { border:1px solid #232733; border-radius:8px; padding:8px; margin-bottom:8px; }
+  .signal.accepted { border-color:#22543d; }
+  .signal.rejected { border-color:#4a1f24; opacity:.75; }
+  .note { background:#1b2028; border:1px solid #2c3140; border-radius:8px; padding:8px; font-size:11.5px; color:#9aa3b2; margin-bottom:10px; }
+  table { width:100%; border-collapse: collapse; font-size:11.5px; }
+  td, th { padding:3px 4px; border-bottom:1px solid #232733; text-align:right; }
+  th:first-child, td:first-child { text-align:left; }
+  .field-row { display:flex; gap:6px; margin-bottom:8px; }
+  .field-row input { flex:1; min-width:0; }
+  #ai-answer { white-space:pre-wrap; line-height:1.4; }
+  .hint { font-size:11px; color:#6b7383; margin-top:4px; }
+
+  /* Mobile layout: stack the analysis panel below the chart instead of
+     beside it, and give the chart enough height to still be usable. */
+  @media (max-width: 820px) {
+    #layout { flex-direction: column; height: auto; }
+    #chart { height: 46vh; }
+    #panel { width: 100%; border-left:none; border-top:1px solid #232733; max-height: 54vh; }
+    header { padding: 8px; }
+    header h1 { flex-basis: 100%; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>T3 &mdash; Elliott Wave Engine</h1>
+  <label>Source
+    <select id="source">
+      <option value="synthetic">Synthetic demo</option>
+      <option value="binance">Binance (history)</option>
+      <option value="live">Binance (live, public WS)</option>
+    </select>
+  </label>
+  <label id="symbolField">Symbol <input id="symbol" value="SYNTHETIC-DEMO" size="12" /></label>
+  <label id="cyclesField">Cycles <input id="cycles" type="number" value="2" min="1" max="10" size="3" /></label>
+  <label>Threshold <input id="threshold" type="number" value="60" min="0" max="100" size="3" /></label>
+  <label id="tfField" style="display:none;">TF
+    <select id="timeframe"><option value="5m">5m</option><option value="15m">15m</option></select>
+  </label>
+  <button id="run">Run</button>
+  <button id="liveStart" style="display:none;">Start live</button>
+  <button id="liveStop" style="display:none;">Stop live</button>
+  <span id="status" style="color:#8891a3;font-size:12px;"></span>
+</header>
+<div id="tabs">
+  <button data-tab="analysis" class="active">Analysis</button>
+  <button data-tab="ai">AI Advisor</button>
+</div>
+<div id="layout">
+  <div id="chart"></div>
+  <div id="panel">
+    <div id="tab-analysis">
+      <div class="note" id="note" style="display:none;"></div>
+      <h2>Debug State</h2>
+      <div id="debug"></div>
+      <h2>Primary Scenario</h2>
+      <div id="primary"></div>
+      <h2>Signals</h2>
+      <div id="signals"></div>
+      <h2>Closed Trades &amp; Metrics</h2>
+      <div id="metrics"></div>
+    </div>
+    <div id="tab-ai" style="display:none;">
+      <div class="note">
+        Bring your own OpenAI API key (your ChatGPT/OpenAI subscription). It is sent directly to the backend
+        for this one request only, forwarded to OpenAI, and never stored server-side — see
+        <code>ai_advisor/advisor.py</code>. GPT only gives a second opinion in plain text; it can never
+        override the rule-based engine's accept/reject decision.
+      </div>
+      <h2>OpenAI API key</h2>
+      <div class="field-row">
+        <input id="openaiKey" type="password" placeholder="sk-..." />
+        <button class="panel-btn" id="saveKey">Save</button>
+      </div>
+      <div class="hint">Saved only in this browser (localStorage), never sent anywhere except your own backend.</div>
+      <h2>Ask GPT about the current setup</h2>
+      <button class="panel-btn" id="askAi">Ask GPT for a second opinion</button>
+      <div class="hint" id="aiStatus"></div>
+      <div class="signal" id="ai-answer" style="margin-top:10px; display:none;"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+}
+
+const chartEl = document.getElementById('chart');
+const chart = LightweightCharts.createChart(chartEl, {
+  layout: { background: { color: '#0e1117' }, textColor: '#c7cbd3' },
+  grid: { vertLines: { color: '#1b1f29' }, horzLines: { color: '#1b1f29' } },
+  timeScale: { timeVisible: true, secondsVisible: false },
+  rightPriceScale: { borderColor: '#232733' },
+});
+function resize() { chart.resize(chartEl.clientWidth, chartEl.clientHeight); }
+new ResizeObserver(resize).observe(chartEl);
+
+const candleSeries = chart.addCandlestickSeries({
+  upColor: '#26a69a', downColor: '#ef5350', borderVisible: false,
+  wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+});
+
+let overlayLines = [];
+let lastData = null;
+let liveTimer = null;
+
+function clearOverlays() {
+  overlayLines.forEach(s => s.removeSeries ? s.removeSeries() : chart.removeSeries(s));
+  overlayLines = [];
+}
+
+function drawWaves(waves) {
+  waves.forEach(w => {
+    const series = chart.addLineSeries({ color: w.direction === 'UP' ? '#4ade80' : '#f87171', lineWidth: 2, lastValueVisible: false, priceLineVisible: false });
+    series.setData([
+      { time: w.start_time, value: w.start_price },
+      { time: w.end_time, value: w.end_price },
+    ]);
+    overlayLines.push(series);
+  });
+}
+
+function drawTradeLevels(signals) {
+  const accepted = signals.filter(s => s.decision === 'SIGNAL_ACCEPTED').slice(-5);
+  accepted.forEach(s => {
+    [{ price: s.stop_loss, color: '#f87171', title: 'SL' },
+     ...(s.take_profits || []).map((tp, i) => ({ price: tp.price, color: '#60a5fa', title: `TP${i + 1}` }))]
+    .forEach(level => {
+      const line = candleSeries.createPriceLine({ price: level.price, color: level.color, lineWidth: 1, lineStyle: 2, title: level.title });
+      overlayLines.push({ removeSeries: () => candleSeries.removePriceLine(line) });
+    });
+  });
+}
+
+function markers(events, scenarios) {
+  const m = [];
+  events.forEach(e => {
+    m.push({ time: e.time, position: e.direction === 'UP' ? 'belowBar' : 'aboveBar',
+             color: e.kind === 'CHoCH' ? '#facc15' : '#60a5fa', shape: e.direction === 'UP' ? 'arrowUp' : 'arrowDown',
+             text: e.kind });
+  });
+  scenarios.forEach(sc => sc.waves.forEach(w => {
+    m.push({ time: w.end_time, position: 'inBar', color: '#9aa3b2', shape: 'circle', text: w.label });
+  }));
+  m.sort((a, b) => a.time - b.time);
+  candleSeries.setMarkers(m);
+}
+
+function row(k, v) { return `<div class="row"><span class="k">${k}</span><span class="v">${v}</span></div>`; }
+
+function renderDebugPanel(data) {
+  const primary = data.scenarios[0];
+  const debugEl = document.getElementById('debug');
+  const wave = primary && primary.waves.length ? primary.waves[primary.waves.length - 1] : null;
+  debugEl.innerHTML = [
+    row('Symbol', data.symbol + (data.timeframe ? ' · ' + data.timeframe : '')),
+    row('Primary wave', wave ? wave.label : '—'),
+    row('Status', wave ? wave.status : '—'),
+    row('Confidence', primary ? primary.probability.toFixed(1) + '%' : '—'),
+    row('Invalidation', primary && primary.invalidation ? primary.invalidation.toFixed(4) : '—'),
+    row('Next expected', primary && primary.next_expected_label ? primary.next_expected_label : '—'),
+    row('Equity', (data.final_equity ?? data.equity ?? 0).toFixed(2)),
+  ].join('');
+
+  const primaryEl = document.getElementById('primary');
+  if (!data.scenarios.length) {
+    primaryEl.innerHTML = '<div class="note">No valid Elliott scenario currently active. Structure is ambiguous — NO TRADE (section 22).</div>';
+  } else {
+    primaryEl.innerHTML = data.scenarios.map((sc, i) => `
+      <div class="signal ${i === 0 ? 'accepted' : ''}">
+        <div class="row"><span class="k">Scenario ${i + 1}</span><span class="v">${sc.probability.toFixed(1)}%</span></div>
+        <div class="row"><span class="k">Status</span><span class="v">${sc.status}</span></div>
+        <div class="row"><span class="k">Waves</span><span class="v">${sc.waves.map(w => w.label).join(' → ')}</span></div>
+      </div>`).join('');
+  }
+
+  const sigEl = document.getElementById('signals');
+  const recent = data.signals.slice(-15).reverse();
+  sigEl.innerHTML = recent.length ? recent.map(s => `
+    <div class="signal ${s.decision === 'SIGNAL_ACCEPTED' ? 'accepted' : 'rejected'}">
+      <div class="row"><span class="k">${s.wave_label} ${s.side}</span><span class="pill ${s.decision === 'SIGNAL_ACCEPTED' ? 'up' : 'down'}">${s.decision.replace('SIGNAL_', '')}</span></div>
+      <div class="row"><span class="k">Confidence</span><span class="v">${s.confidence.toFixed(1)}</span></div>
+      <div class="row"><span class="k">Reason</span><span class="v" style="text-align:left;max-width:200px;">${s.reason || s.rejection_reason || ''}</span></div>
+    </div>`).join('') : '<div class="note">No signals evaluated.</div>';
+
+  const metricsEl = document.getElementById('metrics');
+  if (data.metrics) {
+    const m = data.metrics.overall;
+    let html = `<table><tr><th>Metric</th><th>Overall</th></tr>
+      <tr><td>Trades</td><td>${m.trades}</td></tr>
+      <tr><td>Winrate</td><td>${(m.winrate * 100).toFixed(1)}%</td></tr>
+      <tr><td>Profit Factor</td><td>${m.profit_factor ? m.profit_factor.toFixed(2) : '—'}</td></tr>
+      <tr><td>Expectancy</td><td>${m.expectancy.toFixed(2)}</td></tr>
+      <tr><td>Avg R</td><td>${m.average_r.toFixed(2)}</td></tr>
+      <tr><td>Median R</td><td>${m.median_r.toFixed(2)}</td></tr>
+      <tr><td>Max DD</td><td>${(m.max_drawdown * 100).toFixed(1)}%</td></tr>
+      </table><div style="margin-top:8px;font-weight:600;">By wave type</div><table><tr><th>Wave</th><th>Trades</th><th>Winrate</th><th>Avg R</th></tr>`;
+    Object.entries(data.metrics.by_wave).forEach(([k, v]) => {
+      html += `<tr><td>${k}</td><td>${v.trades}</td><td>${(v.winrate * 100).toFixed(0)}%</td><td>${v.average_r.toFixed(2)}</td></tr>`;
+    });
+    html += '</table>';
+    metricsEl.innerHTML = html;
+  } else {
+    metricsEl.innerHTML = `<table><tr><th>Metric</th><th>Live</th></tr>
+      <tr><td>Open positions</td><td>${(data.open_positions || []).length}</td></tr>
+      <tr><td>Closed trades</td><td>${(data.closed_positions || []).length}</td></tr>
+      <tr><td>Trading enabled</td><td>${data.trading_enabled}</td></tr>
+      </table>`;
+  }
+
+  const noteEl = document.getElementById('note');
+  if (data.note) { noteEl.style.display = 'block'; noteEl.textContent = data.note; }
+  else { noteEl.style.display = 'none'; }
+}
+
+function applyChartData(data) {
+  candleSeries.setData(data.candles);
+  clearOverlays();
+  data.scenarios.forEach(sc => drawWaves(sc.waves));
+  drawTradeLevels(data.signals);
+  markers(data.structure_events || [], data.scenarios);
+  chart.timeScale().fitContent();
+  renderDebugPanel(data);
+  lastData = data;
+}
+
+function stopLivePolling() {
+  if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+}
+
+async function fetchLiveState() {
+  const symbol = document.getElementById('symbol').value;
+  const timeframe = document.getElementById('timeframe').value;
+  const resp = await fetch(`/api/live/state?symbol=${encodeURIComponent(symbol)}&timeframe=${timeframe}`);
+  if (!resp.ok) {
+    document.getElementById('status').textContent = 'not started - click "Start live"';
+    return;
+  }
+  const data = await resp.json();
+  document.getElementById('status').textContent = `${data.candles.length} candles (live)`;
+  applyChartData(data);
+}
+
+async function run() {
+  const source = document.getElementById('source').value;
+  const symbol = document.getElementById('symbol').value;
+  stopLivePolling();
+
+  if (source === 'live') {
+    await fetchLiveState();
+    liveTimer = setInterval(fetchLiveState, 4000);
+    return;
+  }
+
+  const cycles = document.getElementById('cycles').value;
+  const threshold = document.getElementById('threshold').value;
+  document.getElementById('status').textContent = 'running…';
+  const resp = await fetch(`/api/run?source=${source}&symbol=${encodeURIComponent(symbol)}&cycles=${cycles}&threshold=${threshold}`);
+  const data = await resp.json();
+  document.getElementById('status').textContent = `${data.candles.length} candles`;
+  applyChartData(data);
+}
+
+function updateSourceUI() {
+  const source = document.getElementById('source').value;
+  const isLive = source === 'live';
+  document.getElementById('cyclesField').style.display = source === 'synthetic' ? '' : 'none';
+  document.getElementById('tfField').style.display = isLive ? '' : 'none';
+  document.getElementById('liveStart').style.display = isLive ? '' : 'none';
+  document.getElementById('liveStop').style.display = isLive ? '' : 'none';
+  if (!isLive) stopLivePolling();
+}
+
+document.getElementById('source').addEventListener('change', updateSourceUI);
+document.getElementById('run').addEventListener('click', run);
+document.getElementById('liveStart').addEventListener('click', async () => {
+  const symbol = document.getElementById('symbol').value;
+  const threshold = Number(document.getElementById('threshold').value);
+  document.getElementById('status').textContent = 'starting live pipeline…';
+  await fetch('/api/live/start', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ symbol, threshold }),
+  });
+  run();
+});
+document.getElementById('liveStop').addEventListener('click', async () => {
+  const symbol = document.getElementById('symbol').value;
+  stopLivePolling();
+  await fetch('/api/live/stop', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ symbol }),
+  });
+  document.getElementById('status').textContent = 'live pipeline stopped';
+});
+
+// ---- tabs ----
+document.querySelectorAll('#tabs button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#tabs button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-analysis').style.display = btn.dataset.tab === 'analysis' ? '' : 'none';
+    document.getElementById('tab-ai').style.display = btn.dataset.tab === 'ai' ? '' : 'none';
+  });
+});
+
+// ---- AI advisor (BYO OpenAI key) ----
+const KEY_STORAGE = 't3_openai_key';
+document.getElementById('openaiKey').value = localStorage.getItem(KEY_STORAGE) || '';
+document.getElementById('saveKey').addEventListener('click', () => {
+  localStorage.setItem(KEY_STORAGE, document.getElementById('openaiKey').value.trim());
+  document.getElementById('aiStatus').textContent = 'Key saved in this browser.';
+});
+
+document.getElementById('askAi').addEventListener('click', async () => {
+  const apiKey = localStorage.getItem(KEY_STORAGE) || document.getElementById('openaiKey').value.trim();
+  const statusEl = document.getElementById('aiStatus');
+  const answerEl = document.getElementById('ai-answer');
+  if (!apiKey) { statusEl.textContent = 'Enter and save your OpenAI API key first.'; return; }
+  if (!lastData) { statusEl.textContent = 'Run an analysis first.'; return; }
+
+  const primary = lastData.scenarios[0];
+  const lastSignal = lastData.signals[lastData.signals.length - 1];
+  const context = {
+    symbol: lastData.symbol,
+    primary_scenario: primary ? {
+      probability: primary.probability, status: primary.status,
+      waves: primary.waves.map(w => w.label), invalidation: primary.invalidation,
+    } : null,
+    last_signal: lastSignal ? {
+      wave: lastSignal.wave_label, side: lastSignal.side, decision: lastSignal.decision,
+      confidence: lastSignal.confidence, stop_loss: lastSignal.stop_loss,
+      take_profits: lastSignal.take_profits, reason: lastSignal.reason || lastSignal.rejection_reason,
+    } : null,
+  };
+
+  statusEl.textContent = 'Asking GPT…';
+  answerEl.style.display = 'none';
+  try {
+    const resp = await fetch('/api/ai/advice', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: apiKey, context }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) { statusEl.textContent = data.detail || 'Request failed.'; return; }
+    statusEl.textContent = '';
+    answerEl.style.display = '';
+    answerEl.textContent = data.commentary;
+  } catch (e) {
+    statusEl.textContent = 'Network error asking GPT.';
+  }
+});
+
+updateSourceUI();
+run();
+</script>
+</body>
+</html>

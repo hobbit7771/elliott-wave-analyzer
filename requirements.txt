@@ -1,12 +1,23 @@
-flask==3.0.0
-flask-cors==4.0.0
-python-binance==1.0.17
-pandas==2.1.0
-numpy==1.26.0
-matplotlib==3.8.1
-scipy==1.11.4
-websocket-client==1.6.4
-ta==0.10.2
-python-dotenv==1.0.0
-gunicorn==21.2.0
-Pillow==10.0.1
+# Dependencies for the T3 Elliott Wave Trading Engine (t3_engine/) - the
+# dashboard, live pipeline, backtester, database layer, etc. This is what
+# Render (and any default "install requirements.txt" flow) will install.
+#
+# The old app.py prototype's dependencies (flask, pandas, numpy,
+# matplotlib, scipy, python-binance, ...) used to live in this file too.
+# They were pinned to old versions with no prebuilt wheel for newer Python
+# releases, so Render tried to compile pandas/numpy from source and failed
+# ("Build aborted: the NumPy Cython headers require Cython 3.0.0 or
+# newer"). app.py doesn't even run as-is (it imports modules that don't
+# exist in this repo), and t3_engine/ never imports any of those packages,
+# so there was no reason for a default install to pull them in at all.
+# They now live in requirements-legacy.txt if anyone wants them back.
+python-dotenv==1.2.3
+httpx==0.28.1
+websockets==17.1
+SQLAlchemy==2.0.52
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+pydantic==2.13.5
+pydantic-settings==2.15.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
