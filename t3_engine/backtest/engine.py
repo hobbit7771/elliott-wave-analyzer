@@ -47,6 +47,7 @@ class BacktestConfig:
     symbol: str
     initial_equity: float = 10_000.0
     pivot_deviation_pct: float = 1.0
+    structure_min_break_pct: float = 0.05
     entry_confidence_threshold: float = 75.0
     degree: Timeframe = Timeframe.M5
 
@@ -55,7 +56,7 @@ class BacktestEngine:
     def __init__(self, config: BacktestConfig):
         self.config = config
         self.pivot_detector = ZigZagPivotDetector(deviation_pct=config.pivot_deviation_pct)
-        self.structure = MarketStructureTracker()
+        self.structure = MarketStructureTracker(min_break_pct=config.structure_min_break_pct)
         self.scenario_engine = ScenarioEngine(degree=config.degree)
         self.risk_manager = RiskManager(initial_equity=config.initial_equity)
         self.execution = PaperExecutionEngine()

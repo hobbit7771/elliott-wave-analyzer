@@ -53,7 +53,17 @@ class ZigZagPivotDetector:
 
         if self.tracking_type == "HIGH":
             if candle.high > self._extreme.price:
+                # This candle just made a NEW high - it cannot, in the same
+                # breath, also be the reversal that confirms that high as a
+                # pivot (OHLC alone never tells us whether the high or the
+                # low happened first within the bar, so a wide-range candle
+                # would otherwise "confirm itself": it sets self._extreme to
+                # its own high, then its own low - which can be arbitrarily
+                # far below that same high - immediately satisfies the
+                # deviation check on the very candle that just set the
+                # extreme). Confirmation must come from a LATER candle.
                 self._extreme = _Candidate(candle.high, index, candle.close_time)
+                return None
             if self._extreme.price > 0 and (self._extreme.price - candle.low) / self._extreme.price >= self.deviation:
                 pivot = self._confirm("HIGH", self._extreme, index)
                 self.tracking_type = "LOW"
@@ -62,7 +72,9 @@ class ZigZagPivotDetector:
             return None
         else:
             if candle.low < self._extreme.price:
+                # Same reasoning as above, mirrored for the LOW side.
                 self._extreme = _Candidate(candle.low, index, candle.close_time)
+                return None
             if self._extreme.price > 0 and (candle.high - self._extreme.price) / self._extreme.price >= self.deviation:
                 pivot = self._confirm("LOW", self._extreme, index)
                 self.tracking_type = "HIGH"
@@ -80,19 +92,28 @@ class ZigZagPivotDetector:
             self._alt_extreme = _Candidate(candle.low, index, candle.close_time)
             return None
 
+        # Same self-confirmation trap as update() above, mirrored for both
+        # tentative candidates: a candle that just extended one of them
+        # cannot also be the candle that confirms it as a pivot.
+        extreme_extended = False
         if candle.high > self._extreme.price:
             self._extreme = _Candidate(candle.high, index, candle.close_time)
+            extreme_extended = True
+        alt_extreme_extended = False
         if candle.low < self._alt_extreme.price:
             self._alt_extreme = _Candidate(candle.low, index, candle.close_time)
+            alt_extreme_extended = True
 
-        if self._extreme.price > 0 and (self._extreme.price - candle.low) / self._extreme.price >= self.deviation:
+        if (not extreme_extended and self._extreme.price > 0
+                and (self._extreme.price - candle.low) / self._extreme.price >= self.deviation):
             pivot = self._confirm("HIGH", self._extreme, index)
             self.tracking_type = "LOW"
             self._extreme = _Candidate(candle.low, index, candle.close_time)
             self._alt_extreme = None
             return pivot
 
-        if self._alt_extreme.price > 0 and (candle.high - self._alt_extreme.price) / self._alt_extreme.price >= self.deviation:
+        if (not alt_extreme_extended and self._alt_extreme.price > 0
+                and (candle.high - self._alt_extreme.price) / self._alt_extreme.price >= self.deviation):
             pivot = self._confirm("LOW", self._alt_extreme, index)
             self.tracking_type = "HIGH"
             self._extreme = _Candidate(candle.high, index, candle.close_time)
