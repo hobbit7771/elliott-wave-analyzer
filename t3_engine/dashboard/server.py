@@ -43,9 +43,10 @@ from t3_engine.ai_advisor.advisor import AIAdvisorError, request_commentary
 from t3_engine.backtest.engine import BacktestConfig, BacktestEngine
 from t3_engine.backtest.metrics import compute_metrics, compute_metrics_by_wave
 from t3_engine.backtest.synthetic_data import generate_synthetic_series
-from t3_engine.common.types import Timeframe
+from t3_engine.common.types import TRADEABLE_TIMEFRAMES, Timeframe
 from t3_engine.dashboard.serialization import (
     candle_to_dict,
+    pivot_to_dict,
     position_to_dict,
     scenario_to_dict,
     signal_to_dict,
@@ -118,7 +119,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-005"
+BUILD_VERSION = "BUILD-CHECK-006"
 
 
 @app.get("/api/health")
@@ -160,7 +161,12 @@ def list_symbols():
 @app.get("/api/run")
 def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETIC"),
                   cycles: int = Query(2, ge=1, le=10), threshold: float = Query(60.0, ge=0, le=100),
-                  limit: int = Query(1500, ge=100, le=1500)):
+                  limit: int = Query(1500, ge=100, le=1500), timeframe: str = Query("5m")):
+    try:
+        tf = Timeframe(timeframe)
+    except ValueError:
+        raise HTTPException(400, f"Unsupported timeframe {timeframe}")
+
     if source == "bybit":
         symbol = normalize_symbol(symbol)
         if not symbol:
@@ -168,28 +174,52 @@ def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETI
 
         bybit = BybitFuturesREST()
         try:
-            candles = bybit.get_klines(symbol, Timeframe.M5, limit=limit)
+            candles = bybit.get_klines(symbol, tf, limit=limit)
         except (httpx.HTTPStatusError, httpx.RequestError, BybitAPIError, ValueError) as exc:
             raise HTTPException(502, bybit_error_message(exc))
         finally:
             bybit.close()
     else:
+        # The synthetic demo fixture is a fixed-shape 5m series (see
+        # backtest/synthetic_data.py) - the timeframe picker is disabled for
+        # this source in the frontend, and `tf` is only used below to tag
+        # the engine's degree consistently with the candles it's fed.
         candles = generate_synthetic_series(num_cycles=cycles)
         symbol = symbol if symbol != "SYNTHETIC" else "SYNTHETIC-DEMO"
+        tf = Timeframe.M5
 
-    engine = BacktestEngine(BacktestConfig(symbol=symbol, entry_confidence_threshold=threshold))
+    engine = BacktestEngine(BacktestConfig(symbol=symbol, entry_confidence_threshold=threshold, degree=tf))
     result = engine.run(candles)
 
     metrics = compute_metrics(result["closed_positions"])
     metrics_by_wave = compute_metrics_by_wave(result["closed_positions"])
 
+    tf_note = (
+        None if tf in TRADEABLE_TIMEFRAMES else
+        f"{tf.value} is a context/confirmation timeframe, not a tradeable one (spec section 21: only "
+        "5m/15m may ever originate a real entry) - structure, wave counts and Fibonacci are shown as "
+        "usual, but no signals/trades are evaluated here. Pick 5m or 15m to see entries and PnL."
+    )
+    synthetic_note = (
+        None if source == "bybit" else
+        "Candles are a SYNTHETIC, clearly-labelled demo fixture (see backtest/synthetic_data.py) "
+        "because this build environment cannot reach any real exchange. Pass source=bybit&symbol=... "
+        "to use real historical data when running somewhere with normal internet access."
+    )
+
     return {
         "symbol": symbol,
         "source": source,
         "data_source": source,
+        "timeframe": tf.value,
         "candles": [candle_to_dict(c) for c in candles],
         "scenarios": [scenario_to_dict(s) for s in engine.scenario_engine.scenarios],
         "structure_events": [structure_event_to_dict(e) for e in engine.structure.events],
+        # Full confirmed ZigZag swing history (not just the current
+        # scenario's waves) - see pivot_to_dict for why: this is what lets
+        # the chart show the whole swing structure leading up to today,
+        # not just a handful of numbered waves floating with no context.
+        "pivots": [pivot_to_dict(p) for p in engine.pivot_detector.pivots],
         "signals": [signal_to_dict(s) for s in result["signals"]],
         "closed_positions": [position_to_dict(p) for p in result["closed_positions"]],
         "open_positions": [position_to_dict(p) for p in result["open_positions"]],
@@ -198,12 +228,7 @@ def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETI
             "overall": dataclass_metrics_to_dict(metrics),
             "by_wave": {k: dataclass_metrics_to_dict(v) for k, v in metrics_by_wave.items()},
         },
-        "note": (
-            None if source == "bybit" else
-            "Candles are a SYNTHETIC, clearly-labelled demo fixture (see backtest/synthetic_data.py) "
-            "because this build environment cannot reach any real exchange. Pass source=bybit&symbol=... "
-            "to use real historical data when running somewhere with normal internet access."
-        ),
+        "note": " ".join(n for n in (synthetic_note, tf_note) if n) or None,
     }
 
 
@@ -290,6 +315,8 @@ def live_state(symbol: str = Query(...), timeframe: str = Query("5m")):
         "error": _live_errors.get(symbol),
         "scenarios": [scenario_to_dict(s) for s in tf_engine.scenario_engine.scenarios],
         "structure_events": [structure_event_to_dict(e) for e in tf_engine.structure.events],
+        "pivots": [pivot_to_dict(p) for p in tf_engine.pivot_detector.pivots],
+        "tradeable": tf in TRADEABLE_TIMEFRAMES,
         "signals": [signal_to_dict(s) for s in tf_engine.signals[-50:]],
         "open_positions": [position_to_dict(p) for p in tf_engine.position_manager.positions.values() if not p.closed],
         "closed_positions": [position_to_dict(p) for p in tf_engine.position_manager.closed_positions],

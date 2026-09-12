@@ -6,7 +6,7 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, Dict
 
-from t3_engine.common.models import Candle, Position, Scenario, Signal, Wave
+from t3_engine.common.models import Candle, Pivot, Position, Scenario, Signal, Wave
 from t3_engine.market_structure.structure import StructureEvent
 
 
@@ -61,6 +61,15 @@ def position_to_dict(p: Position) -> Dict:
         "closed_at": (p.closed_at // 1000) if p.closed_at else None,
         "realized_pnl": p.realized_pnl, "mae": p.mae, "mfe": p.mfe, "closed": p.closed,
     }
+
+
+def pivot_to_dict(p: Pivot) -> Dict:
+    """The confirmed ZigZag swing points behind every wave count, oldest to
+    newest - the frontend draws these as one continuous zigzag line across
+    the WHOLE loaded history (not just the current scenario's few waves) so
+    the chart shows how price actually swung leading up to the current
+    count, instead of numbered waves appearing with no visible context."""
+    return {"time": p.timestamp // 1000, "price": p.price, "kind": p.kind}
 
 
 def structure_event_to_dict(e: StructureEvent) -> Dict:

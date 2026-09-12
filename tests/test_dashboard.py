@@ -63,6 +63,42 @@ def test_run_backtest_bybit_source_returns_real_candles():
     assert data["data_source"] == "bybit"
     assert len(data["candles"]) > 0
     assert data["note"] is None
+    assert data["timeframe"] == "5m"
+    # Full confirmed ZigZag swing history (not just the current scenario's
+    # waves) - lets the frontend draw a zigzag across the WHOLE loaded
+    # history for context, instead of numbered waves with nothing behind
+    # them (spec follow-up: wave markup only ever appeared at the tail).
+    assert "pivots" in data
+
+
+def test_run_backtest_accepts_a_timeframe_and_uses_it_for_both_the_fetch_and_the_engine_degree():
+    from t3_engine.common.models import Candle
+    from t3_engine.common.types import Timeframe
+    sample_candles = [
+        Candle(timeframe=Timeframe.H1, open_time=i * 3_600_000, close_time=(i + 1) * 3_600_000 - 1,
+               open=100.0 + i, high=101.0 + i, low=99.0 + i, close=100.5 + i, volume=10.0)
+        for i in range(300)
+    ]
+
+    with patch.object(server_module.BybitFuturesREST, "get_klines", return_value=sample_candles) as mock_get:
+        resp = client.get("/api/run", params={"source": "bybit", "symbol": "BTCUSDT", "timeframe": "1h"})
+    assert resp.status_code == 200
+    mock_get.assert_called_once()
+    assert mock_get.call_args.args[1] == Timeframe.H1
+    data = resp.json()
+    assert data["timeframe"] == "1h"
+    # 1h is context/confirmation-only per spec section 21 (see
+    # backtest/engine.py's TRADEABLE_TIMEFRAMES guard) - the response must
+    # say so plainly rather than silently showing an always-empty signal
+    # list with no explanation.
+    assert data["signals"] == []
+    assert "1h" in data["note"]
+    assert "5m/15m" in data["note"]
+
+
+def test_run_backtest_rejects_an_unsupported_timeframe():
+    resp = client.get("/api/run", params={"source": "synthetic", "timeframe": "2m"})
+    assert resp.status_code == 400
 
 
 def test_health():
@@ -177,6 +213,8 @@ def test_live_start_status_stop_lifecycle():
             state = c.get("/api/live/state", params={"symbol": "testusdt", "timeframe": "5m"})
             assert state.status_code == 200
             assert state.json()["symbol"] == "TESTUSDT"
+            assert state.json()["tradeable"] is True
+            assert "pivots" in state.json()
 
             again = c.post("/api/live/start", json={"symbol": "testusdt"})
             assert again.json()["status"] == "already_running"
@@ -211,6 +249,27 @@ def test_live_state_includes_forming_candle_before_first_close():
             assert status["FORMINGUSDT"]["trades_received"] == 1
 
             c.post("/api/live/stop", json={"symbol": "formingusdt"})
+
+
+def test_live_state_supports_context_timeframes_marked_not_tradeable():
+    """Spec follow-up: the TF picker offers 1m/5m/15m/1h/4h in both history
+    and live mode now, not just 5m/15m - live/live_loop.py's default
+    DISPLAY_TIMEFRAMES was widened accordingly. 1h/4h are context/
+    confirmation-only (section 21), so the state response must say so
+    explicitly (tradeable: false) rather than pretend they generate real
+    entries the way 5m/15m do."""
+    with patch.object(server_module.LiveTradingEngine, "run_live", _fake_run_live):
+        with TestClient(app) as c:
+            c.post("/api/live/start", json={"symbol": "ctxusdt"})
+
+            state = c.get("/api/live/state", params={"symbol": "ctxusdt", "timeframe": "1h"})
+            assert state.status_code == 200
+            assert state.json()["tradeable"] is False
+
+            tradeable_state = c.get("/api/live/state", params={"symbol": "ctxusdt", "timeframe": "5m"})
+            assert tradeable_state.json()["tradeable"] is True
+
+            c.post("/api/live/stop", json={"symbol": "ctxusdt"})
 
 
 def test_live_stop_when_not_running():
