@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""CLI entry point: run the T3 engine live against Binance USDT-M Futures
+"""CLI entry point: run the T3 engine live against Bybit USDT perpetuals
 in PAPER mode (simulated fills, real market data).
 
     python run_paper_trading.py --symbol BTCUSDT
 
-REQUIRES real outbound network access to fstream.binance.com /
-fapi.binance.com. This project's own build/CI sandbox blocks that host at
-the network policy layer (see README "Known limitations" for the exact
+REQUIRES real outbound network access to stream.bybit.com. This project's
+own build/CI sandbox blocks outbound access to real exchanges at the
+network policy layer (see README "Known limitations" for the exact
 error) - the code path below is real and unit-tested against a fake trade
 stream (tests/test_pipeline_live_loop.py), but has not been run against a
 live socket in this session. Run it yourself in an environment with normal
@@ -28,12 +28,12 @@ async def _main_async(symbol: str, equity: float, threshold: float, log_dir: str
                                 entry_confidence_threshold=threshold, log_dir=log_dir)
     print(f"Starting PAPER trading engine for {symbol} (equity={equity}, threshold={threshold})")
     print(f"Decision log: {log_dir}/signals.jsonl")
-    await engine.run_live_binance()
+    await engine.run_live()
 
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO)
-    parser = argparse.ArgumentParser(description="T3 PAPER trading engine (live Binance data, simulated fills)")
+    parser = argparse.ArgumentParser(description="T3 PAPER trading engine (live Bybit data, simulated fills)")
     parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--equity", type=float, default=10_000.0)
     parser.add_argument("--threshold", type=float, default=75.0)

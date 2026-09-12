@@ -1,6 +1,6 @@
 # elliott-wave-analyzer
 
-Инструмент для анализа волн Эллиота с подключением к Binance, расчётом Фибоначчи и визуализацией.
+Инструмент для анализа волн Эллиота с подключением к Bybit, расчётом Фибоначчи и визуализацией.
 
 > The root-level `app.py` / `templates/index.html` is an earlier, simpler
 > prototype (single-timeframe REST analysis + matplotlib chart). It
@@ -15,9 +15,10 @@
 # T3 — Multi-Timeframe Elliott Wave Trading Engine
 
 A modular, testable, mostly-real implementation of the T3 spec: a
-multi-timeframe Elliott Wave analysis and (paper-)trading engine for
-Binance USDT-M Futures. 155 automated tests, all passing, cover every
-module described below.
+multi-timeframe Elliott Wave analysis and (paper-)trading engine, live
+market data from Bybit USDT perpetuals (see "Mobile app + live Bybit"
+below for why Binance was dropped). 150 automated tests, all passing,
+cover every module described below.
 
 ## Read this first: what "done" means here
 
@@ -44,12 +45,15 @@ no-lookahead guarantee (see `tests/test_backtest.py`), and a FastAPI +
 TradingView-lightweight-charts dashboard that draws real candles with real
 overlays.
 
-**What is real code but not network-verified in this build:** the Binance
-REST and WebSocket clients (correct against the documented API schema,
-unit-tested against mocked responses/fake sockets) and the
-Testnet/Live execution scaffold (correct HMAC request signing and order
-payload building, unit-tested offline). See "Known limitations" below for
-exactly why, and the 3-step path to activate each once you have network
+**What is real code but not network-verified in this build:** the Bybit
+REST and WebSocket clients that actually power the running app (correct
+against the documented API schema, unit-tested against mocked responses/
+fake sockets - confirmed working in production once deployed somewhere
+with real network access), the now-dormant Binance clients kept for
+reference, and the Testnet/Live execution scaffold (correct HMAC request
+signing and order payload building, unit-tested offline). See "Known
+limitations" below for exactly why, and the 3-step path to activate each
+once you have network
 access.
 
 **What is explicitly a documented simplification, not a hidden gap:** see
@@ -76,7 +80,7 @@ t3_engine/
   position_manager/   position lifecycle, partial TPs, structural trailing stop, MAE/MFE
   database/           SQLAlchemy ORM + schema.sql (raw_trades, candles, wave_states,
                       wave_scenarios, signals, orders, positions, backtest_results)
-  market_data/        Binance USDT-M Futures REST + WebSocket clients
+  market_data/        Bybit REST + WebSocket clients (live); Binance clients kept dormant
   backtest/           event-driven, no-lookahead backtester + metrics + synthetic fixture
   pipeline/           live_loop.py - the section-20 event-driven real-time orchestrator
   dashboard/           FastAPI backend + static/index.html (lightweight-charts UI),
@@ -84,9 +88,9 @@ t3_engine/
   ai_advisor/         optional BYO-key GPT second-opinion commentary (never a decision-maker)
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                155 tests, one file per module above
+tests/                150 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
-run_paper_trading.py   CLI: run the live pipeline against Binance in PAPER mode
+run_paper_trading.py   CLI: run the live pipeline against Bybit in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
 ```
 
@@ -94,54 +98,57 @@ Every module has a docstring explaining *why* it's structured the way it
 is, not just what it does - read those before changing the hard-rule or
 no-lookahead logic in particular.
 
-## Mobile app + live Binance + AI advisor (dashboard)
+## Mobile app + live Bybit + AI advisor (dashboard)
 
 `dashboard/static/index.html` is a mobile-installable PWA, not just a
 desktop web page:
 
+- **DATA SOURCE IS BYBIT ONLY.** Binance was the original exchange, but in
+  production it turned out unusable from this app's hosting: its REST API
+  returned a sustained IP-level ban (HTTP 418 "I'm a teapot", the
+  documented response for an auto-banned IP - likely inherited from other
+  tenants on Render's shared outbound IP pool, since the ban appeared on
+  the very first request a fresh deploy ever made), and separately its
+  public WebSocket completed the connection handshake yet delivered
+  *zero* trades indefinitely - confirmed via a running trade counter
+  staying at 0 for many minutes on a real deploy, a silent failure, not a
+  network error a client can even detect. Rather than keep working around
+  an exchange that won't serve this app's traffic, **every code path here
+  now talks to Bybit exclusively** (`market_data/bybit_rest_client.py` for
+  history/symbols, `market_data/bybit_ws_client.py` for live) - confirmed
+  working in production: a real live session received 2500+ real trades
+  over 25 minutes with zero issues. The old Binance clients
+  (`market_data/rest_client.py`, `ws_client.py`) still exist and are still
+  unit-tested, dormant rather than deleted in case Binance access is ever
+  restored, but nothing in the running app calls them.
 - **"Add to Home Screen"** on iOS Safari or Android Chrome installs it as
   an app icon (manifest + service worker in `dashboard/static/`), no App
   Store/Google Play submission needed - that's the fast/simple path to a
   "mobile app" versus building and shipping a separate native app.
-- **Live public WebSocket mode**: pick "Binance (live, public WS)" as the
-  source, enter a symbol in plain Binance format (e.g. `BTCUSDT` - no
-  slash, no quote-currency separator: `UNI/USDC` or `SOL/USDT` are rejected/
-  normalized, since Binance symbols are just one alphanumeric string) and
-  hit "Start live". This calls `POST /api/live/start`, which spins up the
-  real `pipeline/live_loop.py` orchestrator against Binance's **public**
-  market-data WebSocket (aggTrade/bookTicker/markPrice) for that symbol -
-  no API key required, since market data isn't account data.
-  **Binance blocks entire regions from its API with HTTP 451** (confirmed
-  in production logs of a Render deployment of this exact app, hosted in
-  Render's default `oregon` (US) region) - this is Binance's own
-  regulatory IP block, not a bug here, and it affects the REST history
-  endpoint the same way it affects the live WebSocket. If "Binance
-  (history)" or "Binance (live)" don't return data, redeploy this service
-  in a **non-US Render region** (`frankfurt` or `singapore` - see
-  `render.yaml`'s `region` field, or the region picker when creating the
-  service manually); this build's own sandbox separately blocks Binance
-  entirely regardless of region (see "Known limitations" above).
+- **Live public WebSocket mode**: pick "Bybit (live, public WS)" as the
+  source, enter a symbol in plain format (e.g. `BTCUSDT` - no slash, no
+  quote-currency separator: `UNI/USDC` or `SOL/USDT` are rejected/
+  normalized) and hit "Start live". This calls `POST /api/live/start`,
+  which spins up the real `pipeline/live_loop.py` orchestrator against
+  Bybit's **public** `publicTrade` WebSocket stream for that symbol - no
+  API key required, since market data isn't account data. A 5m/15m candle
+  only appears once a full interval has genuinely elapsed after Start -
+  `trades_received` in `/api/live/state` climbs immediately as real trades
+  arrive, well before the first candle closes, so you can tell "connected
+  and receiving data" apart from a dead connection without waiting 5
+  minutes to find out.
 - **Symbol picker**: the symbol field is backed by a custom JS dropdown
   (not the native HTML `<datalist>` element - see below for why) fed by
   `GET /api/symbols` (cached in-process for an hour) - type any letter and
   a filtered suggestion list appears, no need to type the full ticker.
-  When Binance is reachable this lists every actively-tradeable USDT-M
-  perpetual futures symbol via `/fapi/v1/exchangeInfo` (`"source": "live"`
-  in the response). When it isn't (451-blocked region, or an inherited
-  418/429 ban - see below), `/api/symbols` now **never returns an error**:
-  it serves a hand-picked static list of ~60 long-established symbols
-  instead (`t3_engine/market_data/fallback_symbols.py`, `"source":
-  "fallback"`), so the picker is always populated with something real even
-  during an outage, and swaps back to the live list transparently the next
-  time a fetch succeeds.
-- **Respecting Binance's rate limits**: `rest_client.py` funnels every
-  request through one `_get()` that (a) tracks Binance's own
-  `X-MBX-USED-WEIGHT-1M` response header (`last_used_weight`/
-  `weight_budget_remaining`, budget is 2400 weight/minute per IP per
-  Binance's docs) and (b) enforces a self-imposed minimum 0.5s spacing
-  between outbound requests (at most 2 req/s), so this app is never itself
-  the reason a shared Render IP gets rate-limited or banned. This is on
-  top of, not instead of, the shared 418/429 cooldown described next.
+  When Bybit is reachable this lists every actively-tradeable linear
+  (USDT-margined) perpetual symbol (`"source": "live"` in the response).
+  When it isn't, `/api/symbols` **never returns an error**: it serves a
+  hand-picked static list of ~60 long-established symbols instead
+  (`t3_engine/market_data/fallback_symbols.py`, `"source": "fallback"`),
+  so the picker is always populated with something real even during an
+  outage, and swaps back to the live list transparently the next time a
+  fetch succeeds.
 - **Render free-tier cold starts**: a free Render web service spins down
   after ~15 minutes with no HTTP traffic and takes up to roughly a minute
   to wake back up on the next request - this looks exactly like an
@@ -150,35 +157,6 @@ desktop web page:
   this instead of spinning forever; if you hit it, the fix is just to wait
   and retry, not to redeploy. A paid Render plan (or pinging the service
   periodically) avoids the sleep entirely.
-- **Binance HTTP 418 ("I'm a teapot")**: Binance's documented response for
-  an IP that's been temporarily auto-banned for exceeding its request rate
-  limit. On shared hosting (Render's free/shared plans included), your
-  service's outbound IP can be shared with other tenants, so a ban can be
-  inherited from traffic you never sent yourself - this was observed in
-  practice on a fresh Frankfurt deploy of this app that had made exactly
-  one prior Binance request. The dashboard now tracks this with a shared,
-  process-wide cooldown (`server.py`'s `_binance_backoff_until`): the
-  moment any endpoint sees a 418/429, every Binance-touching endpoint
-  backs off for the `Retry-After` duration Binance sent (or 120s if it
-  didn't send one) instead of hammering Binance again immediately, which
-  is exactly what turns a short ban into a long one per Binance's own
-  rate-limit rules. If this keeps recurring, a Render plan with a
-  dedicated/static outbound IP address stops the ban-inheritance problem
-  at the root (you stop sharing an IP with whoever triggered the ban).
-- **Automatic Bybit fallback for historical data**: a Binance-side ban or
-  regional block only affects Binance - it says nothing about whether
-  *other* exchanges are reachable from the same server. `/api/run?source=
-  binance` and `/api/symbols` now both try
-  `t3_engine/market_data/bybit_rest_client.py` (Bybit's public, no-API-
-  key REST API) automatically whenever Binance is unavailable (451/418/
-  429/network error/active cooldown), before giving up to an error or the
-  static symbol list. The response is tagged so you can tell which
-  exchange actually served the data: `/api/run`'s `data_source` field
-  (`"binance"` or `"bybit"`) and its `note`, and `/api/symbols`'s
-  `"source": "bybit"`. This is a REST-only fallback for historical klines
-  and the symbol list - the **live WebSocket** mode (`Start live`) still
-  streams from Binance's public WS only; a Bybit-backed live stream would
-  need its own pipeline wiring and hasn't been built yet.
 - **PWA cache bug (fixed, in two layers)**: earlier versions of `sw.js`
   cached the app shell (`index.html`) cache-first and never re-fetched it
   - browsers only re-run a service worker's install/activate when the
@@ -225,20 +203,6 @@ desktop web page:
   was purely a chart-rendering limit (now capped to the most recent 30 via
   `MAX_STRUCTURE_MARKERS` in `index.html`), not a signal bug; wave labels
   were already correctly limited to the primary scenario only.
-- **Live source now falls back to Bybit automatically**: `run_live()`
-  (`pipeline/live_loop.py`) tries Binance's public WS first and switches to
-  Bybit's public WS (`market_data/bybit_ws_client.py`) if Binance hasn't
-  delivered a single trade within 15 seconds - the same rationale as the
-  REST fallback (a different exchange on different infrastructure, so a
-  Binance-side ban has no bearing on it), extended to the live stream
-  itself, not just historical klines/the symbol list. `/api/live/state`'s
-  `live_source` field says which one actually ended up feeding the
-  session, and its `error` field surfaces the underlying failure message
-  if a session's background task ever dies outright. This was necessary
-  because `BinanceFuturesWebSocketClient` never actually raises on a
-  persistent connection failure in production - it just retries the same
-  dead endpoint forever with backoff - so counting real trades was the
-  only reliable signal available to detect "stuck" versus "working".
 - **Server-side logging now actually reaches Render's log viewer**: a
   batch of connection-visibility logging (WS connect/disconnect, first-
   trade-received) was added in an earlier round and shipped, then
@@ -246,7 +210,9 @@ desktop web page:
   definitely running - Python's root logger has no handler by default,
   and gunicorn/uvicorn only configure their own loggers, not arbitrary
   application ones. `server.py` now calls `logging.basicConfig(...)` at
-  import time so every module's logger actually reaches stdout.
+  import time so every module's logger actually reaches stdout. This is
+  exactly what surfaced the Bybit fallback working in production (see the
+  first bullet above).
 - **AI Advisor tab**: paste your own OpenAI API key (your ChatGPT/OpenAI
   subscription/credits - stored only in your browser's `localStorage`,
   forwarded per-request to `/api/ai/advice` and never written to disk
@@ -272,7 +238,7 @@ desktop web page:
    so the default SQLite file and `logs/` won't survive a redeploy. For
    trade history that persists, add a Render Postgres instance and set
    `T3_DATABASE_URL` to its connection string (see `.env.example`).
-4. Nothing here needs a Binance API key (market data is public). If you
+4. Nothing here needs a Bybit API key (market data is public). If you
    later want the AI Advisor tab to work, you (or your users) just paste
    an OpenAI key into the browser - no server-side config needed for that
    either.
@@ -312,20 +278,20 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (155 tests)
+# Run the automated test suite (150 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)
 python run_backtest.py --cycles 3 --threshold 70
 
-# Run a backtest against REAL Binance history (needs network access to fapi.binance.com)
-python run_backtest.py --source binance --symbol BTCUSDT --limit 1500
+# Run a backtest against REAL Bybit history (needs network access to api.bybit.com)
+python run_backtest.py --source bybit --symbol BTCUSDT --limit 1000
 
 # Serve the dashboard at http://localhost:8000
 python run_dashboard.py
 
-# Run the live event-driven pipeline in PAPER mode against real Binance
-# market data (needs network access to fstream.binance.com)
+# Run the live event-driven pipeline in PAPER mode against real Bybit
+# market data (needs network access to stream.bybit.com)
 python run_paper_trading.py --symbol BTCUSDT
 ```
 
@@ -343,30 +309,37 @@ why that step is manual rather than something the ORM layer papers over.
 
 ## Known limitations (read before treating anything here as "done")
 
-1. **No live network access to Binance in this build sandbox** (this is a
-   property of the sandbox this code was written in, not of Render or any
-   normal hosting - Render has ordinary outbound internet access, so the
-   dashboard's "Binance (live, public WS)" mode and `run_paper_trading.py`
-   connect there without any changes). A direct test confirmed the
-   outbound proxy returns a policy 403 on `CONNECT` to `fapi.binance.com`.
-   This means:
-   - The REST/WebSocket clients (`market_data/`) are correct against
-     Binance's documented schema and unit-tested against mocked HTTP
-     responses / fake sockets, but have never completed a real request in
-     this session. Run `pytest tests/test_market_data.py -q` to see the
-     offline coverage; run them for real wherever you have normal internet
-     access.
+1. **No live network access to any real exchange in this build sandbox**
+   (this is a property of the sandbox this code was written in, not of
+   Render or any normal hosting - Render has ordinary outbound internet
+   access, so the dashboard's "Bybit (live, public WS)" mode and
+   `run_paper_trading.py` connect there without any changes, and are
+   confirmed working there in production). A direct test confirmed the
+   outbound proxy returns a policy 403 on `CONNECT` to real exchange
+   hosts. This means:
+   - The Bybit REST/WebSocket clients (`market_data/bybit_*.py`) are
+     correct against Bybit's documented schema and unit-tested against
+     mocked HTTP responses/fake sockets, but have never completed a real
+     request in this session. Run `pytest tests/test_market_data.py -q`
+     to see the offline coverage; run them for real wherever you have
+     normal internet access.
+   - The Binance clients (`market_data/rest_client.py`, `ws_client.py`)
+     are likewise real and unit-tested but now unused by the running app
+     (see "Mobile app + live Bybit" above for why) - dormant, not deleted.
    - The Testnet/Live execution engine
      (`execution/binance_futures_live.py`) implements and unit-tests the
      real HMAC-SHA256 request signing and `/fapi/v1/order` payload
      builder, but deliberately raises `NotImplementedError` on the actual
      network call rather than ship an unverified path that could place
      real orders. The module docstring gives the exact 3-step activation
-     path once you have Testnet API keys and network access.
+     path once you have Testnet API keys and network access. This part
+     was left targeting Binance's Futures API since it's about real-money
+     order execution (a separate, still-dormant concern from the market-
+     data source switch above) - see "Staged rollout" below.
    - No real historical backtest (spec section 19's "minimum 1000 trades")
      has been run - it can't be, without real data. `backtest/` is fully
      implemented and its no-lookahead property is proven with tests; you
-     need to run it yourself against real klines (`--source binance`).
+     need to run it yourself against real klines (`--source bybit`).
 
 2. **Corrective structure classification (zigzag/flat/triangle/combination)
    is a price-ratio heuristic**, not full recursive subwave counting.
@@ -479,12 +452,15 @@ dedicated tests (`test_market_structure.py`, `test_scenario_engine.py`):
 
 One claim in the same audit - that Binance changed its WebSocket API to
 require a separate route for aggTrade/markPrice/kline - could **not** be
-verified: this build environment has no outbound access to Binance's real,
-current documentation. `market_data/ws_client.py` uses the historically-
-documented combined-stream format (`wss://fstream.binance.com/stream?
-streams=...`); treat the route-change claim as unconfirmed until checked
-from a machine with real internet access, not as a reason to change the
-live WS routing.
+verified at the time: this build environment has no outbound access to
+Binance's real, current documentation. `market_data/ws_client.py` still
+uses the historically-documented combined-stream format (`wss://
+fstream.binance.com/stream?streams=...`), unchanged. This became moot
+shortly after: production logs showed Binance's WS connecting successfully
+but delivering zero trades for many minutes regardless, which is what
+prompted dropping Binance entirely in favor of Bybit (see "Mobile app +
+live Bybit" above) - so the specific route-change claim was never
+actually acted on either way.
 
 ## Staged rollout to real trading (spec section 24)
 
