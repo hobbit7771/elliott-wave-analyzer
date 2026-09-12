@@ -46,7 +46,15 @@ class MarketStructureTracker:
     for liquidity-sweep detection. Maintains the last swing high/low and
     the current inferred trend (UP/DOWN/None)."""
 
-    def __init__(self):
+    def __init__(self, min_break_pct: float = 0.05):
+        """min_break_pct: minimum % the breaking price must clear the prior
+        swing by before a BOS/CHoCH is actually declared. Without this, ANY
+        new local high/low - even one a fraction of a point past the prior
+        swing - fires a structure event unconditionally, which is far more
+        BOS/CHoCH noise than the move actually warrants (this compounds
+        with pivots.py's own deviation filter rather than replacing it: a
+        pivot already required a real reversal to confirm, but the BREAK
+        past the next swing on top of that had no floor of its own)."""
         self.pivots: List[Pivot] = []
         self.trend: Optional[Direction] = None
         self.last_swing_high: Optional[Pivot] = None
@@ -54,12 +62,19 @@ class MarketStructureTracker:
         self._prev_swing_high: Optional[Pivot] = None
         self._prev_swing_low: Optional[Pivot] = None
         self.events: List[StructureEvent] = []
+        self.min_break_pct = min_break_pct / 100.0
+
+    def _is_significant_break(self, breaking_price: float, reference_price: float) -> bool:
+        if reference_price == 0:
+            return True
+        return abs(breaking_price - reference_price) / abs(reference_price) >= self.min_break_pct
 
     def on_pivot(self, pivot: Pivot) -> Optional[StructureEvent]:
         event = None
         if pivot.kind == "HIGH":
             if self.last_swing_high is not None:
-                if pivot.price > self.last_swing_high.price:
+                if pivot.price > self.last_swing_high.price and self._is_significant_break(
+                        pivot.price, self.last_swing_high.price):
                     # higher high
                     if self.trend in (None, Direction.UP):
                         event = StructureEvent("BOS", Direction.UP, self.last_swing_high,
@@ -74,7 +89,8 @@ class MarketStructureTracker:
             self.last_swing_high = pivot
         else:
             if self.last_swing_low is not None:
-                if pivot.price < self.last_swing_low.price:
+                if pivot.price < self.last_swing_low.price and self._is_significant_break(
+                        pivot.price, self.last_swing_low.price):
                     if self.trend in (None, Direction.DOWN):
                         event = StructureEvent("BOS", Direction.DOWN, self.last_swing_low,
                                                 pivot.confirmed_at_index, pivot.timestamp, pivot.price)

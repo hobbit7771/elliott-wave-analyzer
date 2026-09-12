@@ -29,7 +29,9 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from t3_engine.common.models import Pivot, Scenario, Wave, next_id
-from t3_engine.common.types import Direction, Timeframe, WaveLabel, WaveStatus
+from t3_engine.common.types import Direction, StructureType, Timeframe, WaveLabel, WaveStatus
+from t3_engine.elliott_engine.rules_correction import classify_correction
+from t3_engine.elliott_engine.rules_diagonal import validate_diagonal
 from t3_engine.elliott_engine.rules_impulse import validate_impulse
 from t3_engine.fibonacci.calculator import (
     nearest_ratio_score,
@@ -60,6 +62,26 @@ def _make_wave(label: WaveLabel, degree: Timeframe, start: Pivot, end: Pivot,
     )
 
 
+def _rescue_as_diagonal(result, waves: List[Wave], wave5: Optional[Wave], direction: Direction) -> bool:
+    """A wave-4/wave-1 overlap is only ever a diagonal, never a plain
+    relabel, per rules_diagonal.py's own docstring: the overlap exception
+    applies ONLY if the leg ALSO satisfies the diagonal-specific
+    contracting/expanding shape rules (D3/D4) - a standard impulse that
+    merely fails the overlap check is still invalidated below if this
+    returns False. Tags all 5 legs DIAGONAL_ENDING on success (the far
+    more common variant per that module's docstring - this engine has no
+    parent-degree context to distinguish a leading vs. ending diagonal, a
+    documented simplification, not a silent guess)."""
+    if result.broken_rule != "WAVE4_OVERLAPS_WAVE1":
+        return False
+    diagonal_result = validate_diagonal(waves[0], waves[1], waves[2], waves[3], wave5, direction)
+    if not diagonal_result.valid:
+        return False
+    for w in waves:
+        w.structure_type = StructureType.DIAGONAL_ENDING
+    return True
+
+
 def build_candidate_waves(pivots: List[Pivot], direction: Direction, degree: Timeframe,
                           parent_wave_id: Optional[str] = None) -> Dict:
     """Build as many labelled waves as `pivots` allows (up to a full
@@ -82,16 +104,29 @@ def build_candidate_waves(pivots: List[Pivot], direction: Direction, degree: Tim
         waves.append(wave)
 
         if label == WaveLabel.W4:
-            result = validate_impulse(waves[0], waves[1], waves[2], waves[3],
-                                       waves[4] if len(waves) > 4 else None, direction)
+            result = validate_impulse(waves[0], waves[1], waves[2], waves[3], None, direction)
             if not result.valid:
-                broken_rule = result
-                break
+                if not _rescue_as_diagonal(result, waves, None, direction):
+                    broken_rule = result
+                    break
         elif label == WaveLabel.W5:
             result = validate_impulse(waves[0], waves[1], waves[2], waves[3], waves[4], direction)
             if not result.valid:
-                broken_rule = result
-                break
+                if not _rescue_as_diagonal(result, waves, waves[4], direction):
+                    broken_rule = result
+                    break
+        elif label == WaveLabel.C:
+            wave_a = next((w for w in waves if w.label == WaveLabel.A), None)
+            wave_b = next((w for w in waves if w.label == WaveLabel.B), None)
+            if wave_a is not None and wave_b is not None:
+                # Only the 3-leg zigzag/flat classifier is wired in here -
+                # triangles (A-B-C-D-E) and combinations (W-X-Y) need legs
+                # this engine's fixed 8-label anchor scheme doesn't build
+                # (see build_candidate_waves' `labels`), so those remain
+                # UNKNOWN_CORRECTION for now rather than silently mislabelled.
+                structure = classify_correction([wave_a, wave_b, wave])
+                for w in (wave_a, wave_b, wave):
+                    w.structure_type = structure
 
     if broken_rule is not None:
         waves[-1].status = WaveStatus.INVALIDATED
@@ -192,7 +227,7 @@ class ScenarioEngine:
 
         new_scenarios.sort(key=lambda s: s.probability, reverse=True)
         survivors = [s for s in new_scenarios if s.probability > 0][: self.max_scenarios]
-        self._normalize(survivors)
+        self._scale_to_percent(survivors)
         self.scenarios = survivors
         return self.scenarios
 
@@ -208,12 +243,19 @@ class ScenarioEngine:
         )
 
     @staticmethod
-    def _normalize(scenarios: List[Scenario]) -> None:
-        total = sum(s.probability for s in scenarios)
-        if total <= 0:
-            return
+    def _scale_to_percent(scenarios: List[Scenario]) -> None:
+        """Each scenario's OWN absolute score, scaled to 0-100 - deliberately
+        NOT redistributed/renormalized across survivors (the previous
+        behavior: dividing by the sum of survivors' scores meant a single
+        weak scenario that outlived the others got rescaled to exactly
+        100%, so `entry_confidence_threshold` silently meant "highest
+        share among whatever's left" instead of "at least this good on an
+        absolute scale"). `_weighted_score` already returns a value in
+        [0, 1] since its component scores are each bounded in [0, 1] and
+        its weights sum to 1.0, so a plain *100 here is a legitimate
+        absolute percentage."""
         for s in scenarios:
-            s.probability = round(100.0 * s.probability / total, 2)
+            s.probability = round(100.0 * s.probability, 2)
 
     @staticmethod
     def _invalidation_level(waves: List[Wave], direction: Direction) -> Optional[float]:

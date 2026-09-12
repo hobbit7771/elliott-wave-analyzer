@@ -30,6 +30,7 @@ def wave_to_dict(w: Wave) -> Dict:
         "start_price": w.start_price, "end_price": w.end_price,
         "high": w.high, "low": w.low, "status": _enum_value(w.status),
         "confidence": w.confidence, "invalid_level": w.invalid_level,
+        "structure_type": _enum_value(w.structure_type) if w.structure_type else None,
     }
 
 
