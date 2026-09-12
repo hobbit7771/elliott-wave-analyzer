@@ -83,12 +83,22 @@ def test_health():
     resp = client.get("/api/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
+    assert resp.json()["build"] == server_module.BUILD_VERSION
 
 
 def test_index_serves_html():
     resp = client.get("/")
     assert resp.status_code == 200
     assert "lightweight-charts" in resp.text
+
+
+def test_index_shows_the_same_build_marker_as_health_endpoint():
+    """A visible, bump-on-every-deploy marker so a user and a developer
+    checking server logs can confirm - without any ambiguity from browser/
+    proxy caching or an already-open stale tab - that they're both looking
+    at the same actual deploy."""
+    resp = client.get("/")
+    assert server_module.BUILD_VERSION in resp.text
 
 
 def test_index_and_service_worker_are_never_cached():
