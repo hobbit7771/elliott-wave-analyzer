@@ -35,6 +35,8 @@ live socket connection.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from typing import AsyncIterator, Dict, List
 
@@ -43,9 +45,12 @@ from t3_engine.candle_builder.aggregator import MultiTimeframeCandleBuilder, Tra
 from t3_engine.common.models import Candle
 from t3_engine.common.types import TRADEABLE_TIMEFRAMES, Timeframe
 from t3_engine.logger.decision_logger import DecisionLogger
+from t3_engine.market_data.bybit_ws_client import BybitFuturesWebSocketClient, parse_taker_side_is_buyer_maker
 from t3_engine.market_data.ws_client import BinanceFuturesWebSocketClient
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_LIVE_SOURCE_WATCHDOG_SECONDS = 15.0
 
 
 class LiveTradingEngine:
@@ -70,6 +75,11 @@ class LiveTradingEngine:
         # counter there is no way to tell "connected but silent" apart from
         # "connected and receiving trades" until the first candle closes.
         self.trades_received: int = 0
+        # Which exchange is actually feeding this session right now - set
+        # once run_live() picks one, so the dashboard can show the user
+        # which one they're really getting (see run_live()'s watchdog/
+        # fallback logic below for why this isn't always "binance").
+        self.live_source: str = "binance"
 
     def on_trade(self, trade: Trade) -> None:
         self.trades_received += 1
@@ -128,3 +138,52 @@ class LiveTradingEngine:
             symbols=[self.symbol], streams=["aggTrade", "bookTicker", "markPrice"], on_message=on_message,
         )
         await ws_client.run()
+
+    async def run_live_bybit(self) -> None:
+        async def on_message(item: dict) -> None:
+            self.on_trade(Trade(
+                timestamp=int(item["T"]), price=float(item["p"]), quantity=float(item["v"]),
+                is_buyer_maker=parse_taker_side_is_buyer_maker(item.get("S", "")),
+            ))
+
+        logger.info("[live %s] connecting to Bybit public WebSocket...", self.symbol)
+        ws_client = BybitFuturesWebSocketClient(symbols=[self.symbol], on_message=on_message)
+        await ws_client.run()
+
+    async def _wait_until_trades_received(self) -> None:
+        while self.trades_received == 0:
+            await asyncio.sleep(0.2)
+
+    async def run_live(self, watchdog_seconds: float = DEFAULT_LIVE_SOURCE_WATCHDOG_SECONDS) -> None:
+        """Tries Binance's public WS first; if it hasn't delivered a single
+        trade within `watchdog_seconds`, switches to Bybit's public WS for
+        the rest of the session instead.
+
+        WHY A WATCHDOG AND NOT A TRY/EXCEPT: `BinanceFuturesWebSocketClient
+        .run()` never actually raises in production - a failed connection
+        just triggers its own infinite reconnect-with-backoff loop (see
+        ws_client.py), which is the right behavior for a transient network
+        blip but means a *persistent* failure (e.g. an inherited IP ban
+        silently blocking the handshake, observed in production - see
+        README) would otherwise retry the same dead endpoint forever and
+        never give Bybit a chance. Counting real trades is the only signal
+        available to tell "connected and working" apart from "stuck
+        retrying a connection that will never succeed"."""
+        self.live_source = "binance"
+        binance_task = asyncio.create_task(self.run_live_binance())
+        try:
+            try:
+                await asyncio.wait_for(self._wait_until_trades_received(), timeout=watchdog_seconds)
+            except asyncio.TimeoutError:
+                logger.warning("[live %s] no trade from Binance within %.0fs - falling back to Bybit",
+                                self.symbol, watchdog_seconds)
+                binance_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await binance_task
+                self.live_source = "bybit"
+                await self.run_live_bybit()
+                return
+            await binance_task  # Binance is working - stay on it for the rest of the session
+        finally:
+            if not binance_task.done():
+                binance_task.cancel()

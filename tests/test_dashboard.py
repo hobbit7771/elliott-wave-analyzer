@@ -120,6 +120,17 @@ def test_index_reloads_when_a_new_service_worker_takes_control():
     assert "controllerchange" in resp.text
 
 
+def test_index_uses_custom_symbol_dropdown_not_native_datalist():
+    """Mobile Safari accepts <input list="..."> silently but never
+    actually renders the native datalist suggestion popup - a long-
+    standing WebKit gap, not a markup bug. A hand-rolled dropdown
+    (#symbolSuggestions) replaces it so autocomplete actually works on
+    the phones this app is meant to run on."""
+    resp = client.get("/")
+    assert "<datalist" not in resp.text
+    assert "symbolSuggestions" in resp.text
+
+
 def test_run_backtest_synthetic_returns_real_candles_and_metrics():
     resp = client.get("/api/run", params={"source": "synthetic", "cycles": 1, "threshold": 50})
     assert resp.status_code == 200
@@ -143,12 +154,15 @@ def test_run_backtest_response_is_json_serializable_end_to_end():
 
 
 # ---- live pipeline endpoints ----
-# `run_live_binance` is patched to a never-ending no-op coroutine instead of
-# a real WebSocket connection - this environment blocks outbound access to
-# Binance (see README), and these tests only need to verify the FastAPI
-# task bookkeeping (start/status/stop), not a real socket.
+# `run_live` (the method server.py actually calls - it internally tries
+# Binance, then falls back to Bybit via a watchdog, see live_loop.py) is
+# patched to a never-ending no-op coroutine instead of a real WebSocket
+# connection - this environment blocks outbound access to both exchanges
+# (see README), and these tests only need to verify the FastAPI task
+# bookkeeping (start/status/stop), not a real socket or the fallback logic
+# itself (that's covered separately in test_pipeline_live_loop.py).
 
-async def _fake_run_live_binance(self):
+async def _fake_run_live(self):
     await asyncio.Event().wait()  # blocks forever until the task is cancelled
 
 
@@ -165,7 +179,7 @@ def test_live_start_status_stop_lifecycle():
     # between calls, which is a TestClient-only artifact: a real ASGI
     # server (uvicorn) keeps a single event loop for the process, so
     # `asyncio.create_task` in a request handler behaves as expected there.
-    with patch.object(server_module.LiveTradingEngine, "run_live_binance", _fake_run_live_binance):
+    with patch.object(server_module.LiveTradingEngine, "run_live", _fake_run_live):
         with TestClient(app) as c:
             resp = c.post("/api/live/start", json={"symbol": "testusdt"})
             assert resp.status_code == 200
@@ -194,7 +208,7 @@ def test_live_state_includes_forming_candle_before_first_close():
     only appears after 15 real minutes) - the chart should still show the
     in-progress bar updating, and the response should say so explicitly,
     rather than the frontend just showing '0 candles' with no explanation."""
-    with patch.object(server_module.LiveTradingEngine, "run_live_binance", _fake_run_live_binance):
+    with patch.object(server_module.LiveTradingEngine, "run_live", _fake_run_live):
         with TestClient(app) as c:
             c.post("/api/live/start", json={"symbol": "formingusdt"})
 

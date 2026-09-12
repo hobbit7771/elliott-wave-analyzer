@@ -15,6 +15,7 @@ needs to run somewhere with outbound network access to actually work.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import time
@@ -43,6 +44,19 @@ from t3_engine.market_data.rest_client import BinanceFuturesREST
 from t3_engine.pipeline.live_loop import LiveTradingEngine
 
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
+# Without this, `logging.getLogger(__name__).info(...)` calls anywhere in
+# this app (live_loop.py, ws_client.py's connect/disconnect/trade-count
+# messages) are silently swallowed - Python's root logger has NO handler
+# by default, and gunicorn/uvicorn only configure their OWN loggers
+# (uvicorn.access/uvicorn.error), not arbitrary application loggers. This
+# was discovered by its absence: a batch of connection-visibility logging
+# was added and shipped, then confirmed completely missing from Render's
+# logs even though the code path definitely ran (the trades_received
+# counter it stands next to is a plain field, not routed through logging,
+# and it did show real values). basicConfig() here makes every module's
+# logger actually reach stdout, which Render captures as app logs.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 app = FastAPI(title="T3 Elliott Wave Trading Engine Dashboard")
 
@@ -129,7 +143,7 @@ def _check_binance_backoff() -> None:
 
 async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
     try:
-        await engine.run_live_binance()
+        await engine.run_live()
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001 - surface it in /api/live/status instead of crashing the process
@@ -329,6 +343,10 @@ def live_status():
             # this there's no way to tell "connected but silent" apart from
             # "connected and receiving trades" for several real minutes.
             "trades_received": engine.trades_received,
+            # Which exchange is actually feeding this session - run_live()
+            # falls back from Binance to Bybit if Binance produces no trade
+            # within its watchdog window (see pipeline/live_loop.py).
+            "live_source": engine.live_source,
         }
         for symbol, engine in _live_engines.items()
     }
@@ -362,6 +380,8 @@ def live_state(symbol: str = Query(...), timeframe: str = Query("5m")):
         "candles": [candle_to_dict(c) for c in candles],
         "waiting_for_first_candle": len(candles) == 0,
         "trades_received": engine.trades_received,
+        "live_source": engine.live_source,
+        "error": _live_errors.get(symbol),
         "scenarios": [scenario_to_dict(s) for s in tf_engine.scenario_engine.scenarios],
         "structure_events": [structure_event_to_dict(e) for e in tf_engine.structure.events],
         "signals": [signal_to_dict(s) for s in tf_engine.signals[-50:]],

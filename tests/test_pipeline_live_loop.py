@@ -1,3 +1,7 @@
+import asyncio
+import contextlib
+from unittest.mock import patch
+
 import pytest
 
 from t3_engine.candle_builder.aggregator import Trade
@@ -47,6 +51,61 @@ async def test_live_engine_counts_trades_received():
     assert engine.trades_received == 0
     await engine.run_from_trade_stream(_trade_stream_from_candles(candles))
     assert engine.trades_received == len(candles) * 3  # 3 trades yielded per candle above
+
+
+@pytest.mark.asyncio
+async def test_run_live_stays_on_binance_when_it_produces_trades():
+    """The common/working case: Binance delivers at least one trade before
+    the watchdog fires, so run_live() must stay on it for the session and
+    never touch the Bybit fallback path at all."""
+    engine = LiveTradingEngine(symbol="TESTUSDT", trading_timeframes=(Timeframe.M5,), log_dir="/tmp/t3_test_logs")
+
+    async def fake_binance(self):
+        self.on_trade(Trade(timestamp=0, price=100.0, quantity=1.0, is_buyer_maker=False))
+        await asyncio.Event().wait()  # stays "connected" until cancelled, like the real WS client
+
+    bybit_called = False
+
+    async def fake_bybit(self):
+        nonlocal bybit_called
+        bybit_called = True
+
+    with patch.object(LiveTradingEngine, "run_live_binance", fake_binance), \
+         patch.object(LiveTradingEngine, "run_live_bybit", fake_bybit):
+        task = asyncio.create_task(engine.run_live(watchdog_seconds=1.0))
+        await asyncio.sleep(0.05)  # let the first trade land well before the 1s watchdog
+        assert engine.live_source == "binance"
+        assert bybit_called is False
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_run_live_falls_back_to_bybit_when_binance_produces_no_trade():
+    """The production failure mode this exists for: a persistent Binance
+    connection failure (e.g. an inherited IP ban) never raises - ws_client
+    just retries forever - so the only signal available is "no trade
+    arrived in time". A tiny watchdog keeps this test fast."""
+    engine = LiveTradingEngine(symbol="TESTUSDT", trading_timeframes=(Timeframe.M5,), log_dir="/tmp/t3_test_logs")
+
+    async def fake_binance_silent(self):
+        await asyncio.Event().wait()  # "connected" but never produces a trade
+
+    bybit_reached = asyncio.Event()
+
+    async def fake_bybit(self):
+        bybit_reached.set()
+        await asyncio.Event().wait()
+
+    with patch.object(LiveTradingEngine, "run_live_binance", fake_binance_silent), \
+         patch.object(LiveTradingEngine, "run_live_bybit", fake_bybit):
+        task = asyncio.create_task(engine.run_live(watchdog_seconds=0.05))
+        await asyncio.wait_for(bybit_reached.wait(), timeout=2.0)
+        assert engine.live_source == "bybit"
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 @pytest.mark.asyncio
