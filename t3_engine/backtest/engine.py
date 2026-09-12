@@ -130,13 +130,14 @@ class BacktestEngine:
 
     def _maybe_open_trade(self, scenarios, direction: Direction, candle: Candle, index: int, candles: List[Candle]) -> None:
         if self.config.degree not in TRADEABLE_TIMEFRAMES:
-            # Section 21/spec: only 5m/15m may ever originate a real entry -
-            # 1s-3m is confirmation-only and 1h/4h is context-only. This
-            # engine is otherwise timeframe-agnostic (candles/structure/
-            # scenarios all work identically at any degree - see the
-            # dashboard's per-timeframe chart view), so without this guard
-            # a non-tradeable degree would silently open real paper trades
-            # on a timeframe the spec explicitly says never should.
+            # TRADEABLE_TIMEFRAMES (common/types.py) is (M5, M15, H1, H4) -
+            # widened from the spec-section-21 original (M5, M15) on the
+            # project owner's explicit instruction to trade 1h/4h too; only
+            # 1s-3m stays confirmation-only. This engine is otherwise
+            # timeframe-agnostic (candles/structure/scenarios all work
+            # identically at any degree - see the dashboard's per-timeframe
+            # chart view), so without this guard a confirmation-only degree
+            # would silently open real paper trades too.
             return
         if not scenarios:
             return

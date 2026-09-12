@@ -71,16 +71,41 @@ class BybitFuturesREST:
         return data["result"]
 
     def get_klines(self, symbol: str, timeframe: Timeframe, limit: int = 200) -> List[Candle]:
+        """Fetch up to `limit` candles, oldest to newest. Bybit's endpoint
+        caps a single request at 1000 rows, so anything beyond that is
+        fetched as multiple pages walking backwards in time via the `end`
+        param (each page's oldest candle - 1ms becomes the next page's
+        `end`), then reassembled in chronological order. This is what lets
+        the dashboard load a genuinely deep history (e.g. 10,000 candles)
+        instead of being capped at whatever one request returns."""
         if timeframe not in _INTERVAL_MAP:
             raise ValueError(f"Bybit client has no interval mapping for {timeframe}")
-        result = self._get("/v5/market/kline", {
-            "category": "linear", "symbol": symbol, "interval": _INTERVAL_MAP[timeframe],
-            "limit": min(limit, 1000),
-        })
-        rows = result.get("list", [])
-        candles = [self._parse_kline(row, timeframe) for row in rows]
-        candles.reverse()  # Bybit returns newest-first; this engine expects chronological order
-        return candles
+
+        pages: List[List[Candle]] = []
+        remaining = limit
+        end_ms: Optional[int] = None
+        while remaining > 0:
+            page_limit = min(remaining, 1000)
+            params = {
+                "category": "linear", "symbol": symbol, "interval": _INTERVAL_MAP[timeframe],
+                "limit": page_limit,
+            }
+            if end_ms is not None:
+                params["end"] = end_ms
+            result = self._get("/v5/market/kline", params)
+            rows = result.get("list", [])
+            if not rows:
+                break
+            page = [self._parse_kline(row, timeframe) for row in rows]
+            page.reverse()  # Bybit returns newest-first; this engine expects chronological order
+            pages.append(page)
+            remaining -= len(page)
+            end_ms = page[0].open_time - 1  # next page: strictly older than this page's oldest candle
+            if len(rows) < page_limit:
+                break  # exchange has no more history before this point
+
+        pages.reverse()  # oldest page first
+        return [c for page in pages for c in page]
 
     @staticmethod
     def _parse_kline(row: list, timeframe: Timeframe) -> Candle:

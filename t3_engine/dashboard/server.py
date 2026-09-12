@@ -51,6 +51,7 @@ from t3_engine.dashboard.serialization import (
     scenario_to_dict,
     signal_to_dict,
     structure_event_to_dict,
+    wave_to_dict,
 )
 from t3_engine.market_data.bybit_rest_client import BybitAPIError, BybitFuturesREST
 from t3_engine.market_data.fallback_symbols import FALLBACK_USDT_PERPETUAL_SYMBOLS
@@ -119,7 +120,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-006"
+BUILD_VERSION = "BUILD-CHECK-007"
 
 
 @app.get("/api/health")
@@ -161,7 +162,7 @@ def list_symbols():
 @app.get("/api/run")
 def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETIC"),
                   cycles: int = Query(2, ge=1, le=10), threshold: float = Query(60.0, ge=0, le=100),
-                  limit: int = Query(1500, ge=100, le=1500), timeframe: str = Query("5m")):
+                  limit: int = Query(1500, ge=100, le=10000), timeframe: str = Query("5m")):
     try:
         tf = Timeframe(timeframe)
     except ValueError:
@@ -196,9 +197,9 @@ def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETI
 
     tf_note = (
         None if tf in TRADEABLE_TIMEFRAMES else
-        f"{tf.value} is a context/confirmation timeframe, not a tradeable one (spec section 21: only "
-        "5m/15m may ever originate a real entry) - structure, wave counts and Fibonacci are shown as "
-        "usual, but no signals/trades are evaluated here. Pick 5m or 15m to see entries and PnL."
+        f"{tf.value} is confirmation-only, not a tradeable degree "
+        f"({', '.join(t.value for t in TRADEABLE_TIMEFRAMES)} are) - structure, wave counts and "
+        "Fibonacci are shown as usual, but no signals/trades are evaluated here."
     )
     synthetic_note = (
         None if source == "bybit" else
@@ -220,6 +221,14 @@ def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETI
         # the chart show the whole swing structure leading up to today,
         # not just a handful of numbered waves floating with no context.
         "pivots": [pivot_to_dict(p) for p in engine.pivot_detector.pivots],
+        # Every wave any top-ranked scenario ever confirmed over the whole
+        # run (see ScenarioEngine.wave_history) - lets the chart number
+        # waves across the ENTIRE loaded history, not just the handful the
+        # current/latest scenario happens to still be holding.
+        "wave_history": [
+            wave_to_dict(w) for w in
+            sorted(engine.scenario_engine.wave_history.values(), key=lambda w: w.start_timestamp)
+        ],
         "signals": [signal_to_dict(s) for s in result["signals"]],
         "closed_positions": [position_to_dict(p) for p in result["closed_positions"]],
         "open_positions": [position_to_dict(p) for p in result["open_positions"]],
@@ -316,6 +325,10 @@ def live_state(symbol: str = Query(...), timeframe: str = Query("5m")):
         "scenarios": [scenario_to_dict(s) for s in tf_engine.scenario_engine.scenarios],
         "structure_events": [structure_event_to_dict(e) for e in tf_engine.structure.events],
         "pivots": [pivot_to_dict(p) for p in tf_engine.pivot_detector.pivots],
+        "wave_history": [
+            wave_to_dict(w) for w in
+            sorted(tf_engine.scenario_engine.wave_history.values(), key=lambda w: w.start_timestamp)
+        ],
         "tradeable": tf in TRADEABLE_TIMEFRAMES,
         "signals": [signal_to_dict(s) for s in tf_engine.signals[-50:]],
         "open_positions": [position_to_dict(p) for p in tf_engine.position_manager.positions.values() if not p.closed],

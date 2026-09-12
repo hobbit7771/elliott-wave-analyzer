@@ -17,7 +17,7 @@
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine, live
 market data from Bybit USDT perpetuals (see "Mobile app + live Bybit"
-below for why Binance was dropped). 154 automated tests, all passing,
+below for why Binance was dropped). 157 automated tests, all passing,
 cover every module described below.
 
 ## Read this first: what "done" means here
@@ -88,7 +88,7 @@ t3_engine/
   ai_advisor/         optional BYO-key GPT second-opinion commentary (never a decision-maker)
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                154 tests, one file per module above
+tests/                157 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Bybit in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -203,6 +203,48 @@ desktop web page:
   was purely a chart-rendering limit (now capped to the most recent 30 via
   `MAX_STRUCTURE_MARKERS` in `index.html`), not a signal bug; wave labels
   were already correctly limited to the primary scenario only.
+- **Wave numbers across the WHOLE history, not just the tail**: `rebuild()`
+  in `elliott_engine/scenario.py` replaces its top-3 scenarios from scratch
+  on every new pivot (that's correct for "what's the current best count"),
+  which used to mean every earlier wave was silently discarded the moment
+  a new one confirmed - the chart only ever showed numbered waves at the
+  very end, with nothing behind them. `ScenarioEngine.wave_history` now
+  keeps a permanent, append-only record of every wave any top-ranked
+  scenario ever confirmed (keyed by label+start time so re-growing the
+  same count on the next rebuild doesn't duplicate it), exposed as
+  `wave_history` in `/api/run` and `/api/live/state` and drawn by the
+  frontend alongside the full confirmed-pivot zigzag (`pivots`) - so the
+  chart now shows how the count actually evolved across the loaded range,
+  not just its current tail.
+- **Deep history (up to 10,000 candles)**: Bybit's kline endpoint caps a
+  single request at 1000 rows. `BybitFuturesREST.get_klines` now paginates
+  automatically past that (walking backwards in time via the `end` param
+  and reassembling pages in chronological order) whenever more is
+  requested; `/api/run`'s `limit` now accepts up to 10000, and the
+  dashboard has a "Candles" field (bybit source only) to ask for it.
+- **Trading enabled on 1h/4h**: `TRADEABLE_TIMEFRAMES` (`common/types.py`)
+  was originally `(M5, M15)` only, per spec section 21 - 1h/4h were
+  context-only, since the backtester can't reconstruct genuine sub-minute
+  entry confirmation on any timeframe (see "Known limitations" below,
+  which now applies equally to 1h/4h). Widened to `(M5, M15, H1, H4)` on
+  the project owner's explicit instruction to evaluate the same rule-based
+  strategy on higher timeframes too; only 1s-3m stay confirmation-only.
+  This is an honest scope change, not a fix: the single-timeframe
+  entry-timing simplification still applies on every one of these degrees,
+  so a 1h/4h backtest's win rate is no more (or less) reliable than a
+  5m/15m one already was.
+- **On backtest profitability**: this dashboard will not be tuned to hit a
+  specific target return on a specific historical window. Picking
+  parameters *after* seeing what makes one particular backtest profitable
+  is curve-fitting/data-dredging - it reliably produces a strategy that
+  looks great on that one window and has no real edge going forward, which
+  is a worse outcome than an honest "it lost money on this sample." The
+  risk engine's daily-drawdown breaker (`risk_engine/risk_manager.py`)
+  halting further trades after a string of losses is that same discipline
+  working as designed, not a bug to route around. Real profitability can
+  only be established by running the (now wider) strategy over real
+  history you fetch yourself and reporting the actual number, whatever it
+  is - see `run_backtest.py --source bybit`.
 - **Server-side logging now actually reaches Render's log viewer**: a
   batch of connection-visibility logging (WS connect/disconnect, first-
   trade-received) was added in an earlier round and shipped, then
@@ -278,7 +320,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (154 tests)
+# Run the automated test suite (157 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)
