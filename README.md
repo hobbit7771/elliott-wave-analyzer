@@ -16,7 +16,7 @@
 
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine for
-Binance USDT-M Futures. 129 automated tests, all passing, cover every
+Binance USDT-M Futures. 136 automated tests, all passing, cover every
 module described below.
 
 ## Read this first: what "done" means here
@@ -84,7 +84,7 @@ t3_engine/
   ai_advisor/         optional BYO-key GPT second-opinion commentary (never a decision-maker)
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                129 tests, one file per module above
+tests/                136 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Binance in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -164,6 +164,32 @@ desktop web page:
   rate-limit rules. If this keeps recurring, a Render plan with a
   dedicated/static outbound IP address stops the ban-inheritance problem
   at the root (you stop sharing an IP with whoever triggered the ban).
+- **Automatic Bybit fallback for historical data**: a Binance-side ban or
+  regional block only affects Binance - it says nothing about whether
+  *other* exchanges are reachable from the same server. `/api/run?source=
+  binance` and `/api/symbols` now both try
+  `t3_engine/market_data/bybit_rest_client.py` (Bybit's public, no-API-
+  key REST API) automatically whenever Binance is unavailable (451/418/
+  429/network error/active cooldown), before giving up to an error or the
+  static symbol list. The response is tagged so you can tell which
+  exchange actually served the data: `/api/run`'s `data_source` field
+  (`"binance"` or `"bybit"`) and its `note`, and `/api/symbols`'s
+  `"source": "bybit"`. This is a REST-only fallback for historical klines
+  and the symbol list - the **live WebSocket** mode (`Start live`) still
+  streams from Binance's public WS only; a Bybit-backed live stream would
+  need its own pipeline wiring and hasn't been built yet.
+- **PWA cache bug (fixed)**: earlier versions of `sw.js` cached the app
+  shell (`index.html`) cache-first and never re-fetched it - browsers only
+  re-run a service worker's install/activate when the worker file's own
+  bytes change, and since `sw.js` itself hadn't changed across several
+  deploys that fixed real frontend bugs, phones with the PWA already
+  installed kept serving the stale cached page indefinitely. Every
+  server-side fix was real and deployed correctly; it just never reached
+  already-installed phones. `sw.js` now fetches the shell network-first
+  (falling back to cache only when offline), so every reload while online
+  picks up whatever is actually deployed. If you installed the PWA before
+  this fix and still see old behavior, force-refresh once (or remove and
+  re-add the Home Screen icon) to pick up the corrected service worker.
 - **AI Advisor tab**: paste your own OpenAI API key (your ChatGPT/OpenAI
   subscription/credits - stored only in your browser's `localStorage`,
   forwarded per-request to `/api/ai/advice` and never written to disk
@@ -229,7 +255,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (129 tests)
+# Run the automated test suite (136 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)
