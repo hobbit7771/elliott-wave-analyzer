@@ -1,3 +1,5 @@
+import dataclasses
+
 import pytest
 
 from t3_engine.backtest.engine import BacktestConfig, BacktestEngine
@@ -5,6 +7,24 @@ from t3_engine.backtest.metrics import compute_metrics, compute_metrics_by_wave
 from t3_engine.backtest.synthetic_data import generate_synthetic_series
 from t3_engine.common.models import Candle, Position
 from t3_engine.common.types import Timeframe, TradeSide, WaveLabel
+
+
+def test_backtest_never_opens_trades_on_a_non_tradeable_timeframe():
+    """Spec section 21: only 5m/15m may ever originate a real entry - 1h/4h
+    is context/confirmation-only. The dashboard now lets a user pick ANY
+    timeframe just to view structure/wave counts (server.py's /api/run
+    `timeframe` param), so this guard is what stops that view-only pick
+    from silently opening real paper trades too - it must never fire a
+    signal at all here, not just skip opening a position from one."""
+    candles = [dataclasses.replace(c, timeframe=Timeframe.H1) for c in generate_synthetic_series(num_cycles=2)]
+    engine = BacktestEngine(BacktestConfig(symbol="TESTUSDT", entry_confidence_threshold=50.0, degree=Timeframe.H1))
+    result = engine.run(candles)
+    assert result["signals"] == []
+    assert result["closed_positions"] == []
+    assert result["open_positions"] == []
+    # Structure detection itself is unaffected by the guard - it's ONLY
+    # trade origination that's gated by timeframe.
+    assert len(engine.pivot_detector.pivots) > 0
 
 
 def test_backtester_rejects_unclosed_candles():

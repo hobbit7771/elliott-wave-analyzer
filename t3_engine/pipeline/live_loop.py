@@ -48,15 +48,25 @@ from typing import AsyncIterator, Dict, List
 from t3_engine.backtest.engine import BacktestConfig, BacktestEngine
 from t3_engine.candle_builder.aggregator import MultiTimeframeCandleBuilder, Trade
 from t3_engine.common.models import Candle
-from t3_engine.common.types import TRADEABLE_TIMEFRAMES, Timeframe
+from t3_engine.common.types import Timeframe
 from t3_engine.logger.decision_logger import DecisionLogger
 from t3_engine.market_data.bybit_ws_client import BybitFuturesWebSocketClient, parse_taker_side_is_buyer_maker
 
 logger = logging.getLogger(__name__)
 
+# Every timeframe the live dashboard chart can display (spec section 20/21:
+# 1m is confirmation-only, 1h/4h are context-only, and only 5m/15m may ever
+# originate a real entry - see TRADEABLE_TIMEFRAMES and the guard in
+# backtest/engine.py's _maybe_open_trade). Each of these still gets its own
+# full BacktestEngine so its candles/structure/scenario are real and
+# independently tracked, not derived/resampled from the 5m one - the guard
+# in _maybe_open_trade is what stops the non-tradeable ones from ever
+# opening a paper position, not their absence from this tuple.
+DISPLAY_TIMEFRAMES = (Timeframe.M1, Timeframe.M5, Timeframe.M15, Timeframe.H1, Timeframe.H4)
+
 
 class LiveTradingEngine:
-    def __init__(self, symbol: str, trading_timeframes: tuple = TRADEABLE_TIMEFRAMES,
+    def __init__(self, symbol: str, trading_timeframes: tuple = DISPLAY_TIMEFRAMES,
                  initial_equity: float = 10_000.0, entry_confidence_threshold: float = 75.0,
                  log_dir: str = "./logs"):
         self.symbol = symbol
