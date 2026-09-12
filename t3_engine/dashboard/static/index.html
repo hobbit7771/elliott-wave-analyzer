@@ -73,8 +73,8 @@
   <label>Source
     <select id="source">
       <option value="synthetic">Synthetic demo</option>
-      <option value="binance">Binance (history)</option>
-      <option value="live">Binance (live, public WS)</option>
+      <option value="bybit">Bybit (history)</option>
+      <option value="live">Bybit (live, public WS)</option>
     </select>
   </label>
   <span id="symbolField" style="position:relative;display:inline-flex;align-items:center;gap:4px;">
@@ -295,28 +295,21 @@ function renderDebugPanel(data) {
   const noteEl = document.getElementById('note');
   noteEl.classList.remove('error');
   if (data.error) {
-    // run_live() already tried Binance then Bybit before giving up - this
-    // is a real connection failure, not just "still waiting".
     noteEl.style.display = 'block';
     noteEl.classList.add('error');
     noteEl.textContent = `Live connection failed: ${data.error}`;
   } else if (data.waiting_for_first_candle) {
     noteEl.style.display = 'block';
     const trades = data.trades_received || 0;
-    const sourceMsg = data.live_source === 'bybit' ? ' (via Bybit, since Binance produced no data)' : '';
     const tradesMsg = trades > 0
-      ? `${trades} trade(s) received so far${sourceMsg} - market data IS flowing.`
-      : 'No trades received yet - Binance is tried first, then Bybit automatically after ~15s of '
-        + 'silence. If this stays at 0 much longer than that, check that the symbol is correct and '
-        + 'actively trading.';
+      ? `${trades} trade(s) received so far - market data IS flowing.`
+      : 'No trades received yet - if this stays at 0 for more than a few seconds, the WebSocket '
+        + 'connection likely failed (check that the symbol is correct and actively trading on Bybit).';
     noteEl.textContent = 'Connected - no candle has closed yet for this timeframe. This is normal: '
       + 'a 5m/15m bar only appears once a full interval has actually elapsed after Start. ' + tradesMsg;
   } else if (data.note) {
     noteEl.style.display = 'block';
     noteEl.textContent = data.note;
-  } else if (data.live_source === 'bybit') {
-    noteEl.style.display = 'block';
-    noteEl.textContent = 'Live data is coming from Bybit (Binance produced no data for this symbol).';
   } else {
     noteEl.style.display = 'none';
   }
@@ -603,10 +596,10 @@ document.addEventListener('mousedown', (e) => {
 });
 
 // Populates `allSymbols` for the dropdown above. Best-effort: if this
-// fails (e.g. Binance/Bybit both unreachable, or the server is still
-// asleep/cold-starting), the symbol field just stays a plain text input -
-// never a hard blocker (see fallback_symbols.py server-side for why it
-// almost never actually comes back empty).
+// fails (e.g. Bybit is unreachable, or the server is still asleep/cold-
+// starting), the symbol field just stays a plain text input - never a
+// hard blocker (see fallback_symbols.py server-side for why it almost
+// never actually comes back empty).
 async function loadSymbolList() {
   try {
     const resp = await fetchWithTimeout('/api/symbols', {}, 20000);
@@ -618,9 +611,7 @@ async function loadSymbolList() {
     }
     const data = await resp.json();
     allSymbols = data.symbols;
-    const sourceNote = data.source === 'live' ? ''
-      : data.source === 'bybit' ? ' (Binance unavailable - served from Bybit)'
-      : ' (Binance & Bybit unavailable - showing a static common-symbols list)';
+    const sourceNote = data.source === 'live' ? '' : ' (Bybit unavailable - showing a static common-symbols list)';
     symbolInputEl.title = `${data.symbols.length} symbols loaded${sourceNote} - type to filter, or enter any symbol manually`;
   } catch (e) {
     symbolInputEl.title = `Coin list unavailable: ${e.message}`;

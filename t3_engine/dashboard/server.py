@@ -5,11 +5,24 @@ overlays for the frontend (static/index.html, TradingView lightweight-
 charts) to draw directly on real candlesticks - never schematic
 placeholder lines, per section 18's explicit requirement.
 
+DATA SOURCE: Bybit only. Binance was the original source, but in
+production it kept an IP-level ban on its REST API and its public
+WebSocket completed the connection handshake yet delivered zero trades
+indefinitely - a silent failure, not a real error, confirmed via the
+trades_received counter staying at 0 for many minutes on a real deploy.
+Rather than keep working around a exchange that won't serve this app's
+traffic, every code path here now talks to Bybit exclusively (`market_data/
+bybit_rest_client.py` for history/symbols, `market_data/bybit_ws_client.py`
+for live). `market_data/rest_client.py` and `ws_client.py` (the Binance
+clients) still exist and are still unit-tested, dormant rather than
+deleted in case Binance access is restored later, but nothing in this
+file calls them anymore.
+
 By default `/api/run` replays the SYNTHETIC fixture (backtest/synthetic_
-data.py) because this sandboxed build session cannot reach Binance (see
-market_data/rest_client.py). Pass `?source=binance&symbol=BTCUSDT` to
-pull real historical klines instead - that code path is real, it just
-needs to run somewhere with outbound network access to actually work.
+data.py) because this sandboxed build session cannot reach any real
+exchange. Pass `?source=bybit&symbol=BTCUSDT` to pull real historical
+klines instead - that code path is real, it just needs to run somewhere
+with outbound network access to actually work.
 """
 
 from __future__ import annotations
@@ -19,7 +32,7 @@ import logging
 import os
 import re
 import time
-from typing import Dict, Optional
+from typing import Dict
 
 import httpx
 from fastapi import Body, FastAPI, HTTPException, Query
@@ -40,7 +53,6 @@ from t3_engine.dashboard.serialization import (
 )
 from t3_engine.market_data.bybit_rest_client import BybitAPIError, BybitFuturesREST
 from t3_engine.market_data.fallback_symbols import FALLBACK_USDT_PERPETUAL_SYMBOLS
-from t3_engine.market_data.rest_client import BinanceFuturesREST
 from t3_engine.pipeline.live_loop import LiveTradingEngine
 
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
@@ -61,7 +73,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 app = FastAPI(title="T3 Elliott Wave Trading Engine Dashboard")
 
 # --- live engine registry (spec section 20: one running pipeline per
-# symbol, driven by the public Binance WebSocket - no API key needed for
+# symbol, driven by the public Bybit WebSocket - no API key needed for
 # market data). Kept as simple in-process state: this is a single-process
 # dashboard, not a distributed deployment. ---
 _live_engines: Dict[str, LiveTradingEngine] = {}
@@ -74,71 +86,22 @@ _SYMBOL_STRIP_RE = re.compile(r"[^A-Za-z0-9]")
 
 
 def normalize_symbol(raw: str) -> str:
-    """Binance symbols are plain alphanumeric strings (e.g. `BTCUSDT`) -
+    """Exchange symbols are plain alphanumeric strings (e.g. `BTCUSDT`) -
     no slash, no space, no lowercase-vs-uppercase distinction. Users
     naturally type things like "BTC/USDT", "btc usdt" or paste a
     lowercase ticker; reject silently-wrong requests instead of sending
-    garbage straight to Binance (or, worse, to a half-typed partial
-    string on every keystroke - see the frontend's debounce/commit-on-
-    start fix for the other half of this)."""
+    garbage straight to Bybit (or, worse, to a half-typed partial string
+    on every keystroke - see the frontend's debounce/commit-on-start fix
+    for the other half of this)."""
     return _SYMBOL_STRIP_RE.sub("", raw).upper()
 
 
-def binance_error_message(exc: httpx.HTTPStatusError) -> str:
-    status = exc.response.status_code
-    if status == 451:
-        return (
-            "Binance returned HTTP 451 (Unavailable For Legal Reasons) - it blocks API access "
-            "from this server's IP/region entirely, regardless of symbol or request. This is a "
-            "regional restriction on Binance's side, not a bug: it commonly affects servers hosted "
-            "in the US (e.g. Render's default 'oregon' region). Redeploying this service in a "
-            "non-US region (e.g. Render's 'frankfurt' or 'singapore') is the known workaround."
-        )
-    if status == 418:
-        return (
-            "Binance returned HTTP 418 ('I'm a teapot') - this is Binance's documented response "
-            "for an IP that has been temporarily auto-banned for exceeding its request rate limit. "
-            "On shared hosting (Render's free/shared plans included), this IP address can be shared "
-            "with other tenants, so a ban can be inherited from traffic you never sent. Requests are "
-            "now paused for a cooldown instead of retrying immediately - repeating requests during a "
-            "ban is what turns a short ban into a much longer one, per Binance's own rate-limit rules. "
-            "If this persists, a Render plan with a dedicated/static outbound IP avoids inheriting "
-            "other tenants' bans."
-        )
-    if status == 429:
-        return "Binance returned HTTP 429 (rate limited) - requests are paused for a cooldown before retrying."
-    return f"Binance API returned HTTP {status}: {exc.response.text[:300]}"
-
-
-# --- shared Binance backoff: 418/429 responses mean STOP calling Binance
-# for a while, from ANY endpoint - continuing to hit it during a ban is
-# exactly what Binance's docs say escalates a short ban into a long one.
-# This is process-wide (not per-endpoint) since the ban is IP-wide. ---
-_binance_backoff_until: float = 0.0
-_binance_backoff_message: Optional[str] = None
-
-
-def _parse_retry_after(resp: httpx.Response) -> float:
-    raw = resp.headers.get("Retry-After")
-    if raw is None:
-        return 120.0  # Binance's shortest documented ban window
-    try:
-        return max(float(raw), 1.0)
-    except ValueError:
-        return 120.0  # Retry-After was an HTTP-date, not a delta - fall back
-
-
-def _register_binance_failure(exc: httpx.HTTPStatusError) -> None:
-    global _binance_backoff_until, _binance_backoff_message
-    if exc.response.status_code in (418, 429):
-        _binance_backoff_until = time.time() + _parse_retry_after(exc.response)
-        _binance_backoff_message = binance_error_message(exc)
-
-
-def _check_binance_backoff() -> None:
-    remaining = _binance_backoff_until - time.time()
-    if remaining > 0:
-        raise HTTPException(429, f"{_binance_backoff_message} ({remaining:.0f}s remaining in cooldown)")
+def bybit_error_message(exc: Exception) -> str:
+    if isinstance(exc, BybitAPIError):
+        return f"Bybit API returned an error: {exc}"
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"Bybit API returned HTTP {exc.response.status_code}: {exc.response.text[:300]}"
+    return f"Could not reach Bybit: {exc}"
 
 
 async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
@@ -155,7 +118,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-004"
+BUILD_VERSION = "BUILD-CHECK-005"
 
 
 @app.get("/api/health")
@@ -163,9 +126,9 @@ def health():
     return {"status": "ok", "build": BUILD_VERSION}
 
 
-# --- symbol list cache: Binance lists ~400 perpetual futures symbols and
-# that list barely changes minute to minute, so we cache it in-process
-# instead of hitting exchangeInfo on every dashboard page load. ---
+# --- symbol list cache: Bybit lists hundreds of linear perpetual symbols
+# and that list barely changes minute to minute, so we cache it in-process
+# instead of hitting instruments-info on every dashboard page load. ---
 _symbols_cache: Dict[str, object] = {"symbols": None, "fetched_at": 0.0, "source": "live"}
 _SYMBOLS_CACHE_TTL_SECONDS = 3600.0
 
@@ -176,94 +139,40 @@ def list_symbols():
     if _symbols_cache["symbols"] is not None and (now - _symbols_cache["fetched_at"]) < _SYMBOLS_CACHE_TTL_SECONDS:
         return {"symbols": _symbols_cache["symbols"], "cached": True, "source": _symbols_cache["source"]}
 
-    binance_reason: Optional[str] = None
-    if _binance_backoff_until > now:
-        binance_reason = f"{_binance_backoff_message} ({_binance_backoff_until - now:.0f}s remaining in cooldown)"
-    else:
-        rest = BinanceFuturesREST()
-        try:
-            symbols = rest.list_symbols()
-            _symbols_cache["symbols"] = symbols
-            _symbols_cache["fetched_at"] = now
-            _symbols_cache["source"] = "live"
-            return {"symbols": symbols, "cached": False, "source": "live"}
-        except httpx.HTTPStatusError as exc:
-            _register_binance_failure(exc)
-            binance_reason = binance_error_message(exc)
-        except httpx.RequestError as exc:
-            binance_reason = f"Could not reach Binance: {exc}"
-        finally:
-            rest.close()
-
-    # Binance is unavailable - Bybit is a different exchange on different
-    # infrastructure, so a Binance-side regional block or IP ban has no
-    # bearing on whether it's reachable. Try it before giving up to the
-    # static list, so the picker still gets a real, current symbol list
-    # during a Binance outage instead of the hand-picked fallback.
     bybit = BybitFuturesREST()
     try:
         symbols = bybit.list_symbols()
         _symbols_cache["symbols"] = symbols
         _symbols_cache["fetched_at"] = now
-        _symbols_cache["source"] = "bybit"
-        return {"symbols": symbols, "cached": False, "source": "bybit",
-                "reason": f"Binance unavailable ({binance_reason}) - serving Bybit's live list instead"}
-    except (httpx.HTTPStatusError, httpx.RequestError, BybitAPIError):
-        pass
+        _symbols_cache["source"] = "live"
+        return {"symbols": symbols, "cached": False, "source": "live"}
+    except (httpx.HTTPStatusError, httpx.RequestError, BybitAPIError) as exc:
+        # Never let the picker come back empty just because Bybit is
+        # temporarily unreachable - fall back to the static list (see
+        # fallback_symbols.py) instead of raising, so typing a letter
+        # always suggests something real while we wait this out.
+        return {"symbols": FALLBACK_USDT_PERPETUAL_SYMBOLS, "cached": False, "source": "fallback",
+                "reason": bybit_error_message(exc)}
     finally:
         bybit.close()
-
-    return {"symbols": FALLBACK_USDT_PERPETUAL_SYMBOLS, "cached": False, "source": "fallback",
-            "reason": binance_reason}
 
 
 @app.get("/api/run")
 def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETIC"),
                   cycles: int = Query(2, ge=1, le=10), threshold: float = Query(60.0, ge=0, le=100),
                   limit: int = Query(1500, ge=100, le=1500)):
-    data_source = source
-    fallback_note = None
-    if source == "binance":
+    if source == "bybit":
         symbol = normalize_symbol(symbol)
         if not symbol:
             raise HTTPException(400, "Symbol is empty after normalization - expected something like BTCUSDT")
 
-        now = time.time()
-        candles = None
-        binance_status = None
-        binance_message = None
-        if _binance_backoff_until > now:
-            binance_status = 429
-            binance_message = (f"{_binance_backoff_message} "
-                                f"({_binance_backoff_until - now:.0f}s remaining in cooldown)")
-        else:
-            rest = BinanceFuturesREST()
-            try:
-                candles = rest.get_klines(symbol, Timeframe.M5, limit=limit)
-            except httpx.HTTPStatusError as exc:
-                _register_binance_failure(exc)
-                binance_status = exc.response.status_code
-                binance_message = binance_error_message(exc)
-            except httpx.RequestError as exc:
-                binance_status = 502
-                binance_message = f"Could not reach Binance: {exc}"
-            finally:
-                rest.close()
-
-        if candles is None:
-            # Binance unavailable - Bybit runs on separate infrastructure,
-            # so a Binance-side ban/regional block doesn't affect it. Try
-            # it before surfacing an error, so analysis keeps working on
-            # real market data through a Binance outage.
-            bybit = BybitFuturesREST()
-            try:
-                candles = bybit.get_klines(symbol, Timeframe.M5, limit=limit)
-                data_source = "bybit"
-                fallback_note = f"Binance unavailable ({binance_message}) - served from Bybit instead."
-            except (httpx.HTTPStatusError, httpx.RequestError, BybitAPIError, ValueError):
-                raise HTTPException(binance_status, binance_message)
-            finally:
-                bybit.close()
+        bybit = BybitFuturesREST()
+        try:
+            candles = bybit.get_klines(symbol, Timeframe.M5, limit=limit)
+        except (httpx.HTTPStatusError, httpx.RequestError, BybitAPIError, ValueError) as exc:
+            raise HTTPException(502, bybit_error_message(exc))
+        finally:
+            bybit.close()
     else:
         candles = generate_synthetic_series(num_cycles=cycles)
         symbol = symbol if symbol != "SYNTHETIC" else "SYNTHETIC-DEMO"
@@ -277,7 +186,7 @@ def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETI
     return {
         "symbol": symbol,
         "source": source,
-        "data_source": data_source,
+        "data_source": source,
         "candles": [candle_to_dict(c) for c in candles],
         "scenarios": [scenario_to_dict(s) for s in engine.scenario_engine.scenarios],
         "structure_events": [structure_event_to_dict(e) for e in engine.structure.events],
@@ -290,9 +199,9 @@ def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETI
             "by_wave": {k: dataclass_metrics_to_dict(v) for k, v in metrics_by_wave.items()},
         },
         "note": (
-            fallback_note if source == "binance" else
+            None if source == "bybit" else
             "Candles are a SYNTHETIC, clearly-labelled demo fixture (see backtest/synthetic_data.py) "
-            "because this build environment cannot reach Binance. Pass source=binance&symbol=... "
+            "because this build environment cannot reach any real exchange. Pass source=bybit&symbol=... "
             "to use real historical data when running somewhere with normal internet access."
         ),
     }
@@ -301,8 +210,8 @@ def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETI
 @app.post("/api/live/start")
 async def start_live(symbol: str = Body(..., embed=True), equity: float = Body(10_000.0, embed=True),
                       threshold: float = Body(75.0, embed=True)):
-    """Starts a live pipeline against Binance's PUBLIC WebSocket streams
-    (aggTrade etc.) for `symbol` - no API key required, this is public
+    """Starts a live pipeline against Bybit's PUBLIC WebSocket stream
+    (publicTrade) for `symbol` - no API key required, this is public
     market data, not account access. Runs in PAPER mode only."""
     symbol = normalize_symbol(symbol)
     if not symbol:
@@ -343,10 +252,7 @@ def live_status():
             # this there's no way to tell "connected but silent" apart from
             # "connected and receiving trades" for several real minutes.
             "trades_received": engine.trades_received,
-            # Which exchange is actually feeding this session - run_live()
-            # falls back from Binance to Bybit if Binance produces no trade
-            # within its watchdog window (see pipeline/live_loop.py).
-            "live_source": engine.live_source,
+            "live_source": engine.live_source,  # always "bybit" - see pipeline/live_loop.py
         }
         for symbol, engine in _live_engines.items()
     }

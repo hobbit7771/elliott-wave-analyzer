@@ -5,7 +5,7 @@
 
 Then open http://localhost:8000 - it runs the synthetic demo fixture
 through the full backtest pipeline by default (see dashboard/server.py for
-why), or pass source=binance&symbol=BTCUSDT in the UI for real data.
+why), or pass source=bybit&symbol=BTCUSDT in the UI for real data.
 """
 
 from __future__ import annotations

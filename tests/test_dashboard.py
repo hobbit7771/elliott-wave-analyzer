@@ -1,5 +1,4 @@
 import asyncio
-import time
 from unittest.mock import patch
 
 import httpx
@@ -23,8 +22,8 @@ def test_normalize_symbol_strips_slash_and_uppercases():
     assert normalize_symbol("") == ""
 
 
-def test_run_backtest_binance_source_rejects_empty_symbol():
-    resp = client.get("/api/run", params={"source": "binance", "symbol": "///"})
+def test_run_backtest_bybit_source_rejects_empty_symbol():
+    resp = client.get("/api/run", params={"source": "bybit", "symbol": "///"})
     assert resp.status_code == 400
 
 
@@ -33,34 +32,22 @@ def test_live_start_normalizes_symbol_with_slash():
     assert resp.status_code == 200  # normalizes fine even when nothing is running
 
 
-def test_run_backtest_binance_source_surfaces_451_when_bybit_also_unavailable():
-    """Reproduces the exact failure seen in production logs: Binance
-    returns HTTP 451 for requests from a blocked region (e.g. a US-hosted
-    Render service). When the Bybit fallback is also unavailable, the
-    dashboard must surface Binance's error as a clear, actionable message
-    instead of a generic 500/stack trace."""
-    request = httpx.Request("GET", "https://fapi.binance.com/fapi/v1/klines")
-    response = httpx.Response(451, request=request, text="Unavailable For Legal Reasons")
-    error = httpx.HTTPStatusError("451", request=request, response=response)
-    bybit_request = httpx.Request("GET", "https://api.bybit.com/v5/market/kline")
-
-    with patch.object(server_module.BinanceFuturesREST, "get_klines", side_effect=error), \
-         patch.object(server_module.BybitFuturesREST, "get_klines",
-                      side_effect=httpx.ConnectError("boom", request=bybit_request)):
-        resp = client.get("/api/run", params={"source": "binance", "symbol": "BTCUSDT"})
-    assert resp.status_code == 451
-    assert "region" in resp.json()["detail"].lower()
-
-
-def test_run_backtest_binance_source_falls_back_to_bybit_on_451():
-    """The actual improvement requested: when Binance is unreachable,
-    automatically serve real market data from Bybit (a different exchange
-    on different infrastructure, so a Binance-side ban/regional block
-    doesn't affect it) instead of failing the whole analysis."""
-    request = httpx.Request("GET", "https://fapi.binance.com/fapi/v1/klines")
+def test_run_backtest_bybit_source_surfaces_error_clearly():
+    """Bybit is the only exchange this app talks to now (Binance's public
+    WS/REST were both effectively unusable in production - see
+    dashboard/server.py's module docstring). A Bybit failure must surface
+    as a clear, actionable message, not a generic 500/stack trace."""
+    request = httpx.Request("GET", "https://api.bybit.com/v5/market/kline")
     response = httpx.Response(451, request=request, text="Unavailable For Legal Reasons")
     error = httpx.HTTPStatusError("451", request=request, response=response)
 
+    with patch.object(server_module.BybitFuturesREST, "get_klines", side_effect=error):
+        resp = client.get("/api/run", params={"source": "bybit", "symbol": "BTCUSDT"})
+    assert resp.status_code == 502
+    assert "bybit" in resp.json()["detail"].lower()
+
+
+def test_run_backtest_bybit_source_returns_real_candles():
     from t3_engine.common.models import Candle
     from t3_engine.common.types import Timeframe
     sample_candles = [
@@ -69,14 +56,13 @@ def test_run_backtest_binance_source_falls_back_to_bybit_on_451():
         for i in range(300)
     ]
 
-    with patch.object(server_module.BinanceFuturesREST, "get_klines", side_effect=error), \
-         patch.object(server_module.BybitFuturesREST, "get_klines", return_value=sample_candles):
-        resp = client.get("/api/run", params={"source": "binance", "symbol": "BTCUSDT"})
+    with patch.object(server_module.BybitFuturesREST, "get_klines", return_value=sample_candles):
+        resp = client.get("/api/run", params={"source": "bybit", "symbol": "BTCUSDT"})
     assert resp.status_code == 200
     data = resp.json()
     assert data["data_source"] == "bybit"
     assert len(data["candles"]) > 0
-    assert "bybit" in data["note"].lower()
+    assert data["note"] is None
 
 
 def test_health():
@@ -154,13 +140,12 @@ def test_run_backtest_response_is_json_serializable_end_to_end():
 
 
 # ---- live pipeline endpoints ----
-# `run_live` (the method server.py actually calls - it internally tries
-# Binance, then falls back to Bybit via a watchdog, see live_loop.py) is
-# patched to a never-ending no-op coroutine instead of a real WebSocket
-# connection - this environment blocks outbound access to both exchanges
-# (see README), and these tests only need to verify the FastAPI task
-# bookkeeping (start/status/stop), not a real socket or the fallback logic
-# itself (that's covered separately in test_pipeline_live_loop.py).
+# `run_live` (the method server.py actually calls, driving Bybit's public
+# WS - see live_loop.py) is patched to a never-ending no-op coroutine
+# instead of a real WebSocket connection - this environment blocks
+# outbound access to real exchanges (see README), and these tests only
+# need to verify the FastAPI task bookkeeping (start/status/stop), not a
+# real socket (that's covered separately in test_pipeline_live_loop.py).
 
 async def _fake_run_live(self):
     await asyncio.Event().wait()  # blocks forever until the task is cancelled
@@ -235,145 +220,40 @@ def test_live_stop_when_not_running():
 
 # ---- symbol list ----
 
-def _reset_binance_state():
+def _reset_symbols_cache():
     server_module._symbols_cache["symbols"] = None
     server_module._symbols_cache["fetched_at"] = 0.0
-    server_module._binance_backoff_until = 0.0
-    server_module._binance_backoff_message = None
 
 
 def test_list_symbols_returns_and_caches():
-    _reset_binance_state()
+    _reset_symbols_cache()
 
-    with patch.object(server_module.BinanceFuturesREST, "list_symbols", return_value=["BTCUSDT", "ETHUSDT"]) as mock_list:
+    with patch.object(server_module.BybitFuturesREST, "list_symbols", return_value=["BTCUSDT", "ETHUSDT"]) as mock_list:
         resp1 = client.get("/api/symbols")
         assert resp1.status_code == 200
         assert resp1.json() == {"symbols": ["BTCUSDT", "ETHUSDT"], "cached": False, "source": "live"}
 
         resp2 = client.get("/api/symbols")
         assert resp2.json()["cached"] is True
-        mock_list.assert_called_once()  # second call served from cache, no second Binance hit
+        mock_list.assert_called_once()  # second call served from cache, no second Bybit hit
 
 
-def test_list_symbols_falls_back_to_static_list_on_network_error():
-    """The picker must never come back empty just because Binance can't be
+def test_list_symbols_falls_back_to_static_list_on_bybit_failure():
+    """The picker must never come back empty just because Bybit can't be
     reached - it should serve the static fallback list instead, clearly
-    tagged, so the frontend always has something to suggest. (Bybit is
-    also mocked unavailable here so this test exercises the final,
-    everything-is-down tier deterministically - see
-    test_list_symbols_falls_back_to_bybit_when_binance_unavailable for the
-    Bybit-succeeds case.)"""
-    _reset_binance_state()
-    request = httpx.Request("GET", "https://fapi.binance.com/fapi/v1/exchangeInfo")
-    bybit_request = httpx.Request("GET", "https://api.bybit.com/v5/market/instruments-info")
+    tagged, so the frontend always has something to suggest."""
+    _reset_symbols_cache()
+    request = httpx.Request("GET", "https://api.bybit.com/v5/market/instruments-info")
 
-    with patch.object(server_module.BinanceFuturesREST, "list_symbols",
-                      side_effect=httpx.ConnectError("boom", request=request)), \
-         patch.object(server_module.BybitFuturesREST, "list_symbols",
-                      side_effect=httpx.ConnectError("boom", request=bybit_request)):
+    with patch.object(server_module.BybitFuturesREST, "list_symbols",
+                      side_effect=httpx.ConnectError("boom", request=request)):
         resp = client.get("/api/symbols")
     assert resp.status_code == 200
     data = resp.json()
     assert data["source"] == "fallback"
     assert "BTCUSDT" in data["symbols"]
-    assert "reach" in data["reason"].lower()
-
-
-def test_list_symbols_falls_back_to_static_list_on_451():
-    _reset_binance_state()
-    request = httpx.Request("GET", "https://fapi.binance.com/fapi/v1/exchangeInfo")
-    response = httpx.Response(451, request=request, text="blocked")
-    error = httpx.HTTPStatusError("451", request=request, response=response)
-    bybit_request = httpx.Request("GET", "https://api.bybit.com/v5/market/instruments-info")
-
-    with patch.object(server_module.BinanceFuturesREST, "list_symbols", side_effect=error), \
-         patch.object(server_module.BybitFuturesREST, "list_symbols",
-                      side_effect=httpx.ConnectError("boom", request=bybit_request)):
-        resp = client.get("/api/symbols")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["source"] == "fallback"
-    assert "BTCUSDT" in data["symbols"]
-
-
-def test_list_symbols_falls_back_to_bybit_when_binance_unavailable():
-    """The actual improvement: when Binance is down, serve Bybit's real
-    live list (a different exchange, unaffected by a Binance-side ban or
-    regional block) instead of dropping straight to the static list."""
-    _reset_binance_state()
-    request = httpx.Request("GET", "https://fapi.binance.com/fapi/v1/exchangeInfo")
-    response = httpx.Response(451, request=request, text="blocked")
-    error = httpx.HTTPStatusError("451", request=request, response=response)
-
-    with patch.object(server_module.BinanceFuturesREST, "list_symbols", side_effect=error), \
-         patch.object(server_module.BybitFuturesREST, "list_symbols", return_value=["BTCUSDT", "ETHUSDT"]):
-        resp = client.get("/api/symbols")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["source"] == "bybit"
-    assert data["symbols"] == ["BTCUSDT", "ETHUSDT"]
-
-
-def test_418_triggers_shared_backoff_across_endpoints():
-    """A 418 ('I'm a teapot' - Binance's documented IP-ban response) must
-    stop ALL Binance-touching endpoints from calling out again until the
-    cooldown expires - repeating requests during a ban is what turns a
-    short ban into a long one, per Binance's own rate-limit docs. Bybit is
-    mocked unavailable too here so both the symbol picker and the backtest
-    endpoint land on their final fallback (static list / clear 429)
-    deterministically."""
-    _reset_binance_state()
-    request = httpx.Request("GET", "https://fapi.binance.com/fapi/v1/exchangeInfo")
-    response = httpx.Response(418, request=request, text="teapot", headers={"Retry-After": "30"})
-    error = httpx.HTTPStatusError("418", request=request, response=response)
-    bybit_request = httpx.Request("GET", "https://api.bybit.com/v5/market/instruments-info")
-    bybit_error = httpx.ConnectError("boom", request=bybit_request)
-
-    with patch.object(server_module.BinanceFuturesREST, "list_symbols", side_effect=error) as mock_list, \
-         patch.object(server_module.BybitFuturesREST, "list_symbols", side_effect=bybit_error):
-        first = client.get("/api/symbols")
-        assert first.status_code == 200
-        first_data = first.json()
-        assert first_data["source"] == "fallback"
-        assert "teapot" in first_data["reason"].lower() or "banned" in first_data["reason"].lower()
-
-        # second call must NOT hit Binance again - it's blocked by the
-        # in-process cooldown the first 418 just registered
-        second = client.get("/api/symbols")
-        assert second.json()["source"] == "fallback"
-        assert "remaining" in second.json()["reason"].lower()
-        mock_list.assert_called_once()
-        mock_list.assert_called_once()
-
-    # the cooldown is shared: /api/run's binance path is blocked too,
-    # without ever touching BinanceFuturesREST.get_klines - it also tries
-    # the Bybit fallback, mocked unavailable, before surfacing the 429
-    bybit_klines_request = httpx.Request("GET", "https://api.bybit.com/v5/market/kline")
-    with patch.object(server_module.BinanceFuturesREST, "get_klines") as mock_klines, \
-         patch.object(server_module.BybitFuturesREST, "get_klines",
-                      side_effect=httpx.ConnectError("boom", request=bybit_klines_request)):
-        resp = client.get("/api/run", params={"source": "binance", "symbol": "BTCUSDT"})
-        assert resp.status_code == 429
-        mock_klines.assert_not_called()
-
-    _reset_binance_state()
-
-
-def test_retry_after_header_sets_backoff_duration():
-    _reset_binance_state()
-    request = httpx.Request("GET", "https://fapi.binance.com/fapi/v1/exchangeInfo")
-    response = httpx.Response(418, request=request, text="teapot", headers={"Retry-After": "5"})
-    error = httpx.HTTPStatusError("418", request=request, response=response)
-    bybit_request = httpx.Request("GET", "https://api.bybit.com/v5/market/instruments-info")
-
-    with patch.object(server_module.BinanceFuturesREST, "list_symbols", side_effect=error), \
-         patch.object(server_module.BybitFuturesREST, "list_symbols",
-                      side_effect=httpx.ConnectError("boom", request=bybit_request)):
-        client.get("/api/symbols")
-
-    remaining = server_module._binance_backoff_until - time.time()
-    assert 0 < remaining <= 5.5
-    _reset_binance_state()
+    assert "bybit" in data["reason"].lower()
+    _reset_symbols_cache()
 
 
 # ---- AI advisor endpoint ----

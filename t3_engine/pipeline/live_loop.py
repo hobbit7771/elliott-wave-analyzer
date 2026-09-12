@@ -23,20 +23,25 @@ backtest replay share one implementation, so there is no way for the two
 to silently drift apart (section 16's whole no-repaint requirement, in
 one sentence).
 
-NETWORK NOTE: `run_live_binance()` is real, documented Binance combined-
-stream wiring (see market_data/ws_client.py), but this sandboxed build
-session cannot open a socket to `fstream.binance.com` (outbound blocked at
-the proxy - see README for the exact error). `run_from_trade_stream()` is
-what is actually exercised in tests here, fed by a fake async trade
-generator - it drives the identical processing path `run_live_binance`
-would, so nothing about the pipeline logic itself is unverified, only the
-live socket connection.
+LIVE DATA SOURCE: Bybit's public WebSocket only (market_data/bybit_ws_client.py).
+Binance was the original source, but in production its public WS
+completed the connection handshake yet delivered zero trades indefinitely
+(confirmed via `trades_received` staying at 0 for many minutes on a real
+deploy, alongside a Binance-side IP ban already affecting its REST API -
+see README) - a silent failure mode, not a real network error, so Bybit is
+now the only exchange this engine actually talks to live. `market_data/
+ws_client.py` (the Binance WS client) still exists and is still unit-
+tested, dormant rather than deleted in case Binance access is restored
+later, but nothing in this file calls it anymore.
+
+`run_from_trade_stream()` is what is actually exercised by most tests
+here, fed by a fake async trade generator - it drives the identical
+processing path `run_live()` does, so nothing about the pipeline logic
+itself depends on a live socket to be verified.
 """
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import logging
 from typing import AsyncIterator, Dict, List
 
@@ -46,11 +51,8 @@ from t3_engine.common.models import Candle
 from t3_engine.common.types import TRADEABLE_TIMEFRAMES, Timeframe
 from t3_engine.logger.decision_logger import DecisionLogger
 from t3_engine.market_data.bybit_ws_client import BybitFuturesWebSocketClient, parse_taker_side_is_buyer_maker
-from t3_engine.market_data.ws_client import BinanceFuturesWebSocketClient
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_LIVE_SOURCE_WATCHDOG_SECONDS = 15.0
 
 
 class LiveTradingEngine:
@@ -75,11 +77,10 @@ class LiveTradingEngine:
         # counter there is no way to tell "connected but silent" apart from
         # "connected and receiving trades" until the first candle closes.
         self.trades_received: int = 0
-        # Which exchange is actually feeding this session right now - set
-        # once run_live() picks one, so the dashboard can show the user
-        # which one they're really getting (see run_live()'s watchdog/
-        # fallback logic below for why this isn't always "binance").
-        self.live_source: str = "binance"
+        # Kept (not just a bare constant) so the dashboard's existing
+        # live_source field keeps working - Bybit is the only live source
+        # now, see the module docstring for why.
+        self.live_source: str = "bybit"
 
     def on_trade(self, trade: Trade) -> None:
         self.trades_received += 1
@@ -118,28 +119,14 @@ class LiveTradingEngine:
     async def run_from_trade_stream(self, trade_stream: AsyncIterator[Trade]) -> None:
         """Drives the pipeline from any async source of trades - a live
         WS feed, a replay of stored raw_trades rows, or (in tests) a fake
-        generator. This is the method under test; `run_live_binance` below
-        is a thin, real, but currently network-unverifiable adapter on
-        top of it."""
+        generator. This is the method under test; `run_live` below is a
+        thin, real adapter on top of it, backed by Bybit's public WS."""
         async for trade in trade_stream:
             self.on_trade(trade)
 
-    async def run_live_binance(self) -> None:
-        async def on_message(stream: str, data: dict) -> None:
-            if data.get("e") != "aggTrade":
-                return
-            self.on_trade(Trade(
-                timestamp=int(data["T"]), price=float(data["p"]), quantity=float(data["q"]),
-                is_buyer_maker=bool(data["m"]),
-            ))
-
-        logger.info("[live %s] connecting to Binance public WebSocket...", self.symbol)
-        ws_client = BinanceFuturesWebSocketClient(
-            symbols=[self.symbol], streams=["aggTrade", "bookTicker", "markPrice"], on_message=on_message,
-        )
-        await ws_client.run()
-
-    async def run_live_bybit(self) -> None:
+    async def run_live(self) -> None:
+        """Bybit-only live entry point (see module docstring for why
+        Binance is no longer used here)."""
         async def on_message(item: dict) -> None:
             self.on_trade(Trade(
                 timestamp=int(item["T"]), price=float(item["p"]), quantity=float(item["v"]),
@@ -149,41 +136,3 @@ class LiveTradingEngine:
         logger.info("[live %s] connecting to Bybit public WebSocket...", self.symbol)
         ws_client = BybitFuturesWebSocketClient(symbols=[self.symbol], on_message=on_message)
         await ws_client.run()
-
-    async def _wait_until_trades_received(self) -> None:
-        while self.trades_received == 0:
-            await asyncio.sleep(0.2)
-
-    async def run_live(self, watchdog_seconds: float = DEFAULT_LIVE_SOURCE_WATCHDOG_SECONDS) -> None:
-        """Tries Binance's public WS first; if it hasn't delivered a single
-        trade within `watchdog_seconds`, switches to Bybit's public WS for
-        the rest of the session instead.
-
-        WHY A WATCHDOG AND NOT A TRY/EXCEPT: `BinanceFuturesWebSocketClient
-        .run()` never actually raises in production - a failed connection
-        just triggers its own infinite reconnect-with-backoff loop (see
-        ws_client.py), which is the right behavior for a transient network
-        blip but means a *persistent* failure (e.g. an inherited IP ban
-        silently blocking the handshake, observed in production - see
-        README) would otherwise retry the same dead endpoint forever and
-        never give Bybit a chance. Counting real trades is the only signal
-        available to tell "connected and working" apart from "stuck
-        retrying a connection that will never succeed"."""
-        self.live_source = "binance"
-        binance_task = asyncio.create_task(self.run_live_binance())
-        try:
-            try:
-                await asyncio.wait_for(self._wait_until_trades_received(), timeout=watchdog_seconds)
-            except asyncio.TimeoutError:
-                logger.warning("[live %s] no trade from Binance within %.0fs - falling back to Bybit",
-                                self.symbol, watchdog_seconds)
-                binance_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await binance_task
-                self.live_source = "bybit"
-                await self.run_live_bybit()
-                return
-            await binance_task  # Binance is working - stay on it for the rest of the session
-        finally:
-            if not binance_task.done():
-                binance_task.cancel()
