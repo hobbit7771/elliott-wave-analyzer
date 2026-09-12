@@ -110,6 +110,7 @@ class BinanceFuturesWebSocketClient:
             try:
                 async with connect_fn(self.build_stream_url()) as ws:
                     backoff = 1.0  # reset after a successful connection
+                    logger.info("WS connected: %s", self.build_stream_url())
                     async for raw in ws:
                         await self._handle_raw_message(raw)
                         iterations += 1

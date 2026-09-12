@@ -34,6 +34,22 @@ async def test_live_engine_processes_trade_stream_and_closes_candles():
 
 
 @pytest.mark.asyncio
+async def test_live_engine_counts_trades_received():
+    """Visibility fix: a 5m/15m candle takes real minutes to close, so
+    without a running trade counter there's no way to tell "connected but
+    silent" apart from "connected and receiving data" until then - see
+    /api/live/state's trades_received field in server.py."""
+    from t3_engine.backtest.synthetic_data import generate_synthetic_series
+    candles = generate_synthetic_series(num_cycles=1)
+
+    engine = LiveTradingEngine(symbol="TESTUSDT", trading_timeframes=(Timeframe.M5,),
+                                entry_confidence_threshold=50.0, log_dir="/tmp/t3_test_logs")
+    assert engine.trades_received == 0
+    await engine.run_from_trade_stream(_trade_stream_from_candles(candles))
+    assert engine.trades_received == len(candles) * 3  # 3 trades yielded per candle above
+
+
+@pytest.mark.asyncio
 async def test_live_engine_logs_signals_to_disk(tmp_path):
     from t3_engine.backtest.synthetic_data import generate_synthetic_series
     candles = generate_synthetic_series(num_cycles=1)
