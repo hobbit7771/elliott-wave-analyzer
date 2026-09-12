@@ -1,0 +1,29 @@
+# Render Blueprint - one-click deploy of the T3 dashboard.
+# https://render.com/docs/blueprint-spec
+#
+# On Render (unlike this project's own build/CI sandbox) outbound access
+# to Binance's public WebSocket/REST is unrestricted, so the "Binance
+# (live, public WS)" source in the dashboard will connect for real here -
+# no API key needed for public market data.
+services:
+  - type: web
+    name: t3-elliott-wave-engine
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn t3_engine.dashboard.server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.6
+      - key: T3_TRADING_MODE
+        value: PAPER
+      - key: T3_ENTRY_CONFIDENCE_THRESHOLD
+        value: "75.0"
+      - key: T3_DATABASE_URL
+        value: sqlite:////opt/render/project/src/t3_engine.db
+      - key: T3_LOG_DIR
+        value: /opt/render/project/src/logs
+    # Render's free-tier disk is ephemeral (wiped on every deploy/restart).
+    # For trade history that survives redeploys, attach a Render Postgres
+    # instance and set T3_DATABASE_URL to its connection string instead -
+    # see README "Deploying to Render".

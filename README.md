@@ -79,7 +79,9 @@ t3_engine/
   market_data/        Binance USDT-M Futures REST + WebSocket clients
   backtest/           event-driven, no-lookahead backtester + metrics + synthetic fixture
   pipeline/           live_loop.py - the section-20 event-driven real-time orchestrator
-  dashboard/           FastAPI backend + static/index.html (lightweight-charts UI)
+  dashboard/           FastAPI backend + static/index.html (lightweight-charts UI),
+                      PWA manifest/service worker, live-pipeline start/stop/state endpoints
+  ai_advisor/         optional BYO-key GPT second-opinion commentary (never a decision-maker)
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
 tests/                108 tests, one file per module above
@@ -91,6 +93,52 @@ run_dashboard.py       CLI: serve the dashboard
 Every module has a docstring explaining *why* it's structured the way it
 is, not just what it does - read those before changing the hard-rule or
 no-lookahead logic in particular.
+
+## Mobile app + live Binance + AI advisor (dashboard)
+
+`dashboard/static/index.html` is a mobile-installable PWA, not just a
+desktop web page:
+
+- **"Add to Home Screen"** on iOS Safari or Android Chrome installs it as
+  an app icon (manifest + service worker in `dashboard/static/`), no App
+  Store/Google Play submission needed - that's the fast/simple path to a
+  "mobile app" versus building and shipping a separate native app.
+- **Live public WebSocket mode**: pick "Binance (live, public WS)" as the
+  source, hit "Start live". This calls `POST /api/live/start`, which spins
+  up the real `pipeline/live_loop.py` orchestrator against Binance's
+  **public** market-data WebSocket (aggTrade/bookTicker/markPrice) for that
+  symbol - no API key required, since market data isn't account data. This
+  build's own sandbox blocks that connection (see "Known limitations"
+  above), which is exactly why the dashboard didn't connect when you tried
+  it here; deployed on Render (or any host with normal internet), it
+  connects for real. Runs in PAPER mode only (simulated fills).
+- **AI Advisor tab**: paste your own OpenAI API key (your ChatGPT/OpenAI
+  subscription/credits - stored only in your browser's `localStorage`,
+  forwarded per-request to `/api/ai/advice` and never written to disk
+  server-side, see `ai_advisor/advisor.py`). It asks GPT for a skeptical
+  second opinion on the current scenario/signal in plain text. This is
+  strictly advisory: GPT can never accept/reject a trade or move a stop -
+  the rule-based engine already made that call before GPT ever sees it.
+
+## Deploying to Render
+
+1. Push this repo to your own GitHub, then in Render: **New +** → **Blueprint**
+   → point at your repo. `render.yaml` at the repo root configures
+   everything (build command, start command, Python version).
+2. Or manually: **New +** → **Web Service**, build command
+   `pip install -r requirements.txt`, start command
+   `uvicorn t3_engine.dashboard.server:app --host 0.0.0.0 --port $PORT`
+   (also in `Procfile`).
+3. Once deployed, open the Render URL on your phone and "Add to Home
+   Screen" - that's your mobile app.
+4. Render's free-tier disk is **ephemeral** (wiped on every redeploy/restart),
+   so the default SQLite file and `logs/` won't survive a redeploy. For
+   trade history that persists, add a Render Postgres instance and set
+   `T3_DATABASE_URL` to its connection string (see `.env.example`).
+5. Nothing here needs a Binance API key (market data is public). If you
+   later want the AI Advisor tab to work, you (or your users) just paste
+   an OpenAI key into the browser - no server-side config needed for that
+   either.
 
 ## Install & run
 
@@ -129,9 +177,13 @@ why that step is manual rather than something the ORM layer papers over.
 
 ## Known limitations (read before treating anything here as "done")
 
-1. **No live network access to Binance in this build sandbox.** A direct
-   test confirmed the outbound proxy returns a policy 403 on `CONNECT` to
-   `fapi.binance.com`. This means:
+1. **No live network access to Binance in this build sandbox** (this is a
+   property of the sandbox this code was written in, not of Render or any
+   normal hosting - Render has ordinary outbound internet access, so the
+   dashboard's "Binance (live, public WS)" mode and `run_paper_trading.py`
+   connect there without any changes). A direct test confirmed the
+   outbound proxy returns a policy 403 on `CONNECT` to `fapi.binance.com`.
+   This means:
    - The REST/WebSocket clients (`market_data/`) are correct against
      Binance's documented schema and unit-tested against mocked HTTP
      responses / fake sockets, but have never completed a real request in
