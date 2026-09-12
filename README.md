@@ -16,7 +16,7 @@
 
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine for
-Binance USDT-M Futures. 136 automated tests, all passing, cover every
+Binance USDT-M Futures. 139 automated tests, all passing, cover every
 module described below.
 
 ## Read this first: what "done" means here
@@ -84,7 +84,7 @@ t3_engine/
   ai_advisor/         optional BYO-key GPT second-opinion commentary (never a decision-maker)
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                136 tests, one file per module above
+tests/                139 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Binance in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -178,18 +178,31 @@ desktop web page:
   and the symbol list - the **live WebSocket** mode (`Start live`) still
   streams from Binance's public WS only; a Bybit-backed live stream would
   need its own pipeline wiring and hasn't been built yet.
-- **PWA cache bug (fixed)**: earlier versions of `sw.js` cached the app
-  shell (`index.html`) cache-first and never re-fetched it - browsers only
-  re-run a service worker's install/activate when the worker file's own
-  bytes change, and since `sw.js` itself hadn't changed across several
-  deploys that fixed real frontend bugs, phones with the PWA already
-  installed kept serving the stale cached page indefinitely. Every
-  server-side fix was real and deployed correctly; it just never reached
-  already-installed phones. `sw.js` now fetches the shell network-first
-  (falling back to cache only when offline), so every reload while online
-  picks up whatever is actually deployed. If you installed the PWA before
-  this fix and still see old behavior, force-refresh once (or remove and
-  re-add the Home Screen icon) to pick up the corrected service worker.
+- **PWA cache bug (fixed, in two layers)**: earlier versions of `sw.js`
+  cached the app shell (`index.html`) cache-first and never re-fetched it
+  - browsers only re-run a service worker's install/activate when the
+    worker file's own bytes change, and since `sw.js` itself hadn't
+    changed across several deploys that fixed real frontend bugs, phones
+    with the PWA already installed kept serving the stale cached page
+    indefinitely. `sw.js` now fetches the shell network-first (falling
+    back to cache only when offline).
+  Even after that fix, an **already-open tab** can still show stale UI:
+  confirmed via Render's own request logs in production - a phone
+  fetched `/` and `/sw.js` successfully seconds after a new deploy went
+  live (fresh 200 responses reached it, proving the server and deploy
+  were correct), yet its already-open tab kept displaying the old page,
+  because nothing had told that specific tab's already-running JavaScript
+  to restart - a new service worker taking over network requests in the
+  background does not, by itself, make an open tab re-execute its script.
+  Two things now close this gap: `index.html` listens for the browser's
+  `controllerchange` event (fired exactly when a new service worker takes
+  control) and reloads itself once when it fires, and `/` and `/sw.js` are
+  now served with explicit `Cache-Control: no-store` headers so no
+  intermediate cache (browser HTTP cache, a carrier/ISP compression
+  proxy) can hand back stale bytes before the service-worker-update check
+  even runs. If you still see old behavior after this, fully close the
+  tab/app (not just background it) and reopen - that guarantees a clean
+  script execution regardless of any in-memory state from before.
 - **AI Advisor tab**: paste your own OpenAI API key (your ChatGPT/OpenAI
   subscription/credits - stored only in your browser's `localStorage`,
   forwarded per-request to `/api/ai/advice` and never written to disk
@@ -255,7 +268,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (136 tests)
+# Run the automated test suite (139 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)
