@@ -156,6 +156,21 @@ picks. If you still see this error, your service is on an old commit -
 go to **Manual Deploy → Deploy latest commit** (or **Clear build cache &
 deploy** if that doesn't help) to pick up the fix.
 
+### Troubleshooting: "bash: line 1: gunicorn: command not found" (build
+### succeeds, deploy fails)
+
+If this Render service was created before the T3 engine existed, Render's
+auto-detect may have saved a **Start Command** of `gunicorn app:app` back
+when `app.py` was a Flask prototype. That Start Command is an explicit
+override stored on the service and does not update itself when
+`Procfile`/`render.yaml` change - but it doesn't need to: `app.py` at the
+repo root now re-exports the real T3 FastAPI app, `gunicorn.conf.py` at
+the repo root tells gunicorn to use Uvicorn's ASGI worker (auto-loaded by
+gunicorn with no extra flags needed), and `gunicorn` itself is in
+`requirements.txt` - so the existing `gunicorn app:app` command now just
+works as-is. Redeploy (**Manual Deploy → Deploy latest commit**) and it
+should come up; no changes needed in the Render dashboard.
+
 ## Install & run
 
 ```bash
