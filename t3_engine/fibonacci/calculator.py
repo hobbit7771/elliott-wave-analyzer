@@ -85,8 +85,16 @@ def nearest_ratio_score(price: float, levels: List[FibLevel], reference_length: 
 
 
 def support_resistance_levels(high: float, low: float) -> Dict[str, float]:
-    """Legacy-compatible retracement grid between an arbitrary high/low,
-    used by the dashboard for a generic fib overlay."""
+    """Generic retracement grid between an arbitrary high/low. NOT
+    currently called anywhere in this codebase - the dashboard's actual
+    Fibonacci overlay (dashboard/server.py's fibonacci_levels_for_scenario)
+    uses the wave-specific functions above instead, since those are the
+    same ones signal_engine/targets.py uses to build real TP/SL, so the
+    chart shows exactly what the strategy itself is measuring rather than
+    a generic grid that could disagree with it. Kept here as a
+    general-purpose building block, not dead code to delete, but an
+    earlier version of this docstring wrongly claimed the dashboard was
+    already using it - it wasn't."""
     diff = high - low
     ratios = {
         "0.0": high,

@@ -5,9 +5,69 @@ import httpx
 from fastapi.testclient import TestClient
 
 import t3_engine.dashboard.server as server_module
-from t3_engine.dashboard.server import app, normalize_symbol
+from t3_engine.common.models import Scenario, Wave
+from t3_engine.common.types import Direction, Timeframe, WaveLabel
+from t3_engine.dashboard.server import app, fibonacci_levels_for_scenario, normalize_symbol
 
 client = TestClient(app)
+
+
+def _wave(label, start_price, end_price, start_time=0, end_time=1000):
+    direction = Direction.UP if end_price >= start_price else Direction.DOWN
+    return Wave(wave_id=f"w-{label}", parent_wave_id=None, degree=Timeframe.M5, label=label,
+                direction=direction, start_timestamp=start_time, end_timestamp=end_time,
+                start_price=start_price, end_price=end_price, high=max(start_price, end_price),
+                low=min(start_price, end_price))
+
+
+# ---- Fibonacci overlay (spec follow-up: the only fib-derived lines ever
+# drawn were an ACCEPTED signal's TP/SL, which - gated by a confidence
+# threshold and hard Elliott rules - are rare, so for long stretches
+# nothing fib-related showed at all even though score_fibonacci() was
+# using it internally the whole session. fibonacci_levels_for_scenario
+# projects levels for whichever wave is expected NEXT, persistently.) ----
+
+def test_fibonacci_levels_projects_wave2_retracement_after_wave1():
+    scenario = Scenario(scenario_id="s1", degree=Timeframe.M5,
+                         waves=[_wave(WaveLabel.W1, 100.0, 150.0)],
+                         next_expected_label=WaveLabel.W2)
+    levels = fibonacci_levels_for_scenario(scenario)
+    assert len(levels) == 5  # WAVE2_RATIOS
+    assert all(lvl["for_wave"] == "2" for lvl in levels)
+    # A 0.618 retracement of a 100->150 move lands below 150, above 100.
+    ratio_618 = next(lvl for lvl in levels if lvl["ratio"] == 0.618)
+    assert 100.0 < ratio_618["price"] < 150.0
+
+
+def test_fibonacci_levels_projects_wave3_extension_after_wave2():
+    scenario = Scenario(scenario_id="s2", degree=Timeframe.M5, waves=[
+        _wave(WaveLabel.W1, 100.0, 150.0), _wave(WaveLabel.W2, 150.0, 120.0),
+    ], next_expected_label=WaveLabel.W3)
+    levels = fibonacci_levels_for_scenario(scenario)
+    assert len(levels) == 5  # WAVE3_RATIOS
+    assert all(lvl["price"] > 120.0 for lvl in levels)  # projected above wave2's end
+
+
+def test_fibonacci_levels_empty_when_scenario_missing_or_complete():
+    assert fibonacci_levels_for_scenario(None) == []
+    complete = Scenario(scenario_id="s3", degree=Timeframe.M5,
+                         waves=[_wave(WaveLabel.C, 100.0, 90.0)], next_expected_label=None)
+    assert fibonacci_levels_for_scenario(complete) == []
+
+
+def test_fibonacci_levels_empty_for_wave_a_and_b_no_formula_exists():
+    """A and B have no spec-defined Fibonacci ratio in this codebase (only
+    2/3/4/5/C do - see fibonacci/calculator.py) - must return nothing
+    rather than a made-up level."""
+    scenario = Scenario(scenario_id="s4", degree=Timeframe.M5,
+                         waves=[_wave(WaveLabel.W5, 100.0, 200.0)], next_expected_label=WaveLabel.A)
+    assert fibonacci_levels_for_scenario(scenario) == []
+
+
+def test_run_backtest_includes_fibonacci_levels_field():
+    resp = client.get("/api/run", params={"source": "synthetic", "cycles": 1, "threshold": 50})
+    assert resp.status_code == 200
+    assert "fibonacci_levels" in resp.json()
 
 
 # ---- symbol normalization (spec follow-up: dashboard accepted garbage like
