@@ -122,22 +122,22 @@ desktop web page:
 
 ## Deploying to Render
 
-1. Push this repo to your own GitHub, then in Render: **New +** → **Blueprint**
-   → point at your repo. `render.yaml` at the repo root configures
-   everything (build command, start command, Python version) - it installs
-   `requirements-dashboard.txt`, **not** the root `requirements.txt`.
-2. Or manually (if you already created a plain **Web Service** instead of
-   a Blueprint): set build command to
-   `pip install -r requirements-dashboard.txt`, start command to
-   `uvicorn t3_engine.dashboard.server:app --host 0.0.0.0 --port $PORT`,
-   and add an env var `PYTHON_VERSION=3.11.6`.
-3. Once deployed, open the Render URL on your phone and "Add to Home
+1. Push this repo to your own GitHub, then in Render either:
+   - **New +** → **Blueprint** → point at your repo (`render.yaml` at the
+     repo root configures everything automatically), or
+   - **New +** → **Web Service** → point at your repo and accept the
+     defaults - Render auto-detects Python and runs
+     `pip install -r requirements.txt`, which is now safe (see below).
+     Just set the **Start Command** to
+     `uvicorn t3_engine.dashboard.server:app --host 0.0.0.0 --port $PORT`
+     if Render doesn't pick that up from `Procfile` automatically.
+2. Once deployed, open the Render URL on your phone and "Add to Home
    Screen" - that's your mobile app.
-4. Render's free-tier disk is **ephemeral** (wiped on every redeploy/restart),
+3. Render's free-tier disk is **ephemeral** (wiped on every redeploy/restart),
    so the default SQLite file and `logs/` won't survive a redeploy. For
    trade history that persists, add a Render Postgres instance and set
    `T3_DATABASE_URL` to its connection string (see `.env.example`).
-5. Nothing here needs a Binance API key (market data is public). If you
+4. Nothing here needs a Binance API key (market data is public). If you
    later want the AI Advisor tab to work, you (or your users) just paste
    an OpenAI key into the browser - no server-side config needed for that
    either.
@@ -145,21 +145,22 @@ desktop web page:
 ### Troubleshooting: "Exited with status 1 while building your code" /
 ### "Build aborted: the NumPy Cython headers require Cython 3.0.0 or newer"
 
-This happens if Render's build command is `pip install -r requirements.txt`
-(the root file) instead of `requirements-dashboard.txt`. The root file also
-lists the **legacy** `app.py` prototype's old pandas/numpy/matplotlib pins,
-which Render tries to compile from source on newer Python images and fails
-- the T3 dashboard doesn't use any of those packages. Fix: in the Render
-service's **Settings → Build Command**, change it to
-`pip install -r requirements-dashboard.txt` (or redeploy via **Blueprint**,
-which already points at the right file per `render.yaml`), then trigger a
-new deploy.
+This was caused by the root `requirements.txt` also carrying the
+**legacy** `app.py` prototype's old pandas/numpy/matplotlib pins, which
+Render tried to compile from source on newer Python images and failed -
+the T3 dashboard never imported any of those packages in the first place.
+Fixed: those pins were moved out to `requirements-legacy.txt` (kept only
+in case someone wants to resurrect `app.py` later); the root
+`requirements.txt` now installs cleanly on any Python version Render
+picks. If you still see this error, your service is on an old commit -
+go to **Manual Deploy → Deploy latest commit** (or **Clear build cache &
+deploy** if that doesn't help) to pick up the fix.
 
 ## Install & run
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt   # installs both the legacy app's deps and T3's
+pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
 # Run the automated test suite (108 tests)
 pytest tests/ -q
