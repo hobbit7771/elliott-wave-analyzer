@@ -40,7 +40,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from t3_engine.ai_advisor.advisor import (
-    DEFAULT_MODEL as DEFAULT_GEMINI_MODEL,
+    DEFAULT_MODEL as DEFAULT_AI_MODEL,
     AIAdvisorError,
     request_commentary,
     request_wave_count,
@@ -138,7 +138,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-012"
+BUILD_VERSION = "BUILD-CHECK-013"
 
 
 @app.get("/api/health")
@@ -390,8 +390,8 @@ def live_state(symbol: str = Query(...), timeframe: str = Query("5m")):
 
 @app.post("/api/ai/advice")
 def ai_advice(api_key: str = Body(..., embed=True), context: dict = Body(..., embed=True),
-              model: str = Body(DEFAULT_GEMINI_MODEL, embed=True)):
-    """BYO-key Gemini second opinion. The key is used for exactly one
+              model: str = Body(DEFAULT_AI_MODEL, embed=True)):
+    """BYO-key OpenRouter second opinion. The key is used for exactly one
     outbound request and never written to disk/DB/logs - see
     ai_advisor/advisor.py's docstring for why this only ever produces
     commentary, never a trading decision."""
@@ -407,8 +407,8 @@ def ai_label(api_key: str = Body(..., embed=True), source: str = Body("synthetic
              symbol: str = Body("SYNTHETIC", embed=True), timeframe: str = Body("5m", embed=True),
              limit: int = Body(1500, embed=True, ge=100, le=10000),
              cycles: int = Body(2, embed=True, ge=1, le=10),
-             model: str = Body(DEFAULT_GEMINI_MODEL, embed=True)):
-    """AI wave-labelling mode: Gemini proposes a count over the WHOLE
+             model: str = Body(DEFAULT_AI_MODEL, embed=True)):
+    """AI wave-labelling mode: the model proposes a count over the WHOLE
     loaded history - the one thing the deterministic engine deliberately
     won't do, since it only ever anchors on recent pivots.
 
@@ -489,7 +489,7 @@ def ai_analyst(api_key: str = Body(..., embed=True), source: str = Body("synthet
                symbol: str = Body("SYNTHETIC", embed=True), timeframe: str = Body("5m", embed=True),
                limit: int = Body(1500, embed=True, ge=100, le=10000),
                cycles: int = Body(2, embed=True, ge=1, le=10),
-               model: str = Body(DEFAULT_GEMINI_MODEL, embed=True),
+               model: str = Body(DEFAULT_AI_MODEL, embed=True),
                max_steps: int = Body(DEFAULT_MAX_STEPS, embed=True, ge=1, le=MAX_MAX_STEPS)):
     """The AI analyst: label a CLEAN chart from scratch, as an agent.
 

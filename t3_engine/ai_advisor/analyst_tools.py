@@ -359,7 +359,7 @@ def _structure_enum_description() -> str:
     return ", ".join(ALL_STRUCTURES)
 
 
-# Gemini function declarations (an OpenAPI-schema subset). Descriptions are
+# Tool declarations (JSON-Schema function definitions). Descriptions are
 # written FOR the model - each one says not just what the tool does but when
 # it is the right tool, because a tool the model misuses is worse than one
 # it does not have.
@@ -519,3 +519,13 @@ FUNCTION_DECLARATIONS: List[Dict[str, Any]] = [
         },
     },
 ]
+
+
+def openai_tools() -> List[Dict[str, Any]]:
+    """The declarations above in the wire shape OpenRouter expects.
+
+    Kept as a wrapper rather than baked into FUNCTION_DECLARATIONS so the
+    declaration list stays the single readable source of truth - this is
+    the third provider this code has been pointed at, and each one wants
+    the same functions wrapped slightly differently."""
+    return [{"type": "function", "function": declaration} for declaration in FUNCTION_DECLARATIONS]
