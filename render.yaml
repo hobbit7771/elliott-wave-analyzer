@@ -5,12 +5,18 @@
 # to Binance's public WebSocket/REST is unrestricted, so the "Binance
 # (live, public WS)" source in the dashboard will connect for real here -
 # no API key needed for public market data.
+#
+# buildCommand installs requirements-dashboard.txt, NOT the root
+# requirements.txt - the root file also carries the legacy app.py's old
+# pandas/numpy/matplotlib pins, which have no prebuilt wheel on newer
+# Python and fail to compile from source (see requirements-dashboard.txt
+# for the full explanation). The T3 dashboard doesn't need any of that.
 services:
   - type: web
     name: t3-elliott-wave-engine
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements-dashboard.txt
     startCommand: uvicorn t3_engine.dashboard.server:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION

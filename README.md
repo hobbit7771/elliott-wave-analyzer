@@ -124,11 +124,13 @@ desktop web page:
 
 1. Push this repo to your own GitHub, then in Render: **New +** → **Blueprint**
    → point at your repo. `render.yaml` at the repo root configures
-   everything (build command, start command, Python version).
-2. Or manually: **New +** → **Web Service**, build command
-   `pip install -r requirements.txt`, start command
-   `uvicorn t3_engine.dashboard.server:app --host 0.0.0.0 --port $PORT`
-   (also in `Procfile`).
+   everything (build command, start command, Python version) - it installs
+   `requirements-dashboard.txt`, **not** the root `requirements.txt`.
+2. Or manually (if you already created a plain **Web Service** instead of
+   a Blueprint): set build command to
+   `pip install -r requirements-dashboard.txt`, start command to
+   `uvicorn t3_engine.dashboard.server:app --host 0.0.0.0 --port $PORT`,
+   and add an env var `PYTHON_VERSION=3.11.6`.
 3. Once deployed, open the Render URL on your phone and "Add to Home
    Screen" - that's your mobile app.
 4. Render's free-tier disk is **ephemeral** (wiped on every redeploy/restart),
@@ -139,6 +141,19 @@ desktop web page:
    later want the AI Advisor tab to work, you (or your users) just paste
    an OpenAI key into the browser - no server-side config needed for that
    either.
+
+### Troubleshooting: "Exited with status 1 while building your code" /
+### "Build aborted: the NumPy Cython headers require Cython 3.0.0 or newer"
+
+This happens if Render's build command is `pip install -r requirements.txt`
+(the root file) instead of `requirements-dashboard.txt`. The root file also
+lists the **legacy** `app.py` prototype's old pandas/numpy/matplotlib pins,
+which Render tries to compile from source on newer Python images and fails
+- the T3 dashboard doesn't use any of those packages. Fix: in the Render
+service's **Settings → Build Command**, change it to
+`pip install -r requirements-dashboard.txt` (or redeploy via **Blueprint**,
+which already points at the right file per `render.yaml`), then trigger a
+new deploy.
 
 ## Install & run
 
