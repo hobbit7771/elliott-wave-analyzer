@@ -222,6 +222,19 @@ def test_run_backtest_synthetic_returns_real_candles_and_metrics():
     assert "metrics" in data
     assert "overall" in data["metrics"]
     assert data["note"] is not None  # synthetic disclosure note present
+    # Subwave counting (spec follow-up: "waves and subwaves should be
+    # accounted for") - see BacktestEngine.subwave_history.
+    assert "subwave_history" in data
+
+
+def test_run_backtest_accepts_a_custom_starting_equity():
+    """Follow-up: "give unlimited capital" isn't a real lever in a
+    %-of-equity risk model (risk_per_wave is a fraction of equity, so
+    everything scales proportionally) - what it honestly reduces to is
+    letting the starting balance be configured, which this exposes."""
+    resp = client.get("/api/run", params={"source": "synthetic", "cycles": 1, "threshold": 50, "equity": 1_000_000})
+    assert resp.status_code == 200
+    assert resp.json()["final_equity"] >= 900_000  # started near 1,000,000, not the 10,000 default
 
 
 def test_run_backtest_response_is_json_serializable_end_to_end():

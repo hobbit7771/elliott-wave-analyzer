@@ -79,6 +79,46 @@ def test_stop_loss_hit_closes_full_position():
     assert pos.position_id not in risk.open_risk
 
 
+def test_stop_loss_fills_at_the_stop_price_not_the_wick_extreme():
+    """Real bug found from production feedback: on a wide bar (routine on
+    1h/4h, which trades were just enabled on), the caller only ever passes
+    a whole candle's low/high - if the fill used THAT price directly
+    instead of the position's own stop_loss, a stop meant to risk ~1% of
+    equity could realize a much larger loss purely because the bar that
+    triggered it happened to have a long wick, with no floor. This is
+    exactly what surfaced as R multiples of -50 or worse in a real
+    session. The fix: a stop fills AT the stop price, regardless of how
+    much further the triggering price/wick went - the standard,
+    conservative backtesting assumption absent real gap/slippage data."""
+    pm, risk = _setup_pm()
+    signal = make_signal()
+    tps = [TakeProfitLeg(price=110, fraction=1.0, label="TP1")]
+    pos = pm.open_position(signal=signal, symbol="BTCUSDT", side=TradeSide.LONG, entry_price=100,
+                            quantity=10, stop_loss=95, take_profits=tps, wave_label=WaveLabel.W3)
+    # A wide 1h bar's low wicks down to 40 (far past the 95 stop) - a real
+    # stop-market order fills at ~95, not at the bar's full extreme.
+    pm.on_price_update(pos.position_id, price=40, now_ms=1)
+    assert pos.closed
+    # entry=100, stop=95, qty=10, zero slippage/fees in _setup_pm() -> the
+    # loss must be exactly (100-95)*10 = 50, never anywhere near (100-40)*10 = 600.
+    assert pos.realized_pnl == pytest.approx(-50.0)
+
+
+def test_take_profit_fills_at_the_tp_price_not_a_better_wick():
+    """Same bug, symmetric direction: a bar that overshoots a TP level
+    must not fill at that better price either, or wins get inflated by
+    the identical mechanism that was inflating losses on stops."""
+    pm, risk = _setup_pm()
+    signal = make_signal()
+    tps = [TakeProfitLeg(price=110, fraction=1.0, label="TP1")]
+    pos = pm.open_position(signal=signal, symbol="BTCUSDT", side=TradeSide.LONG, entry_price=100,
+                            quantity=10, stop_loss=95, take_profits=tps, wave_label=WaveLabel.W3)
+    # Bar's high wicks up to 200 (far past the 110 TP).
+    pm.on_price_update(pos.position_id, price=200, now_ms=1)
+    assert pos.closed
+    assert pos.realized_pnl == pytest.approx(100.0)  # (110-100)*10, not (200-100)*10
+
+
 def test_partial_tp_fill_reduces_quantity_without_closing():
     pm, risk = _setup_pm()
     signal = make_signal()

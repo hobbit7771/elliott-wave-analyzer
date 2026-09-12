@@ -17,7 +17,7 @@
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine, live
 market data from Bybit USDT perpetuals (see "Mobile app + live Bybit"
-below for why Binance was dropped). 162 automated tests, all passing,
+below for why Binance was dropped). 169 automated tests, all passing,
 cover every module described below.
 
 ## Read this first: what "done" means here
@@ -88,7 +88,7 @@ t3_engine/
   ai_advisor/         optional BYO-key GPT second-opinion commentary (never a decision-maker)
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                162 tests, one file per module above
+tests/                169 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Bybit in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -275,6 +275,48 @@ desktop web page:
   something changed in this round - see "On backtest profitability" above
   for why a profit target is never the mechanism used to change how
   counting behaves.
+- **Subwaves - "waves and subwaves should be accounted for"**: a motive
+  wave (1/3/5) can now be subdivided into its own i-ii-iii-iv-v count.
+  `elliott_engine/scenario.py::build_subwaves` runs a FRESH ZigZag pivot
+  detector, at a finer deviation than the primary count, over just that
+  wave's own candle range once it's fully confirmed - held to the
+  identical hard Elliott rules as any primary count (`build_candidate_waves`
+  was refactored to trigger those rules by position, not by digit-label
+  identity, specifically so it works unchanged for either label scheme).
+  `BacktestEngine.subwave_history` (mirroring `wave_history`) accumulates
+  these across a run; exposed as `subwave_history` in `/api/run` and
+  `/api/live/state`, drawn on the chart as smaller markers underneath the
+  primary numbers. Only 1/3/5 subdivide (5 waves) - corrective waves
+  subdivide into 3, which this engine doesn't label yet (WaveLabel has no
+  micro a/b/c, only i-v - a real scope boundary, not an oversight).
+- **A real stop-loss/take-profit fill bug, found from production
+  feedback**: `PositionManager.on_price_update` was closing a position at
+  whatever wick price (a bar's raw `.low`/`.high`) triggered the stop or
+  TP, not at the position's own `stop_loss`/`take_profit` level. On a wide
+  bar - routine on the 1h/4h timeframes just enabled for trading - that
+  extreme can be dramatically further from entry than the risk engine
+  ever intended, which is exactly what surfaced as real R multiples of
+  -50 or worse on a live session (a 1% intended risk realizing a 50%+
+  loss). Fixed to fill AT the stop/TP level regardless of how far the
+  triggering wick ran past it - the standard, conservative backtesting
+  assumption absent real tick-level gap data - symmetrically for both
+  stops (previously overstating losses) and take-profits (previously
+  overstating wins by the identical mechanism). This is the real
+  explanation for the outsized losses in those screenshots, not
+  insufficiently loose risk limits.
+- **On "unlimited capital" and "unlimited stops"**: risk-per-trade is a
+  FRACTION of equity (`risk_engine/risk_manager.py`), so position sizing,
+  PnL and drawdown all scale proportionally regardless of account size -
+  "unlimited capital" isn't a real lever to pull in this model, it just
+  reduces to a bigger starting number, which `/api/run`'s new `equity`
+  param (and a matching "Equity" field in the dashboard) exposes directly.
+  Removing stop-losses ("unlimited stops") was declined: a trade with no
+  defined risk boundary is the single practice every professional risk
+  framework exists to prevent, not a refinement of one - especially now
+  that the fill-price bug above is fixed and no longer needs a wider stop
+  to "cover" it. The daily-drawdown breaker halting trading after a string
+  of losses is the same risk engine doing its job, not something to widen
+  or bypass either.
 - **Server-side logging now actually reaches Render's log viewer**: a
   batch of connection-visibility logging (WS connect/disconnect, first-
   trade-received) was added in an earlier round and shipped, then
@@ -350,7 +392,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (162 tests)
+# Run the automated test suite (169 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)

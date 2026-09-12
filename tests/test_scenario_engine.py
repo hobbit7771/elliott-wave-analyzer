@@ -1,6 +1,7 @@
-from t3_engine.common.models import Pivot
-from t3_engine.common.types import Direction, StructureType, Timeframe, WaveStatus
-from t3_engine.elliott_engine.scenario import ScenarioEngine, build_candidate_waves
+from t3_engine.backtest.synthetic_data import generate_synthetic_impulse_cycle
+from t3_engine.common.models import Pivot, Wave
+from t3_engine.common.types import Direction, StructureType, Timeframe, WaveLabel, WaveStatus
+from t3_engine.elliott_engine.scenario import ScenarioEngine, build_candidate_waves, build_subwaves
 
 
 def pivot(i, price, kind):
@@ -199,3 +200,52 @@ def test_lone_survivor_keeps_its_own_absolute_score_not_rescaled_to_100():
     assert len(scenarios) == 1
     assert scenarios[0].probability < 100.0
     assert scenarios[0].probability == round(100.0 * engine._weighted_score(scenarios[0]), 2)
+
+
+# ---- subwaves (spec follow-up: "waves and subwaves should be accounted
+# for" - a motive wave (1/3/5) subdivides into its own i-ii-iii-iv-v count,
+# held to the identical hard Elliott rules as the primary count) ----
+
+def _parent_wave(candles, label=WaveLabel.W3):
+    return Wave(wave_id="parent-1", parent_wave_id=None, degree=Timeframe.M5, label=label,
+                direction=Direction.UP, start_timestamp=candles[0].open_time,
+                end_timestamp=candles[-1].close_time, start_price=candles[0].open,
+                end_price=candles[-1].close, high=max(c.high for c in candles),
+                low=min(c.low for c in candles))
+
+
+def test_build_subwaves_produces_micro_labels_tagged_with_the_parent_wave_id():
+    candles = generate_synthetic_impulse_cycle(seed=7)
+    parent = _parent_wave(candles)
+    result = build_subwaves(candles, parent, deviation_pct=1.0)
+    assert isinstance(result["waves"], list)
+    micro_labels = (WaveLabel.I, WaveLabel.II, WaveLabel.III, WaveLabel.IV, WaveLabel.V)
+    for w in result["waves"]:
+        assert w.label in micro_labels
+        assert w.parent_wave_id == "parent-1"
+        assert w.degree == parent.degree
+
+
+def test_build_subwaves_empty_with_too_few_candles():
+    candles = generate_synthetic_impulse_cycle(seed=7)[:2]
+    parent = _parent_wave(candles)
+    result = build_subwaves(candles, parent, deviation_pct=1.0)
+    assert result == {"waves": [], "broken_rule": None}
+
+
+def test_build_subwaves_held_to_the_same_hard_rules_as_a_primary_count():
+    """A subwave count that overlaps wave-1/wave-4-style must be flagged
+    INVALIDATED exactly like a primary count would be - not a looser,
+    cosmetic-only approximation."""
+    from t3_engine.common.types import WaveStatus as WS
+    pivots_as_wave1 = [
+        pivot(0, 100, "LOW"), pivot(1, 150, "HIGH"), pivot(2, 120, "LOW"),
+        pivot(3, 250, "HIGH"), pivot(4, 130, "LOW"),  # overlaps micro-I's high (150)
+    ]
+    # Reuse build_candidate_waves directly with the micro label scheme to
+    # confirm the SAME overlap rule fires - build_subwaves is a thin
+    # candle->pivot wrapper around exactly this.
+    from t3_engine.elliott_engine.scenario import _MICRO_LABELS
+    result = build_candidate_waves(pivots_as_wave1, Direction.UP, Timeframe.M5, labels=_MICRO_LABELS)
+    assert result["broken_rule"] is not None
+    assert result["waves"][-1].status == WS.INVALIDATED

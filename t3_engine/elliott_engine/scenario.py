@@ -28,7 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from t3_engine.common.models import Pivot, Scenario, Wave, next_id
+from t3_engine.common.models import Candle, Pivot, Scenario, Wave, next_id
 from t3_engine.common.types import Direction, StructureType, Timeframe, WaveLabel, WaveStatus
 from t3_engine.elliott_engine.rules_correction import classify_correction
 from t3_engine.elliott_engine.rules_diagonal import validate_diagonal
@@ -42,6 +42,14 @@ from t3_engine.fibonacci.calculator import (
 MAX_SCENARIOS = 3
 _IMPULSE_LABELS = [WaveLabel.W1, WaveLabel.W2, WaveLabel.W3, WaveLabel.W4, WaveLabel.W5]
 _ABC_LABELS = [WaveLabel.A, WaveLabel.B, WaveLabel.C]
+# Micro-degree subdivision of a single motive (W1/W3/W5) leg - same 5-wave
+# shape and hard rules as the primary count, just one degree smaller and
+# entirely inside that leg's own start/end. WaveLabel already reserves
+# these values for exactly this (see its own docstring); build_subwaves()
+# below is what actually produces them.
+_MICRO_LABELS = [WaveLabel.I, WaveLabel.II, WaveLabel.III, WaveLabel.IV, WaveLabel.V]
+_SAME_DIRECTION_AS_TREND = (WaveLabel.W1, WaveLabel.W3, WaveLabel.W5, WaveLabel.B,
+                            WaveLabel.I, WaveLabel.III, WaveLabel.V)
 
 
 def _make_wave(label: WaveLabel, degree: Timeframe, start: Pivot, end: Pivot,
@@ -83,33 +91,37 @@ def _rescue_as_diagonal(result, waves: List[Wave], wave5: Optional[Wave], direct
 
 
 def build_candidate_waves(pivots: List[Pivot], direction: Direction, degree: Timeframe,
-                          parent_wave_id: Optional[str] = None) -> Dict:
+                          parent_wave_id: Optional[str] = None, labels: Optional[List[WaveLabel]] = None) -> Dict:
     """Build as many labelled waves as `pivots` allows (up to a full
-    1-2-3-4-5-A-B-C), validating impulse hard rules as we go. `pivots[0]`
-    is the anchor (start of Wave 1). Returns a dict with the wave list and
-    invalidity info; stops adding waves the instant a hard rule breaks."""
+    1-2-3-4-5-A-B-C, or - via `labels=_MICRO_LABELS` from build_subwaves() -
+    a single motive leg's own i-ii-iii-iv-v subdivision), validating
+    impulse hard rules as we go. `pivots[0]` is the anchor (start of the
+    first wave). Returns a dict with the wave list and invalidity info;
+    stops adding waves the instant a hard rule breaks.
+
+    The wave-4/wave-5 hard-rule checks below trigger on POSITION (the 4th
+    and 5th wave built), not on the digit labels themselves, precisely so
+    this same function and the same rules work unchanged for the micro
+    label scheme - a subwave count is held to the identical Elliott rules
+    as the primary count, not a looser cosmetic approximation."""
     waves: List[Wave] = []
     broken_rule = None
-    labels = _IMPULSE_LABELS + _ABC_LABELS
+    labels = labels if labels is not None else (_IMPULSE_LABELS + _ABC_LABELS)
 
     for i in range(min(len(pivots) - 1, len(labels))):
         start, end = pivots[i], pivots[i + 1]
         label = labels[i]
-        wave_direction = direction if label in (WaveLabel.W1, WaveLabel.W3, WaveLabel.W5, WaveLabel.B) else direction.opposite()
-        if label == WaveLabel.A:
-            wave_direction = direction.opposite()
-        if label == WaveLabel.C:
-            wave_direction = direction.opposite()
+        wave_direction = direction if label in _SAME_DIRECTION_AS_TREND else direction.opposite()
         wave = _make_wave(label, degree, start, end, wave_direction, parent_wave_id)
         waves.append(wave)
 
-        if label == WaveLabel.W4:
+        if len(waves) == 4:
             result = validate_impulse(waves[0], waves[1], waves[2], waves[3], None, direction)
             if not result.valid:
                 if not _rescue_as_diagonal(result, waves, None, direction):
                     broken_rule = result
                     break
-        elif label == WaveLabel.W5:
+        elif len(waves) == 5:
             result = validate_impulse(waves[0], waves[1], waves[2], waves[3], waves[4], direction)
             if not result.valid:
                 if not _rescue_as_diagonal(result, waves, waves[4], direction):
@@ -132,6 +144,49 @@ def build_candidate_waves(pivots: List[Pivot], direction: Direction, degree: Tim
         waves[-1].status = WaveStatus.INVALIDATED
 
     return {"waves": waves, "broken_rule": broken_rule}
+
+
+def build_subwaves(candles: List[Candle], parent_wave: Wave, deviation_pct: float) -> Dict:
+    """Subdivide a single CONFIRMED motive wave (W1/W3/W5) into its own
+    i-ii-iii-iv-v count - the spec follow-up that wave counting should
+    "account for waves and subwaves", not just the top-level 1-5-A-B-C.
+
+    Only ever called on a wave whose start/end are already fixed (it's
+    been archived into ScenarioEngine.wave_history, i.e. the top-level
+    count has already moved past it), so this is a one-shot, self-
+    contained computation over exactly that wave's own candle range - a
+    FRESH ZigZagPivotDetector at a smaller `deviation_pct` (finer than the
+    parent degree's, since a subwave is by definition a smaller move) is
+    run only over `candles`, and the result is graded by the identical
+    hard Elliott rules as any primary count (see build_candidate_waves).
+    A subwave count that fails those rules is exactly as invalid as a
+    primary count that does - this is not a cosmetic decoration."""
+    from t3_engine.market_structure.pivots import ZigZagPivotDetector
+
+    detector = ZigZagPivotDetector(deviation_pct=deviation_pct)
+    for i, candle in enumerate(candles):
+        detector.update(i, candle)
+    if len(detector.pivots) < 2:
+        return {"waves": [], "broken_rule": None}
+
+    # A confirmed pivot's OWN price is real, but pivots[0] here is whatever
+    # the local detector first anchors on - not necessarily exactly
+    # parent_wave.start_price. Prepend a synthetic anchor pivot at the
+    # parent wave's real start so subwave 1 actually begins there, not at
+    # the first LOCAL swing the smaller deviation happened to catch.
+    anchor = Pivot(index=-1, timestamp=parent_wave.start_timestamp, price=parent_wave.start_price,
+                   kind="LOW" if parent_wave.direction == Direction.UP else "HIGH",
+                   confirmed_at_index=-1)
+    pivots = [anchor] + list(detector.pivots)
+    # Pivots must strictly alternate HIGH/LOW for build_candidate_waves to
+    # produce sane legs - if the detector's first real pivot is the SAME
+    # kind as the synthetic anchor (both "LOW", say), drop the anchor's
+    # duplicate rather than feed two same-kind points in a row.
+    if len(pivots) > 1 and pivots[1].kind == anchor.kind:
+        pivots = pivots[1:]
+
+    return build_candidate_waves(pivots, parent_wave.direction, parent_wave.degree,
+                                  parent_wave_id=parent_wave.wave_id, labels=_MICRO_LABELS)
 
 
 def score_fibonacci(waves: List[Wave]) -> float:

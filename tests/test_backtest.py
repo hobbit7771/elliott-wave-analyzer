@@ -29,6 +29,21 @@ def test_backtest_never_opens_trades_on_a_non_tradeable_timeframe():
     assert len(engine.pivot_detector.pivots) > 0
 
 
+def test_backtest_engine_builds_subwave_history_for_motive_waves():
+    """Spec follow-up: "waves and subwaves should be accounted for". Once
+    a motive (1/3/5) wave is archived into ScenarioEngine.wave_history,
+    BacktestEngine._update_subwaves should have subdivided it into its own
+    i-ii-iii-iv-v count over that wave's own candle range - the full
+    end-to-end wiring, not just the isolated build_subwaves() unit."""
+    candles = generate_synthetic_series(num_cycles=2)
+    engine = BacktestEngine(BacktestConfig(symbol="TESTUSDT", entry_confidence_threshold=50.0))
+    engine.run(candles)
+    assert len(engine.scenario_engine.wave_history) > 0  # sanity: the primary count did confirm waves
+    for (label, _start_ts), subwave in engine.subwave_history.items():
+        assert label == subwave.label
+        assert subwave.parent_wave_id is not None
+
+
 def test_backtester_rejects_unclosed_candles():
     engine = BacktestEngine(BacktestConfig(symbol="TESTUSDT"))
     bad = Candle(Timeframe.M5, 0, 299999, 100, 101, 99, 100, closed=False)
