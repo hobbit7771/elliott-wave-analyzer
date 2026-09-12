@@ -32,7 +32,7 @@ import logging
 import os
 import re
 import time
-from typing import Dict
+from typing import Dict, List, Optional
 
 import httpx
 from fastapi import Body, FastAPI, HTTPException, Query
@@ -43,7 +43,8 @@ from t3_engine.ai_advisor.advisor import AIAdvisorError, request_commentary
 from t3_engine.backtest.engine import BacktestConfig, BacktestEngine
 from t3_engine.backtest.metrics import compute_metrics, compute_metrics_by_wave
 from t3_engine.backtest.synthetic_data import generate_synthetic_series
-from t3_engine.common.types import TRADEABLE_TIMEFRAMES, Timeframe
+from t3_engine.common.models import Scenario
+from t3_engine.common.types import TRADEABLE_TIMEFRAMES, Timeframe, WaveLabel
 from t3_engine.dashboard.serialization import (
     candle_to_dict,
     pivot_to_dict,
@@ -52,6 +53,13 @@ from t3_engine.dashboard.serialization import (
     signal_to_dict,
     structure_event_to_dict,
     wave_to_dict,
+)
+from t3_engine.fibonacci.calculator import (
+    wave2_levels,
+    wave3_targets_from_wave2_end,
+    wave4_levels,
+    wave5_targets,
+    wave_c_targets,
 )
 from t3_engine.market_data.bybit_rest_client import BybitAPIError, BybitFuturesREST
 from t3_engine.market_data.fallback_symbols import FALLBACK_USDT_PERPETUAL_SYMBOLS
@@ -120,7 +128,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-007"
+BUILD_VERSION = "BUILD-CHECK-008"
 
 
 @app.get("/api/health")
@@ -229,6 +237,12 @@ def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETI
             wave_to_dict(w) for w in
             sorted(engine.scenario_engine.wave_history.values(), key=lambda w: w.start_timestamp)
         ],
+        # Fibonacci projection for whichever wave is expected next - see
+        # fibonacci_levels_for_scenario for why this is a persistent
+        # overlay now, not just an accepted-signal's TP/SL lines.
+        "fibonacci_levels": fibonacci_levels_for_scenario(
+            engine.scenario_engine.scenarios[0] if engine.scenario_engine.scenarios else None
+        ),
         "signals": [signal_to_dict(s) for s in result["signals"]],
         "closed_positions": [position_to_dict(p) for p in result["closed_positions"]],
         "open_positions": [position_to_dict(p) for p in result["open_positions"]],
@@ -329,6 +343,9 @@ def live_state(symbol: str = Query(...), timeframe: str = Query("5m")):
             wave_to_dict(w) for w in
             sorted(tf_engine.scenario_engine.wave_history.values(), key=lambda w: w.start_timestamp)
         ],
+        "fibonacci_levels": fibonacci_levels_for_scenario(
+            tf_engine.scenario_engine.scenarios[0] if tf_engine.scenario_engine.scenarios else None
+        ),
         "tradeable": tf in TRADEABLE_TIMEFRAMES,
         "signals": [signal_to_dict(s) for s in tf_engine.signals[-50:]],
         "open_positions": [position_to_dict(p) for p in tf_engine.position_manager.positions.values() if not p.closed],
@@ -359,6 +376,53 @@ def dataclass_metrics_to_dict(m) -> dict:
         "max_drawdown": m.max_drawdown, "average_r": m.average_r, "median_r": m.median_r,
         "mae_avg": m.mae_avg, "mfe_avg": m.mfe_avg,
     }
+
+
+def fibonacci_levels_for_scenario(scenario: Optional[Scenario]) -> List[Dict]:
+    """Fibonacci retracement/extension levels for whichever wave is
+    expected NEXT after the primary scenario's confirmed waves - the
+    projection a real analyst draws once a wave completes, to mark where
+    the next one is likely to go. Reuses the exact SAME functions
+    signal_engine/targets.py uses to build real TP/SL levels, so this is
+    never a separate, possibly-inconsistent "generic fib grid" - it's the
+    actual numbers the strategy itself would act on if a signal fires here.
+
+    Before this, the only Fibonacci-derived lines ever drawn on the chart
+    were a signal's accepted TP/SL levels (drawTradeLevels in index.html) -
+    with a strict confidence threshold and hard Elliott-rule gating,
+    accepted signals are rare, so for long stretches of a session NO
+    Fibonacci overlay appeared at all even though the scoring engine
+    (score_fibonacci in elliott_engine/scenario.py) was using it the whole
+    time internally. This exposes those same numbers as a persistent,
+    always-visible overlay instead of only on a trade."""
+    if scenario is None or not scenario.waves or scenario.next_expected_label is None:
+        return []
+    by_label = {w.label: w for w in scenario.waves}
+    next_label = scenario.next_expected_label
+
+    levels = None
+    if next_label == WaveLabel.W2 and WaveLabel.W1 in by_label:
+        w1 = by_label[WaveLabel.W1]
+        levels = wave2_levels(w1.start_price, w1.end_price)
+    elif next_label == WaveLabel.W3 and WaveLabel.W1 in by_label and WaveLabel.W2 in by_label:
+        w1, w2 = by_label[WaveLabel.W1], by_label[WaveLabel.W2]
+        levels = wave3_targets_from_wave2_end(w1.start_price, w1.end_price, w2.end_price)
+    elif next_label == WaveLabel.W4 and WaveLabel.W3 in by_label:
+        w3 = by_label[WaveLabel.W3]
+        levels = wave4_levels(w3.start_price, w3.end_price)
+    elif next_label == WaveLabel.W5 and WaveLabel.W1 in by_label and WaveLabel.W4 in by_label:
+        w1, w4 = by_label[WaveLabel.W1], by_label[WaveLabel.W4]
+        levels = wave5_targets(w1.start_price, w1.end_price, w4.end_price)
+    elif next_label == WaveLabel.C and WaveLabel.A in by_label and WaveLabel.B in by_label:
+        wa, wb = by_label[WaveLabel.A], by_label[WaveLabel.B]
+        levels = wave_c_targets(wa.start_price, wa.end_price, wb.end_price)
+    # A and B have no fib formula in this codebase (see fibonacci/calculator.py -
+    # only wave2/3/4/5/C are spec-defined ratios), so next_label in (A, B)
+    # correctly yields nothing rather than a made-up level.
+
+    if levels is None:
+        return []
+    return [{"ratio": lvl.ratio, "price": lvl.price, "for_wave": next_label.value} for lvl in levels]
 
 
 # Both routes below MUST NOT be cacheable by anything sitting between the

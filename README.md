@@ -17,7 +17,7 @@
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine, live
 market data from Bybit USDT perpetuals (see "Mobile app + live Bybit"
-below for why Binance was dropped). 157 automated tests, all passing,
+below for why Binance was dropped). 162 automated tests, all passing,
 cover every module described below.
 
 ## Read this first: what "done" means here
@@ -88,7 +88,7 @@ t3_engine/
   ai_advisor/         optional BYO-key GPT second-opinion commentary (never a decision-maker)
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                157 tests, one file per module above
+tests/                162 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Bybit in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -245,6 +245,36 @@ desktop web page:
   only be established by running the (now wider) strategy over real
   history you fetch yourself and reporting the actual number, whatever it
   is - see `run_backtest.py --source bybit`.
+- **Fibonacci overlay is now persistent, not just on an accepted trade**:
+  before this, the ONLY Fibonacci-derived lines the chart ever drew were
+  an accepted signal's TP/SL levels (`drawTradeLevels` in `index.html`) -
+  gated by a confidence threshold and hard Elliott rules, accepted signals
+  are rare, so for long stretches nothing Fibonacci-related appeared on
+  screen even though `score_fibonacci()` (`elliott_engine/scenario.py`)
+  was using it in every probability calculation the whole time. This read
+  as "Fibonacci isn't being used" - understandable, since visually it
+  wasn't shown, even though numerically it was. `fibonacci_levels_for_scenario`
+  (`dashboard/server.py`) now projects retracement/extension levels for
+  whichever wave the primary scenario expects NEXT, using the exact same
+  functions `signal_engine/targets.py` uses for real TP/SL - drawn as a
+  persistent dashed overlay regardless of whether any trade fires.
+- **On wave-counting "not matching the book"**: a screenshot comparison
+  against a manually-drawn TradingView count surfaced a real question,
+  not just a display bug. This engine intentionally does NOT count a
+  single continuous 1-2-3-4-5-A-B-C-1-2-3-4-5-... sequence the way a
+  textbook walkthrough does; `elliott_engine/scenario.py`'s own module
+  docstring explains why: real Elliott counting is inherently ambiguous
+  even to expert human analysts ("did the new trend start at swing A or
+  swing B?"), so `ScenarioEngine.rebuild()` generates candidate counts
+  from the last 3 same-kind pivots as independent Wave-1-start hypotheses
+  and keeps whichever scores highest - a genuine, if different, approach
+  from "restart the count from scratch immediately after every completed
+  ABC". This is a real architectural choice with a real tradeoff (it
+  can produce counts that look locally right but don't chain into one
+  tidy continuous narrative), not a bug curve-fitting could fix, and not
+  something changed in this round - see "On backtest profitability" above
+  for why a profit target is never the mechanism used to change how
+  counting behaves.
 - **Server-side logging now actually reaches Render's log viewer**: a
   batch of connection-visibility logging (WS connect/disconnect, first-
   trade-received) was added in an earlier round and shipped, then
@@ -320,7 +350,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (157 tests)
+# Run the automated test suite (162 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)

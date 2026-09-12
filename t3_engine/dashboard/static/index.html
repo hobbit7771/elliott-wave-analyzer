@@ -235,6 +235,24 @@ function drawTradeLevels(signals) {
   });
 }
 
+// Fibonacci retracement/extension levels for whichever wave the primary
+// scenario expects NEXT (backend: fibonacci_levels_for_scenario) - drawn
+// as a persistent overlay regardless of whether any signal was ever
+// accepted. Before this, the ONLY fib-derived lines on the chart were an
+// accepted signal's TP/SL (drawTradeLevels above) - with a confidence
+// threshold and hard Elliott-rule gating, accepted signals are rare, so
+// for long stretches Fibonacci looked entirely absent even though the
+// scoring engine was using it the whole time internally.
+function drawFibonacciLevels(levels) {
+  (levels || []).forEach(lvl => {
+    const line = candleSeries.createPriceLine({
+      price: lvl.price, color: '#c084fc', lineWidth: 1, lineStyle: 3,
+      title: `Fib ${lvl.ratio.toFixed(3)} (W${lvl.for_wave})`,
+    });
+    overlayLines.push({ removeSeries: () => candleSeries.removePriceLine(line) });
+  });
+}
+
 // Structure events (BOS/CHoCH) accumulate for the entire history/session
 // with no cap from the backend - drawing all of them as text markers on a
 // long series stacks dozens of labels on top of each other into unreadable
@@ -438,6 +456,7 @@ function applyChartData(data) {
   const primary = data.scenarios && data.scenarios[0];
   if (primary) drawWaves(primary.waves);
   drawTradeLevels(data.signals);
+  drawFibonacciLevels(data.fibonacci_levels);
   markers(data.structure_events || [], primary ? [primary] : [], data.wave_history || []);
   if (shouldFitOnNextData) {
     chart.timeScale().fitContent();
