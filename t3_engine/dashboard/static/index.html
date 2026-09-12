@@ -259,8 +259,13 @@ function renderDebugPanel(data) {
   noteEl.classList.remove('error');
   if (data.waiting_for_first_candle) {
     noteEl.style.display = 'block';
+    const trades = data.trades_received || 0;
+    const tradesMsg = trades > 0
+      ? `${trades} trade(s) received so far - market data IS flowing.`
+      : 'No trades received yet - if this stays at 0 for more than a few seconds, the WebSocket '
+        + 'connection likely failed (check that the symbol is correct and actively trading).';
     noteEl.textContent = 'Connected - no candle has closed yet for this timeframe. This is normal: '
-      + 'a 5m/15m bar only appears once a full interval has actually elapsed after Start.';
+      + 'a 5m/15m bar only appears once a full interval has actually elapsed after Start. ' + tradesMsg;
   } else if (data.note) {
     noteEl.style.display = 'block';
     noteEl.textContent = data.note;

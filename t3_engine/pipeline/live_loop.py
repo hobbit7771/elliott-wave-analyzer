@@ -35,6 +35,7 @@ live socket connection.
 
 from __future__ import annotations
 
+import logging
 from typing import AsyncIterator, Dict, List
 
 from t3_engine.backtest.engine import BacktestConfig, BacktestEngine
@@ -43,6 +44,8 @@ from t3_engine.common.models import Candle
 from t3_engine.common.types import TRADEABLE_TIMEFRAMES, Timeframe
 from t3_engine.logger.decision_logger import DecisionLogger
 from t3_engine.market_data.ws_client import BinanceFuturesWebSocketClient
+
+logger = logging.getLogger(__name__)
 
 
 class LiveTradingEngine:
@@ -62,8 +65,19 @@ class LiveTradingEngine:
         self.candle_builder = MultiTimeframeCandleBuilder(
             list(trading_timeframes), on_closed_candle=self._on_candle_closed
         )
+        # Visibility into whether real market data is actually arriving:
+        # a 5m/15m candle takes 5/15 real minutes to close, so without this
+        # counter there is no way to tell "connected but silent" apart from
+        # "connected and receiving trades" until the first candle closes.
+        self.trades_received: int = 0
 
     def on_trade(self, trade: Trade) -> None:
+        self.trades_received += 1
+        if self.trades_received == 1:
+            logger.info("[live %s] first trade received - market data is flowing (price=%s)",
+                        self.symbol, trade.price)
+        elif self.trades_received % 500 == 0:
+            logger.info("[live %s] %d trades received so far", self.symbol, self.trades_received)
         self.candle_builder.on_trade(trade)
 
     def flush(self, now_ms: int) -> None:
@@ -109,6 +123,7 @@ class LiveTradingEngine:
                 is_buyer_maker=bool(data["m"]),
             ))
 
+        logger.info("[live %s] connecting to Binance public WebSocket...", self.symbol)
         ws_client = BinanceFuturesWebSocketClient(
             symbols=[self.symbol], streams=["aggTrade", "bookTicker", "markPrice"], on_message=on_message,
         )

@@ -316,6 +316,11 @@ def live_status():
             "started_at": _live_started_at.get(symbol),
             "error": _live_errors.get(symbol),
             "candles_by_timeframe": {tf.value: len(hist) for tf, hist in engine.history.items()},
+            # Proves real market data is arriving over the WS connection
+            # well before the first 5m/15m candle actually closes - without
+            # this there's no way to tell "connected but silent" apart from
+            # "connected and receiving trades" for several real minutes.
+            "trades_received": engine.trades_received,
         }
         for symbol, engine in _live_engines.items()
     }
@@ -348,6 +353,7 @@ def live_state(symbol: str = Query(...), timeframe: str = Query("5m")):
         "timeframe": tf.value,
         "candles": [candle_to_dict(c) for c in candles],
         "waiting_for_first_candle": len(candles) == 0,
+        "trades_received": engine.trades_received,
         "scenarios": [scenario_to_dict(s) for s in tf_engine.scenario_engine.scenarios],
         "structure_events": [structure_event_to_dict(e) for e in tf_engine.structure.events],
         "signals": [signal_to_dict(s) for s in tf_engine.signals[-50:]],

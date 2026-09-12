@@ -171,12 +171,16 @@ def test_live_state_includes_forming_candle_before_first_close():
 
             from t3_engine.candle_builder.aggregator import Trade
             engine = server_module._live_engines["FORMINGUSDT"]
-            engine.candle_builder.on_trade(Trade(timestamp=0, price=100.0, quantity=1.0, is_buyer_maker=False))
+            engine.on_trade(Trade(timestamp=0, price=100.0, quantity=1.0, is_buyer_maker=False))
 
             state = c.get("/api/live/state", params={"symbol": "formingusdt", "timeframe": "5m"}).json()
             assert len(state["candles"]) == 1
             assert state["candles"][0]["close"] == 100.0
             assert state["waiting_for_first_candle"] is False
+            assert state["trades_received"] == 1
+
+            status = c.get("/api/live/status").json()
+            assert status["FORMINGUSDT"]["trades_received"] == 1
 
             c.post("/api/live/stop", json={"symbol": "formingusdt"})
 
