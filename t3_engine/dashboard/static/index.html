@@ -143,36 +143,38 @@
     </div>
     <div id="tab-ai" style="display:none;">
       <div class="note">
-        Bring your own Gemini API key (free at <code>aistudio.google.com/apikey</code>). It is sent to your own
-        backend for one request at a time, forwarded to Google, and never stored server-side — see
-        <code>ai_advisor/advisor.py</code>. Gemini can give a second opinion and propose a wave count;
+        Bring your own OpenRouter API key (<code>openrouter.ai/keys</code>). It is sent to your own
+        backend for one request at a time, forwarded to OpenRouter, and never stored server-side — see
+        <code>ai_advisor/advisor.py</code>. The model can give a second opinion and propose a wave count;
         it can never override the rule-based engine's accept/reject decision.
       </div>
-      <h2>Gemini API key</h2>
+      <h2>OpenRouter API key</h2>
       <div class="field-row">
-        <input id="geminiKey" type="password" placeholder="AIza..." />
+        <input id="aiKey" type="password" placeholder="sk-or-v1-..." />
         <button class="panel-btn" id="saveKey">Save</button>
       </div>
       <div class="hint">Saved only in this browser (localStorage), never sent anywhere except your own backend.</div>
 
       <h2>Model</h2>
       <div class="field-row">
-        <input id="geminiModel" type="text" placeholder="gemini-3.6-flash" />
+        <input id="aiModel" type="text" placeholder="deepseek/deepseek-v4-flash-free" />
       </div>
       <div class="hint">
-        Editable because Google retires model names for new keys while old keys keep working — if a call
-        comes back <code>404 NOT_FOUND</code>, its message names the current model; paste that here.
-        Saved with the key, no redeploy needed.
+        A router id, <code>vendor/model</code>, optionally with a variant suffix like <code>:free</code>.
+        Editable because OpenRouter's catalogue changes constantly — if a call comes back
+        <code>404</code>, the id no longer resolves; find the current one at <code>openrouter.ai/models</code>
+        and paste it here. Saved with the key, no redeploy needed. The AI Analyst needs a model that
+        supports <em>tool calling</em>; one that doesn't will answer in prose and submit nothing.
       </div>
 
-      <h2>Ask Gemini about the current setup</h2>
+      <h2>Ask the model about the current setup</h2>
       <button class="panel-btn" id="askAi">Ask for a second opinion</button>
       <div class="hint" id="aiStatus"></div>
       <div class="signal" id="ai-answer" style="margin-top:10px; display:none;"></div>
 
       <h2>AI wave labelling</h2>
       <div class="note">
-        Gemini proposes a count across the whole loaded history — the one thing the deterministic engine
+        The model proposes a count across the whole loaded history — the one thing the deterministic engine
         deliberately won't do, since it only anchors on recent pivots. The model only ever names
         <em>pivot indices</em>; the server recomputes those pivots itself and re-checks existence, order,
         contiguity, alternation, causality and the hard Elliott rules before anything is drawn. A
@@ -896,9 +898,9 @@ function renderAnalystStructures(data) {
 }
 
 document.getElementById('runAnalyst').addEventListener('click', async () => {
-  const apiKey = geminiKey();
+  const apiKey = aiKey();
   const statusEl = document.getElementById('analystStatus');
-  if (!apiKey) { statusEl.textContent = 'Enter and save your Gemini API key in the AI Advisor tab first.'; return; }
+  if (!apiKey) { statusEl.textContent = 'Enter and save your OpenRouter API key in the AI Advisor tab first.'; return; }
   const source = document.getElementById('source').value;
   if (source === 'live') {
     statusEl.textContent = 'Switch to Synthetic or Bybit (history) — the analyst works a loaded history, not a live stream.';
@@ -913,7 +915,7 @@ document.getElementById('runAnalyst').addEventListener('click', async () => {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         api_key: apiKey,
-        model: geminiModel(),
+        model: aiModel(),
         source,
         symbol: normalizeSymbol(document.getElementById('symbol').value),
         timeframe: document.getElementById('timeframe').value,
@@ -947,36 +949,39 @@ document.getElementById('runAnalyst').addEventListener('click', async () => {
   }
 });
 
-// ---- AI advisor + labelling (BYO Gemini key) ----
-const KEY_STORAGE = 't3_gemini_key';
-const MODEL_STORAGE = 't3_gemini_model';
-const DEFAULT_GEMINI_MODEL = 'gemini-3.6-flash';
+// ---- AI advisor + labelling (BYO OpenRouter key) ----
+// Storage keys are provider-scoped: an old Gemini key left in localStorage
+// would be silently sent to OpenRouter and rejected as invalid, which reads
+// as "the app is broken" rather than "that key is for the wrong service".
+const KEY_STORAGE = 't3_openrouter_key';
+const MODEL_STORAGE = 't3_openrouter_model';
+const DEFAULT_AI_MODEL = 'deepseek/deepseek-v4-flash-free';
 
-function geminiKey() {
-  return localStorage.getItem(KEY_STORAGE) || document.getElementById('geminiKey').value.trim();
+function aiKey() {
+  return localStorage.getItem(KEY_STORAGE) || document.getElementById('aiKey').value.trim();
 }
 // The model name travels with every request rather than being baked into
-// the server: Google retires names for NEW keys while existing ones keep
-// working, so the correct model is a property of whose key it is, not of
-// this deployment.
-function geminiModel() {
-  return document.getElementById('geminiModel').value.trim()
+// the server: a router carries hundreds of models whose ids, prices and
+// free tiers change week to week, so the correct model is a property of
+// whose key it is, not of this deployment.
+function aiModel() {
+  return document.getElementById('aiModel').value.trim()
     || localStorage.getItem(MODEL_STORAGE)
-    || DEFAULT_GEMINI_MODEL;
+    || DEFAULT_AI_MODEL;
 }
-document.getElementById('geminiKey').value = localStorage.getItem(KEY_STORAGE) || '';
-document.getElementById('geminiModel').value = localStorage.getItem(MODEL_STORAGE) || DEFAULT_GEMINI_MODEL;
+document.getElementById('aiKey').value = localStorage.getItem(KEY_STORAGE) || '';
+document.getElementById('aiModel').value = localStorage.getItem(MODEL_STORAGE) || DEFAULT_AI_MODEL;
 document.getElementById('saveKey').addEventListener('click', () => {
-  localStorage.setItem(KEY_STORAGE, document.getElementById('geminiKey').value.trim());
-  localStorage.setItem(MODEL_STORAGE, geminiModel());
+  localStorage.setItem(KEY_STORAGE, document.getElementById('aiKey').value.trim());
+  localStorage.setItem(MODEL_STORAGE, aiModel());
   document.getElementById('aiStatus').textContent = 'Key and model saved in this browser.';
 });
 
 document.getElementById('askAi').addEventListener('click', async () => {
-  const apiKey = geminiKey();
+  const apiKey = aiKey();
   const statusEl = document.getElementById('aiStatus');
   const answerEl = document.getElementById('ai-answer');
-  if (!apiKey) { statusEl.textContent = 'Enter and save your Gemini API key first.'; return; }
+  if (!apiKey) { statusEl.textContent = 'Enter and save your OpenRouter API key first.'; return; }
   if (!lastData) { statusEl.textContent = 'Run an analysis first.'; return; }
 
   const primary = lastData.scenarios[0];
@@ -994,20 +999,22 @@ document.getElementById('askAi').addEventListener('click', async () => {
     } : null,
   };
 
-  statusEl.textContent = 'Asking Gemini…';
+  statusEl.textContent = 'Asking the model…';
   answerEl.style.display = 'none';
   try {
-    const resp = await fetch('/api/ai/advice', {
+    // Timed out rather than bare fetch: free router models queue, and a
+    // request that hangs forever looks identical to one that failed.
+    const resp = await fetchWithTimeout('/api/ai/advice', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ api_key: apiKey, context, model: geminiModel() }),
-    });
+      body: JSON.stringify({ api_key: apiKey, context, model: aiModel() }),
+    }, 90000);
     const data = await resp.json();
     if (!resp.ok) { statusEl.textContent = data.detail || 'Request failed.'; return; }
     statusEl.textContent = '';
     answerEl.style.display = '';
     answerEl.textContent = data.commentary;
   } catch (e) {
-    statusEl.textContent = 'Network error asking Gemini.';
+    statusEl.textContent = 'Network error asking the model.';
   }
 });
 
@@ -1015,10 +1022,10 @@ document.getElementById('askAi').addEventListener('click', async () => {
 // asks, renders whatever survived validation, and says plainly when a
 // proposal was thrown out (and why). A rejected count draws nothing.
 document.getElementById('askAiLabel').addEventListener('click', async () => {
-  const apiKey = geminiKey();
+  const apiKey = aiKey();
   const statusEl = document.getElementById('aiLabelStatus');
   const answerEl = document.getElementById('ai-label-answer');
-  if (!apiKey) { statusEl.textContent = 'Enter and save your Gemini API key first.'; return; }
+  if (!apiKey) { statusEl.textContent = 'Enter and save your OpenRouter API key first.'; return; }
 
   const source = document.getElementById('source').value;
   if (source === 'live') {
@@ -1026,14 +1033,14 @@ document.getElementById('askAiLabel').addEventListener('click', async () => {
     return;
   }
 
-  statusEl.textContent = 'Asking Gemini for a count over the whole history…';
+  statusEl.textContent = 'Asking the model for a count over the whole history…';
   answerEl.style.display = 'none';
   try {
     const resp = await fetchWithTimeout('/api/ai/label', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         api_key: apiKey,
-        model: geminiModel(),
+        model: aiModel(),
         source,
         symbol: normalizeSymbol(document.getElementById('symbol').value),
         timeframe: document.getElementById('timeframe').value,
@@ -1065,7 +1072,7 @@ document.getElementById('askAiLabel').addEventListener('click', async () => {
       if (lastData) applyChartData(lastData);
     }
   } catch (e) {
-    statusEl.textContent = e.message || 'Network error asking Gemini.';
+    statusEl.textContent = e.message || 'Network error asking the model.';
   }
 });
 

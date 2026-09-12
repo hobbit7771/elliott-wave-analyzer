@@ -1,9 +1,8 @@
-"""Gemini (Google AI Studio) client tests.
+"""OpenRouter client tests.
 
 Every one runs against a mocked transport - this sandbox has no outbound
-access to generativelanguage.googleapis.com, and more importantly the
-whole point of the design is that nothing downstream depends on a live
-model call succeeding."""
+access to openrouter.ai, and more importantly the whole point of the design
+is that nothing downstream depends on a live model call succeeding."""
 
 import json
 
@@ -21,122 +20,138 @@ def make_client(handler):
     return httpx.Client(transport=httpx.MockTransport(handler))
 
 
-def gemini_text_response(text: str) -> httpx.Response:
-    return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": text}]}}]})
+def chat_response(text: str, finish_reason: str = "stop") -> httpx.Response:
+    return httpx.Response(200, json={
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
+                     "finish_reason": finish_reason}],
+    })
 
 
-def test_request_commentary_parses_gemini_response():
+def test_request_commentary_parses_a_chat_completion():
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.headers["x-goog-api-key"] == "AIza-test"
-        assert "generativelanguage.googleapis.com" in str(request.url)
-        assert ":generateContent" in str(request.url)
-        return gemini_text_response("This wave 3 count looks reasonable but watch for extension.")
+        assert request.headers["authorization"] == "Bearer sk-or-test"
+        assert "openrouter.ai/api/v1/chat/completions" in str(request.url)
+        return chat_response("This wave 3 count looks reasonable but watch for extension.")
 
-    result = request_commentary("AIza-test", {"wave": "3", "confidence": 82}, client=make_client(handler))
+    result = request_commentary("sk-or-test", {"wave": "3", "confidence": 82}, client=make_client(handler))
     assert "wave 3" in result.text.lower()
 
 
-def test_commentary_sends_the_instruction_as_system_not_as_a_user_turn():
-    """Pivot data and engine state are DATA. Keeping the instruction in
-    systemInstruction is what stops a number in the payload from reading
+def test_commentary_sends_the_instruction_as_a_system_message_not_a_user_turn():
+    """Pivot data and engine state are DATA. Keeping the instruction in its
+    own system message is what stops a number in the payload from reading
     as a new instruction to the model."""
     seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.update(json.loads(request.content))
-        return gemini_text_response("ok")
+        return chat_response("ok")
 
-    request_commentary("AIza-test", {"wave": "3"}, client=make_client(handler))
-    assert "systemInstruction" in seen
-    assert seen["contents"][0]["role"] == "user"
+    request_commentary("sk-or-test", {"wave": "3"}, client=make_client(handler))
+    assert seen["messages"][0]["role"] == "system"
+    assert seen["messages"][1]["role"] == "user"
+    assert "3" in seen["messages"][1]["content"]
 
 
 def test_request_commentary_raises_without_key():
-    with pytest.raises(AIAdvisorError, match="No Gemini API key"):
+    with pytest.raises(AIAdvisorError, match="No OpenRouter API key"):
         request_commentary("", {"wave": "3"})
 
 
 def test_request_commentary_raises_on_api_error():
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(400, text="API key not valid")
+        return httpx.Response(400, text="invalid request")
 
-    with pytest.raises(AIAdvisorError, match="Gemini API error 400"):
-        request_commentary("AIza-bad", {"wave": "3"}, client=make_client(handler))
+    with pytest.raises(AIAdvisorError, match="OpenRouter API error 400"):
+        request_commentary("sk-or-bad", {"wave": "3"}, client=make_client(handler))
 
 
-def test_a_retired_model_404_is_passed_through_verbatim_with_a_usable_hint():
-    """This happened in production: gemini-2.5-flash was retired for NEW
-    keys while existing ones kept working, so the call 404'd with Google
-    naming the replacement. The user needs BOTH halves - Google's message
-    (which names the model) and where to put it - so neither may be
+def test_a_missing_model_404_is_passed_through_verbatim_with_a_usable_hint():
+    """A router's catalogue churns constantly - free tiers get renamed and
+    retired far more often than keys get revoked. The user needs BOTH
+    halves: the API's message and where to act on it, so neither may be
     swallowed into a generic "AI unavailable"."""
-    google_message = ('{"error": {"code": 404, "message": "models/gemini-2.5-flash is no longer available '
-                      'for new users. Please update your code to use models/gemini-3.6-flash", '
-                      '"status": "NOT_FOUND"}}')
+    router_message = '{"error": {"code": 404, "message": "No endpoints found for deepseek/made-up-model."}}'
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(404, text=google_message)
+        return httpx.Response(404, text=router_message)
 
     with pytest.raises(AIAdvisorError) as excinfo:
-        request_commentary("AIza-test", {"wave": "3"}, model="gemini-2.5-flash",
+        request_commentary("sk-or-test", {"wave": "3"}, model="deepseek/made-up-model",
                            client=make_client(handler))
     message = str(excinfo.value)
-    assert "gemini-3.6-flash" in message          # Google's own replacement name survives
-    assert "NOT_FOUND" in message
+    assert "No endpoints found" in message        # the router's own words survive
+    assert "deepseek/made-up-model" in message
     assert "Model field" in message               # and where to act on it
 
 
-def test_auth_and_rate_limit_errors_point_at_the_right_cause():
-    def unauthorized(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(403, text="permission denied")
+def test_auth_credit_and_rate_limit_errors_point_at_the_right_cause():
+    """Three different failures that all look like "the AI is broken" from
+    the outside, and have three completely different fixes."""
+    cases = [
+        (403, "permission denied", "Check the API key itself"),
+        (402, "insufficient credits", "Out of credits"),
+        (429, "rate limited", "Rate limited"),
+    ]
+    for status, body, expected in cases:
+        def handler(request: httpx.Request, _status=status, _body=body) -> httpx.Response:
+            return httpx.Response(_status, text=_body)
 
-    with pytest.raises(AIAdvisorError, match="Check the API key itself"):
-        request_commentary("AIza-test", {"wave": "3"}, client=make_client(unauthorized))
-
-    def throttled(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(429, text="quota exceeded")
-
-    with pytest.raises(AIAdvisorError, match="Rate limited"):
-        request_commentary("AIza-test", {"wave": "3"}, client=make_client(throttled))
+        with pytest.raises(AIAdvisorError, match=expected):
+            request_commentary("sk-or-test", {"wave": "3"}, client=make_client(handler))
 
 
-def test_the_model_name_actually_reaches_the_url():
-    """The Model field is only useful if it's what gets called."""
+def test_the_model_id_actually_reaches_the_request_body():
+    """The Model field is only useful if it's what gets called. On a router
+    the model is a body field, not part of the URL."""
     seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        seen["url"] = str(request.url)
-        return gemini_text_response("ok")
+        seen.update(json.loads(request.content))
+        return chat_response("ok")
 
-    request_commentary("AIza-test", {"wave": "3"}, model="gemini-3.6-flash",
+    request_commentary("sk-or-test", {"wave": "3"}, model="deepseek/deepseek-v4-flash-free",
                        client=make_client(handler))
-    assert "models/gemini-3.6-flash:generateContent" in seen["url"]
+    assert seen["model"] == "deepseek/deepseek-v4-flash-free"
 
 
-def test_blocked_prompt_surfaces_as_an_error_not_an_empty_answer():
-    """A blank second opinion reads as "no concerns", which is the
-    opposite of "the call did not work"."""
+def test_an_error_body_returned_with_http_200_is_still_an_error():
+    """A router can answer 200 while the upstream vendor refused. Treating
+    that as a normal empty answer is how "the AI had no concerns" gets
+    printed when the call in fact failed."""
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"promptFeedback": {"blockReason": "SAFETY"}})
+        return httpx.Response(200, json={"error": {"message": "upstream provider returned no completion"}})
 
-    with pytest.raises(AIAdvisorError, match="blockReason: SAFETY"):
-        request_commentary("AIza-test", {"wave": "3"}, client=make_client(handler))
+    with pytest.raises(AIAdvisorError, match="upstream provider"):
+        request_commentary("sk-or-test", {"wave": "3"}, client=make_client(handler))
 
 
-def test_empty_candidate_text_is_an_error():
+def test_a_truncated_answer_is_reported_as_a_token_budget_problem():
+    """Reasoning models spend output tokens before the visible answer, so a
+    cut-off answer must not surface as a formatting error - that sends you
+    debugging the wrong thing."""
     def handler(request: httpx.Request) -> httpx.Response:
-        return gemini_text_response("   ")
+        return chat_response("The engine rightly rejected this trade due to drawdown limits, but the",
+                             finish_reason="length")
+
+    with pytest.raises(AIAdvisorError, match="ran out of output tokens"):
+        request_commentary("sk-or-test", {"wave": "3"}, client=make_client(handler))
+
+
+def test_empty_answer_text_is_an_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return chat_response("   ")
 
     with pytest.raises(AIAdvisorError, match="empty answer"):
-        request_commentary("AIza-test", {"wave": "3"}, client=make_client(handler))
+        request_commentary("sk-or-test", {"wave": "3"}, client=make_client(handler))
 
 
 def test_network_failure_is_reported_clearly():
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("no route to host", request=request)
 
-    with pytest.raises(AIAdvisorError, match="Could not reach the Gemini API"):
-        request_commentary("AIza-test", {"wave": "3"}, client=make_client(handler))
+    with pytest.raises(AIAdvisorError, match="Could not reach the OpenRouter API"):
+        request_commentary("sk-or-test", {"wave": "3"}, client=make_client(handler))
 
 
 # ---- wave-count proposals ----
@@ -151,14 +166,14 @@ def test_request_wave_count_parses_structured_json():
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         # A count is an analysis, not a creative task.
-        assert body["generationConfig"]["temperature"] <= 0.2
-        assert body["generationConfig"]["responseMimeType"] == "application/json"
-        return gemini_text_response(json.dumps({
+        assert body["temperature"] <= 0.2
+        assert body["response_format"] == {"type": "json_object"}
+        return chat_response(json.dumps({
             "waves": [{"label": "1", "start_pivot_index": 0, "end_pivot_index": 1}],
             "reasoning": "Clean impulse off the low.",
         }))
 
-    proposal = request_wave_count("AIza-test", SAMPLE_PIVOTS, "UP", client=make_client(handler))
+    proposal = request_wave_count("sk-or-test", SAMPLE_PIVOTS, "UP", client=make_client(handler))
     assert proposal.waves == [{"label": "1", "start_pivot_index": 0, "end_pivot_index": 1}]
     assert "impulse" in proposal.reasoning
 
@@ -169,23 +184,23 @@ def test_request_wave_count_tolerates_markdown_fenced_json():
     fenced = '```json\n{"waves": [{"label": "1", "start_pivot_index": 0, "end_pivot_index": 1}]}\n```'
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return gemini_text_response(fenced)
+        return chat_response(fenced)
 
-    proposal = request_wave_count("AIza-test", SAMPLE_PIVOTS, "UP", client=make_client(handler))
+    proposal = request_wave_count("sk-or-test", SAMPLE_PIVOTS, "UP", client=make_client(handler))
     assert proposal.waves[0]["label"] == "1"
 
 
 def test_request_wave_count_rejects_non_json_prose():
     def handler(request: httpx.Request) -> httpx.Response:
-        return gemini_text_response("I think this is a wave 3, roughly speaking.")
+        return chat_response("I think this is a wave 3, roughly speaking.")
 
     with pytest.raises(AIAdvisorError, match="did not return valid JSON"):
-        request_wave_count("AIza-test", SAMPLE_PIVOTS, "UP", client=make_client(handler))
+        request_wave_count("sk-or-test", SAMPLE_PIVOTS, "UP", client=make_client(handler))
 
 
 def test_request_wave_count_rejects_json_without_a_waves_key():
     def handler(request: httpx.Request) -> httpx.Response:
-        return gemini_text_response(json.dumps({"analysis": "looks bullish"}))
+        return chat_response(json.dumps({"analysis": "looks bullish"}))
 
     with pytest.raises(AIAdvisorError, match="no 'waves' key"):
-        request_wave_count("AIza-test", SAMPLE_PIVOTS, "UP", client=make_client(handler))
+        request_wave_count("sk-or-test", SAMPLE_PIVOTS, "UP", client=make_client(handler))

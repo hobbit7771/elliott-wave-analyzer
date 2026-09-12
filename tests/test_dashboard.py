@@ -201,15 +201,27 @@ def test_index_reloads_when_a_new_service_worker_takes_control():
     assert "controllerchange" in resp.text
 
 
-def test_index_ai_tab_is_wired_to_gemini_not_openai():
+def test_index_ai_tab_is_wired_to_the_current_provider():
     """The provider swap has to reach the UI too - a page still asking for
-    an sk-... key while the backend talks to Google is a broken feature
-    that looks like a working one."""
+    a Google key while the backend talks to OpenRouter is a broken feature
+    that looks like a working one. This is the third provider this app has
+    been pointed at, so the check is kept sharp: the old names must be
+    GONE, not merely joined by the new one."""
     resp = client.get("/")
-    assert "geminiKey" in resp.text
-    assert "aistudio.google.com" in resp.text
+    assert "aiKey" in resp.text
+    assert "openrouter.ai" in resp.text
+    assert "geminiKey" not in resp.text
+    assert "aistudio.google.com" not in resp.text
     assert "openaiKey" not in resp.text
-    assert "sk-..." not in resp.text
+
+
+def test_a_key_saved_for_an_old_provider_is_not_reused_for_the_new_one():
+    """localStorage survives the provider swap. Sending a leftover Google
+    key to OpenRouter would fail as "invalid key", which reads as "the app
+    is broken" rather than "that key is for the wrong service"."""
+    resp = client.get("/")
+    assert "t3_openrouter_key" in resp.text
+    assert "t3_gemini_key" not in resp.text
 
 
 def test_index_exposes_the_ai_labelling_mode():
@@ -219,13 +231,12 @@ def test_index_exposes_the_ai_labelling_mode():
 
 
 def test_index_lets_the_model_name_be_edited_without_a_redeploy():
-    """Google retires model names for NEW keys while existing ones keep
-    working - gemini-2.5-flash 404'd in production this way. The correct
-    model is a property of whose key it is, not of this deployment, so it
-    has to be editable in the browser."""
+    """A router carries hundreds of models whose ids, prices and free tiers
+    change week to week. The correct model is a property of whose key it
+    is, not of this deployment, so it has to be editable in the browser."""
     resp = client.get("/")
-    assert "geminiModel" in resp.text
-    assert server_module.DEFAULT_GEMINI_MODEL in resp.text
+    assert "aiModel" in resp.text
+    assert server_module.DEFAULT_AI_MODEL in resp.text
 
 
 def test_index_uses_custom_symbol_dropdown_not_native_datalist():
@@ -423,14 +434,14 @@ def test_ai_advice_requires_key():
     assert resp.status_code == 502
 
 
-def test_ai_advice_success_with_mocked_gemini():
+def test_ai_advice_success_with_a_mocked_model():
     class FakeResponse:
         text = "Looks like a reasonable wave 3 setup, watch for extension risk."
-        model = "gemini-3.6-flash"
+        model = "deepseek/deepseek-v4-flash-free"
         raw = {}
 
     with patch.object(server_module, "request_commentary", return_value=FakeResponse()):
-        resp = client.post("/api/ai/advice", json={"api_key": "AIza-test", "context": {"wave": "3"}})
+        resp = client.post("/api/ai/advice", json={"api_key": "sk-or-test", "context": {"wave": "3"}})
         assert resp.status_code == 200
         assert "wave 3" in resp.json()["commentary"].lower()
 
@@ -445,7 +456,7 @@ class _FakeProposal:
     def __init__(self, waves, reasoning="because"):
         self.waves = waves
         self.reasoning = reasoning
-        self.model = "gemini-3.6-flash"
+        self.model = "deepseek/deepseek-v4-flash-free"
         self.raw = {}
 
 
@@ -460,7 +471,7 @@ def test_ai_label_rejects_a_hallucinated_pivot_index_instead_of_drawing_it():
     nonsense = [{"label": "1", "start_pivot_index": 0, "end_pivot_index": 99999}]
 
     with patch.object(server_module, "request_wave_count", return_value=_FakeProposal(nonsense)):
-        resp = client.post("/api/ai/label", json={"api_key": "AIza-test", "source": "synthetic", "cycles": 2})
+        resp = client.post("/api/ai/label", json={"api_key": "sk-or-test", "source": "synthetic", "cycles": 2})
     assert resp.status_code == 200
     data = resp.json()
     assert data["valid"] is False
@@ -487,7 +498,7 @@ def test_ai_label_rejects_a_count_that_breaks_a_hard_elliott_rule():
         ])
 
     with patch.object(server_module, "request_wave_count", side_effect=label_five_consecutive):
-        resp = client.post("/api/ai/label", json={"api_key": "AIza-test", "source": "synthetic", "cycles": 2})
+        resp = client.post("/api/ai/label", json={"api_key": "sk-or-test", "source": "synthetic", "cycles": 2})
     assert resp.status_code == 200
     data = resp.json()
     assert data["valid"] is False
@@ -510,7 +521,7 @@ def test_ai_label_accepts_and_returns_server_built_waves_for_a_legal_count():
         return _FakeProposal([{"label": "1", "start_pivot_index": start, "end_pivot_index": start + 1}])
 
     with patch.object(server_module, "request_wave_count", side_effect=label_from_real_pivots):
-        resp = client.post("/api/ai/label", json={"api_key": "AIza-test", "source": "synthetic", "cycles": 2})
+        resp = client.post("/api/ai/label", json={"api_key": "sk-or-test", "source": "synthetic", "cycles": 2})
     assert resp.status_code == 200
     data = resp.json()
     assert data["rejected"] is False
@@ -534,7 +545,7 @@ def test_ai_label_never_takes_pivots_from_the_caller():
 
     with patch.object(server_module, "request_wave_count", side_effect=echo_pivot_count):
         resp = client.post("/api/ai/label", json={
-            "api_key": "AIza-test", "source": "synthetic", "cycles": 2,
+            "api_key": "sk-or-test", "source": "synthetic", "cycles": 2,
             "pivots": [{"index": 0, "price": 1.0, "kind": "LOW"}],  # attacker-supplied, must be ignored
         })
     assert resp.status_code == 200
@@ -568,7 +579,7 @@ class _FakeAnalystResult:
         self.summary = "Five waves up look complete."
         self.reasoning = "Wave 3 is the longest."
         self.steps = []
-        self.model = "gemini-3.6-flash"
+        self.model = "deepseek/deepseek-v4-flash-free"
         self.steps_used = 3
         self.finished = True
         self.note = note
@@ -591,7 +602,7 @@ def test_analyst_returns_the_exact_candles_it_analysed():
 
     with patch.object(server_module, "run_analyst", side_effect=fake_run):
         resp = client.post("/api/ai/analyst",
-                           json={"api_key": "AIza-test", "source": "synthetic", "cycles": 2})
+                           json={"api_key": "sk-or-test", "source": "synthetic", "cycles": 2})
     assert resp.status_code == 200
     data = resp.json()
     assert len(data["candles"]) == len(seen["candles"])
@@ -607,7 +618,7 @@ def test_analyst_reports_rejected_structures_rather_than_hiding_them():
     with patch.object(server_module, "run_analyst",
                       return_value=_FakeAnalystResult([], rejected=rejected)):
         resp = client.post("/api/ai/analyst",
-                           json={"api_key": "AIza-test", "source": "synthetic", "cycles": 2})
+                           json={"api_key": "sk-or-test", "source": "synthetic", "cycles": 2})
     data = resp.json()
     assert data["accepted"] == []
     assert data["rejected"][0]["broken_rule"] == "WAVE4_OVERLAPS_WAVE1"
@@ -623,16 +634,16 @@ def test_analyst_passes_the_model_name_and_step_budget_through():
 
     with patch.object(server_module, "run_analyst", side_effect=fake_run):
         client.post("/api/ai/analyst", json={
-            "api_key": "AIza-test", "source": "synthetic", "cycles": 2,
-            "model": "gemini-4.0-pro-experimental", "max_steps": 7,
+            "api_key": "sk-or-test", "source": "synthetic", "cycles": 2,
+            "model": "anthropic/some-other-model", "max_steps": 7,
         })
-    assert seen["model"] == "gemini-4.0-pro-experimental"
+    assert seen["model"] == "anthropic/some-other-model"
     assert seen["max_steps"] == 7
 
 
 def test_analyst_step_budget_is_bounded_by_the_api_not_only_by_the_ui():
     resp = client.post("/api/ai/analyst", json={
-        "api_key": "AIza-test", "source": "synthetic", "cycles": 2, "max_steps": 5000})
+        "api_key": "sk-or-test", "source": "synthetic", "cycles": 2, "max_steps": 5000})
     assert resp.status_code == 422
 
 

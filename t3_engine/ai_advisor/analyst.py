@@ -1,4 +1,4 @@
-"""The AI analyst: a Gemini agent that labels a chart from scratch.
+"""The AI analyst: an agent that labels a chart from scratch.
 
 This is a different thing from `request_wave_count` in advisor.py, and the
 difference matters:
@@ -15,6 +15,12 @@ difference matters:
   answer. Each of those steps is a real function call executed server-side
   (ai_advisor/analyst_tools.py), so the model reasons over data this server
   computed rather than over anything it remembered or invented.
+
+PROVIDER NOTE: this loop needs a model that supports tool calling. Not
+every model on OpenRouter does, and one that does not will either error or
+answer in prose - which comes back as `finished: False` with the model's
+last message attached, rather than as an empty result dressed up as a
+finished analysis.
 
 The trust boundary has not moved. Every structure the agent submits is
 re-validated by elliott_engine/external_count.py before it leaves this
@@ -36,11 +42,11 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from t3_engine.ai_advisor.advisor import DEFAULT_MODEL, AIAdvisorError, _post
+from t3_engine.ai_advisor.advisor import DEFAULT_MODEL, AIAdvisorError, _finish_reason, _message_of, _post
 from t3_engine.ai_advisor.analyst_tools import (
-    FUNCTION_DECLARATIONS,
     AnalystToolbox,
     ToolCallRecord,
+    openai_tools,
 )
 from t3_engine.ai_advisor.playbook import ELLIOTT_PLAYBOOK
 from t3_engine.common.models import Candle
@@ -98,44 +104,51 @@ def opening_brief(candles: List[Candle], symbol: str, degree: Timeframe) -> str:
     )
 
 
-def _tool_payload(system_prompt: str, contents: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _tool_payload(system_prompt: str, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {
-        "systemInstruction": {"parts": [{"text": system_prompt}]},
-        "contents": contents,
-        "tools": [{"functionDeclarations": FUNCTION_DECLARATIONS}],
-        "generationConfig": {
-            "temperature": 0.15,   # labelling is analysis, not invention
-            "maxOutputTokens": ANALYST_MAX_OUTPUT_TOKENS,
-        },
+        "messages": [{"role": "system", "content": system_prompt}] + messages,
+        "tools": openai_tools(),
+        "tool_choice": "auto",
+        "temperature": 0.15,   # labelling is analysis, not invention
+        "max_tokens": ANALYST_MAX_OUTPUT_TOKENS,
     }
 
 
-def _parts_of(data: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """The model's turn, or a clear error. A turn with no parts is almost
-    always a truncation or a block, and both need to say so out loud - an
-    agent loop that silently treats "no parts" as "nothing to do" spins
-    until it runs out of steps and then reports success with no answer."""
-    candidates = data.get("candidates") or []
-    if not candidates:
-        blocked = (data.get("promptFeedback") or {}).get("blockReason")
-        if blocked:
-            raise AIAdvisorError(f"Gemini refused to answer (blockReason: {blocked})")
-        raise AIAdvisorError(f"Unexpected Gemini response shape: {json.dumps(data)[:300]}")
-    candidate = candidates[0]
-    parts = (candidate.get("content") or {}).get("parts") or []
-    if not parts:
-        reason = candidate.get("finishReason", "unknown")
-        if reason == "MAX_TOKENS":
+def _assistant_turn(data: Dict[str, Any]) -> Dict[str, Any]:
+    """The model's turn, or a clear error. A turn with neither text nor
+    tool calls is almost always a truncation, and it needs to say so out
+    loud - an agent loop that silently treats "nothing came back" as
+    "nothing to do" spins until it runs out of steps and then reports
+    success with no answer."""
+    message = _message_of(data)
+    has_content = bool((message.get("content") or "").strip())
+    has_calls = bool(message.get("tool_calls"))
+    if not has_content and not has_calls:
+        if _finish_reason(data) == "length":
             raise AIAdvisorError(
-                "Gemini hit its output-token limit before producing an answer. Try a smaller "
+                "The model hit its output-token limit before producing an answer. Try a smaller "
                 "history, or a model with a larger output budget."
             )
-        raise AIAdvisorError(f"Gemini returned an empty turn (finishReason: {reason})")
-    return parts
+        raise AIAdvisorError(f"The model returned an empty turn (finish_reason: "
+                             f"{_finish_reason(data) or 'unknown'})")
+    return message
 
 
-def _text_of(parts: List[Dict[str, Any]]) -> str:
-    return "".join(p.get("text", "") for p in parts).strip()
+def _parse_tool_arguments(call: Dict[str, Any]) -> Dict[str, Any]:
+    """Tool arguments arrive as a JSON STRING in this wire format, and a
+    model that emits malformed JSON there is common enough that it must not
+    end the run. Returning the parse error as the tool result gives the
+    model the one thing that lets it recover: what it got wrong."""
+    raw = (call.get("function") or {}).get("arguments")
+    if isinstance(raw, dict):
+        return raw
+    if raw in (None, ""):
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as exc:
+        return {"__arguments_error__": f"arguments were not valid JSON ({exc}): {str(raw)[:200]}"}
+    return parsed if isinstance(parsed, dict) else {"__arguments_error__": "arguments must be a JSON object"}
 
 
 def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: str = "",
@@ -147,17 +160,17 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
     attached), not an exception."""
     max_steps = max(1, min(int(max_steps), MAX_MAX_STEPS))
     toolbox = AnalystToolbox(candles, degree, symbol)
-    contents: List[Dict[str, Any]] = [
-        {"role": "user", "parts": [{"text": opening_brief(candles, symbol, degree)}]}
+    messages: List[Dict[str, Any]] = [
+        {"role": "user", "content": opening_brief(candles, symbol, degree)}
     ]
 
     note = ""
     steps_used = 0
     for step in range(max_steps):
         steps_used = step + 1
-        data = _post(api_key, model, _tool_payload(ELLIOTT_PLAYBOOK, contents), client, timeout)
-        parts = _parts_of(data)
-        calls = [p["functionCall"] for p in parts if isinstance(p, dict) and "functionCall" in p]
+        data = _post(api_key, model, _tool_payload(ELLIOTT_PLAYBOOK, messages), client, timeout)
+        message = _assistant_turn(data)
+        calls = message.get("tool_calls") or []
 
         if not calls:
             # The model answered in prose. If it already submitted, fine.
@@ -165,15 +178,25 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
             # empty result as a finished analysis.
             if toolbox.submitted is None:
                 note = ("The model stopped without calling submit_count. Its last message: "
-                        + (_text_of(parts)[:600] or "(no text)"))
+                        + ((message.get("content") or "").strip()[:600] or "(no text)"))
             break
 
-        contents.append({"role": "model", "parts": parts})
-        responses = []
+        messages.append(message)
         for call in calls:
-            result = toolbox.call(call.get("name", ""), call.get("args") or {})
-            responses.append({"functionResponse": {"name": call.get("name", ""), "response": result}})
-        contents.append({"role": "user", "parts": responses})
+            name = (call.get("function") or {}).get("name", "")
+            args = _parse_tool_arguments(call)
+            if "__arguments_error__" in args:
+                result = {"error": f"Bad arguments for {name}: {args['__arguments_error__']}"}
+                toolbox.calls.append(ToolCallRecord(name=name, args={},
+                                                    result_summary=f"error: {result['error']}"))
+            else:
+                result = toolbox.call(name, args)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call.get("id", ""),
+                "name": name,
+                "content": json.dumps(result, default=str),
+            })
 
         if toolbox.submitted is not None:
             break

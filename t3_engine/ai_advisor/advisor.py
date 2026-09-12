@@ -1,4 +1,4 @@
-"""Optional Gemini advisory layer + AI wave-labelling prompt builder.
+"""Optional OpenRouter advisory layer + AI wave-labelling prompt builder.
 
 Two separate jobs, deliberately kept apart because they carry very
 different amounts of trust:
@@ -18,19 +18,30 @@ different amounts of trust:
   chart or a trade. The model picks which pivots to connect; the server
   decides what is a legal wave.
 
-PROVIDER: Google AI Studio (Gemini). This replaced OpenAI on request. BYO
-key throughout - the key is accepted per request, forwarded once, and
+PROVIDER: OpenRouter (https://openrouter.ai). This replaced Google's
+Gemini API on request, which had itself replaced OpenAI. The wire format
+is OpenAI-compatible chat completions, so the payloads here are plain
+`messages` + `tools` rather than Gemini's `contents`/`systemInstruction`/
+`functionCall` shapes.
+
+The practical reason this keeps changing, and why the model name is an
+editable field in the UI rather than a constant in this file: a router
+carries hundreds of models from dozens of vendors, and which ones exist,
+are free, or support tool calling changes week to week. Nothing downstream
+of this module cares which model answered.
+
+BYO key throughout - the key is accepted per request, forwarded once, and
 never written to disk, DB or logs. See dashboard/server.py's
-`/api/ai/advice` and `/api/ai/label` endpoints.
+`/api/ai/advice`, `/api/ai/label` and `/api/ai/analyst` endpoints.
 
 NETWORK NOTE: same situation as market_data/ - this sandbox blocks
-outbound access to generativelanguage.googleapis.com as well. The
-request-building and response-parsing below is real and unit-tested
-against a mocked HTTP transport (tests/test_ai_advisor.py); it has not
-completed a real call in this session. Everything downstream of it -
-validation, chart rendering, trade evaluation - is exercised end to end
-offline with recorded model responses, so a missing key degrades the
-feature without breaking the pipeline.
+outbound access to openrouter.ai as well. The request-building and
+response-parsing below is real and unit-tested against a mocked HTTP
+transport (tests/test_ai_advisor.py); it has not completed a real call in
+this session. Everything downstream of it - validation, chart rendering,
+trade evaluation - is exercised end to end offline with recorded model
+responses, so a missing key degrades the feature without breaking the
+pipeline.
 """
 
 from __future__ import annotations
@@ -41,18 +52,22 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-# Model names churn, and Google retires them for NEW keys before old ones:
-# `gemini-2.5-flash` returned 404 NOT_FOUND in production with "no longer
-# available for new users... update your code to use models/gemini-3.6-flash".
-# That message is the authority here, not anything hardcoded - which is
-# also why the dashboard lets you edit the model name without a redeploy,
-# and why the API's own error text is surfaced verbatim rather than
-# flattened into "AI unavailable".
-DEFAULT_MODEL = "gemini-3.6-flash"
-API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+# A router model id is "<vendor>/<model>", optionally with a ":free" or
+# other variant suffix. This one is the default because it is what was
+# asked for; it is NOT authoritative - OpenRouter's catalogue changes
+# constantly, so the dashboard keeps the model name editable and surfaces
+# the API's own error text verbatim when a name stops resolving.
+DEFAULT_MODEL = "deepseek/deepseek-v4-flash-free"
+API_BASE = "https://openrouter.ai/api/v1"
+CHAT_URL = f"{API_BASE}/chat/completions"
 
-# Output-token budgets. These were 400 and 2048, which was enough for the
-# answers themselves but NOT for the internal reasoning current models emit
+# Sent so the call is attributable on OpenRouter's side. Neither header is
+# required, and neither carries anything about the user.
+APP_TITLE = "T3 Elliott Wave Engine"
+APP_URL = "https://github.com/hobbit7771/elliott-wave-analyzer"
+
+# Output-token budgets. Under Gemini these were 400 and 2048, which covered
+# the answers themselves but NOT the internal reasoning current models emit
 # first - so in production the second opinion arrived as half a sentence
 # and the wave count as "Unterminated string ... char 169". The budget is
 # now sized for reasoning plus answer, and a truncation that still happens
@@ -93,7 +108,7 @@ class AIAdvisorError(Exception):
 
 
 TRUNCATED_MESSAGE = (
-    "Gemini ran out of output tokens before finishing its answer (finishReason: MAX_TOKENS). "
+    "The model ran out of output tokens before finishing its answer (finish_reason: length). "
     "The answer was cut off mid-way - this is a budget problem, not a bad key or a bad model name."
 )
 
@@ -113,108 +128,130 @@ class WaveCountProposal:
     raw: Dict[str, Any]
 
 
-def build_contents(system_prompt: str, user_content: str) -> Dict[str, Any]:
-    """Gemini's generateContent shape. The instruction goes in
-    `systemInstruction` rather than being glued onto the user turn, so the
-    model treats the pivot data as data - not as further instructions."""
-    return {
-        "systemInstruction": {"parts": [{"text": system_prompt}]},
-        "contents": [{"role": "user", "parts": [{"text": user_content}]}],
-    }
+def build_messages(system_prompt: str, user_content: str) -> List[Dict[str, Any]]:
+    """Chat-completions shape. The instruction stays in its own `system`
+    message rather than being glued onto the user turn, so the model treats
+    the pivot data as data - not as further instructions."""
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
 
 
 def _api_error_message(resp: httpx.Response, model: str) -> str:
-    """Pass Google's own error through verbatim, and add the one piece of
-    context it can't know: that this app has a Model field you can edit.
+    """Pass the router's own error through verbatim, and add the one piece
+    of context it can't know: that this app has a Model field you can edit.
 
-    A 404 here almost always means the model name is stale rather than the
-    key being wrong - Google retires names for NEW keys while existing
-    ones keep working, so the same code can break for one user and not
-    another. Their message names the replacement; the hint tells you where
-    to put it."""
+    A router multiplexes many vendors, so the status code says which LAYER
+    failed, and that is most of the diagnosis. 404 is almost always a model
+    id that no longer resolves - free tiers get renamed or retired far more
+    often than keys get revoked."""
     detail = resp.text[:400]
     hint = ""
     if resp.status_code == 404:
-        hint = (f" | This usually means the model name '{model}' is retired for your key rather than "
-                "anything being wrong with the key. Google's message above names the current model - "
-                "put that name in the dashboard's Model field (AI tab) and try again.")
+        hint = (f" | This usually means the model id '{model}' does not exist on OpenRouter (or was "
+                "renamed/retired) rather than anything being wrong with the key. Check the current "
+                "id at openrouter.ai/models and put it in the dashboard's Model field (AI tab).")
     elif resp.status_code in (401, 403):
-        hint = " | Check the API key itself - it may be invalid, revoked, or missing Generative Language API access."
+        hint = (" | Check the API key itself - it may be invalid, revoked, or missing access to this "
+                "model. OpenRouter keys start with 'sk-or-'.")
+    elif resp.status_code == 402:
+        hint = (" | Out of credits for this model. Free models (ids ending in ':free') have their own "
+                "hard rate limits; a paid model needs credit on the account.")
     elif resp.status_code == 429:
-        hint = " | Rate limited by Google. Wait a moment, or use a model/tier with more quota."
-    return f"Gemini API error {resp.status_code}: {detail}{hint}"
+        hint = (" | Rate limited. Free models are throttled aggressively - wait, or switch to another "
+                "model in the Model field.")
+    return f"OpenRouter API error {resp.status_code}: {detail}{hint}"
+
+
+def _headers(api_key: str) -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": APP_URL,
+        "X-Title": APP_TITLE,
+    }
 
 
 def _post(api_key: str, model: str, payload: Dict[str, Any],
           client: Optional[httpx.Client], timeout: float) -> Dict[str, Any]:
     if not api_key:
-        raise AIAdvisorError("No Gemini API key provided (get one free at https://aistudio.google.com/apikey)")
+        raise AIAdvisorError("No OpenRouter API key provided (get one at https://openrouter.ai/keys)")
 
+    body = {**payload, "model": model}
     http_client = client or httpx.Client(timeout=timeout)
     owns_client = client is None
     try:
-        resp = http_client.post(
-            f"{API_BASE}/{model}:generateContent",
-            headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
-            json=payload,
-        )
+        resp = http_client.post(CHAT_URL, headers=_headers(api_key), json=body)
         if resp.status_code != 200:
             raise AIAdvisorError(_api_error_message(resp, model))
-        return resp.json()
+        data = resp.json()
     except httpx.RequestError as exc:
-        raise AIAdvisorError(f"Could not reach the Gemini API: {exc}")
+        raise AIAdvisorError(f"Could not reach the OpenRouter API: {exc}")
     finally:
         if owns_client:
             http_client.close()
 
+    # A router can answer 200 with an error body - an upstream vendor
+    # refusing, a model being unavailable - and treating that as a normal
+    # empty answer is how "the AI had no concerns" gets printed when the
+    # call in fact failed.
+    if isinstance(data, dict) and data.get("error"):
+        error = data["error"]
+        message = error.get("message") if isinstance(error, dict) else str(error)
+        raise AIAdvisorError(f"OpenRouter returned an error for '{model}': {message}")
+    return data
+
+
+def _message_of(data: Dict[str, Any]) -> Dict[str, Any]:
+    choices = data.get("choices") or []
+    if not choices:
+        raise AIAdvisorError(f"Unexpected OpenRouter response shape: {json.dumps(data)[:300]}")
+    return choices[0].get("message") or {}
+
 
 def _finish_reason(data: Dict[str, Any]) -> str:
-    try:
-        return str(data["candidates"][0].get("finishReason") or "")
-    except (KeyError, IndexError, TypeError):
+    choices = data.get("choices") or []
+    if not choices:
         return ""
+    return str(choices[0].get("finish_reason") or choices[0].get("native_finish_reason") or "")
 
 
 def _extract_text(data: Dict[str, Any]) -> str:
-    """Pull the text out of a generateContent response, failing loudly
-    rather than returning an empty string - a silently blank answer in a
-    trading tool reads as "the model had no concerns", which is the exact
-    opposite of "the call did not work".
+    """Pull the text out of a chat completion, failing loudly rather than
+    returning an empty string - a silently blank answer in a trading tool
+    reads as "the model had no concerns", which is the exact opposite of
+    "the call did not work".
 
-    A truncated answer is called out by name. Current Gemini models spend
-    output tokens on internal reasoning before they emit anything visible,
-    so a budget that looks generous for the answer alone can cut the answer
-    off mid-sentence - which surfaced in production as half a sentence of
+    A truncated answer is called out by name. Reasoning models spend output
+    tokens on internal thinking before they emit anything visible, so a
+    budget that looks generous for the answer alone can cut the answer off
+    mid-sentence - which surfaced in production as half a sentence of
     commentary, and as "Unterminated string" when the answer was JSON. The
-    cause is the token budget, not the model's JSON formatting, and the
-    message has to say so or the next person debugs the wrong thing."""
-    try:
-        parts = data["candidates"][0]["content"]["parts"]
-    except (KeyError, IndexError, TypeError):
-        blocked = (data.get("promptFeedback") or {}).get("blockReason")
-        if blocked:
-            raise AIAdvisorError(f"Gemini refused to answer (blockReason: {blocked})")
-        if _finish_reason(data) == "MAX_TOKENS":
-            raise AIAdvisorError(TRUNCATED_MESSAGE)
-        raise AIAdvisorError(f"Unexpected Gemini response shape: {json.dumps(data)[:300]}")
-    text = "".join(part.get("text", "") for part in parts).strip()
+    cause is the token budget, not the model's formatting, and the message
+    has to say so or the next person debugs the wrong thing."""
+    message = _message_of(data)
+    text = (message.get("content") or "").strip()
     if not text:
-        if _finish_reason(data) == "MAX_TOKENS":
+        if _finish_reason(data) == "length":
             raise AIAdvisorError(TRUNCATED_MESSAGE)
-        raise AIAdvisorError("Gemini returned an empty answer")
-    if _finish_reason(data) == "MAX_TOKENS":
+        raise AIAdvisorError("The model returned an empty answer")
+    if _finish_reason(data) == "length":
         raise AIAdvisorError(f"{TRUNCATED_MESSAGE} Partial answer: {text[:300]}")
     return text
 
 
 def request_commentary(api_key: str, context: Dict[str, Any], model: str = DEFAULT_MODEL,
-                        client: Optional[httpx.Client] = None, timeout: float = 20.0) -> AdvisorResponse:
+                        client: Optional[httpx.Client] = None, timeout: float = 60.0) -> AdvisorResponse:
     user_content = (
         "Here is the current Elliott Wave engine state as JSON. Give your second opinion.\n\n"
         + json.dumps(context, indent=2, default=str)
     )
-    payload = build_contents(ADVISOR_SYSTEM_PROMPT, user_content)
-    payload["generationConfig"] = {"temperature": 0.4, "maxOutputTokens": COMMENTARY_MAX_OUTPUT_TOKENS}
+    payload = {
+        "messages": build_messages(ADVISOR_SYSTEM_PROMPT, user_content),
+        "temperature": 0.4,
+        "max_tokens": COMMENTARY_MAX_OUTPUT_TOKENS,
+    }
     data = _post(api_key, model, payload, client, timeout)
     return AdvisorResponse(text=_extract_text(data), model=model, raw=data)
 
@@ -231,15 +268,15 @@ def _parse_count_json(text: str) -> Dict[str, Any]:
     try:
         parsed = json.loads(cleaned)
     except json.JSONDecodeError as exc:
-        raise AIAdvisorError(f"Gemini did not return valid JSON: {exc}. Raw answer: {text[:300]}")
+        raise AIAdvisorError(f"The model did not return valid JSON: {exc}. Raw answer: {text[:300]}")
     if not isinstance(parsed, dict):
-        raise AIAdvisorError(f"Gemini returned {type(parsed).__name__}, expected a JSON object")
+        raise AIAdvisorError(f"The model returned {type(parsed).__name__}, expected a JSON object")
     return parsed
 
 
 def request_wave_count(api_key: str, pivots: List[Dict[str, Any]], direction: str,
                         model: str = DEFAULT_MODEL, client: Optional[httpx.Client] = None,
-                        timeout: float = 30.0) -> WaveCountProposal:
+                        timeout: float = 90.0) -> WaveCountProposal:
     """Ask for a count over the whole pivot history. The returned `waves`
     are RAW model output - structurally unvalidated on purpose. Pass them
     straight to elliott_engine.external_count.validate_external_count;
@@ -249,17 +286,17 @@ def request_wave_count(api_key: str, pivots: List[Dict[str, Any]], direction: st
         f"Confirmed swing pivots ({len(pivots)} of them), oldest first:\n"
         + json.dumps(pivots, separators=(",", ":"))
     )
-    payload = build_contents(LABELLER_SYSTEM_PROMPT, user_content)
-    payload["generationConfig"] = {
+    payload = {
+        "messages": build_messages(LABELLER_SYSTEM_PROMPT, user_content),
         "temperature": 0.1,          # a count is an analysis, not a creative task
-        "maxOutputTokens": COUNT_MAX_OUTPUT_TOKENS,
-        "responseMimeType": "application/json",
+        "max_tokens": COUNT_MAX_OUTPUT_TOKENS,
+        "response_format": {"type": "json_object"},
     }
     data = _post(api_key, model, payload, client, timeout)
     parsed = _parse_count_json(_extract_text(data))
     waves = parsed.get("waves")
     if waves is None:
-        raise AIAdvisorError(f"Gemini's JSON has no 'waves' key: {json.dumps(parsed)[:300]}")
+        raise AIAdvisorError(f"The model's JSON has no 'waves' key: {json.dumps(parsed)[:300]}")
     return WaveCountProposal(
         waves=waves,
         reasoning=str(parsed.get("reasoning", "")),

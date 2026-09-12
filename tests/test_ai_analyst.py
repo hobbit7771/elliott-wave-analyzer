@@ -193,16 +193,23 @@ def test_every_declared_tool_has_an_implementation_behind_it():
 
 # ------------------------------------------------------------ agent loop
 
-def function_call_turn(name, args):
-    return httpx.Response(200, json={"candidates": [
-        {"content": {"role": "model", "parts": [{"functionCall": {"name": name, "args": args}}]},
-         "finishReason": "STOP"}
-    ]})
+def function_call_turn(name, args, call_id="call_1"):
+    """One assistant turn asking for a tool call, in the chat-completions
+    wire shape: arguments arrive as a JSON STRING, not as an object."""
+    return httpx.Response(200, json={"choices": [{
+        "index": 0,
+        "message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": call_id, "type": "function",
+             "function": {"name": name, "arguments": json.dumps(args)}},
+        ]},
+        "finish_reason": "tool_calls",
+    }]})
 
 
-def text_turn(text, finish_reason="STOP"):
-    return httpx.Response(200, json={"candidates": [
-        {"content": {"role": "model", "parts": [{"text": text}]}, "finishReason": finish_reason}
+def text_turn(text, finish_reason="stop"):
+    return httpx.Response(200, json={"choices": [
+        {"index": 0, "message": {"role": "assistant", "content": text},
+         "finish_reason": finish_reason}
     ]})
 
 
@@ -230,7 +237,7 @@ def test_the_agent_works_the_chart_then_submits_a_validated_count():
             "reasoning": "Wave 3 is the longest; wave 4 stays clear of wave 1.",
         }),
     ])
-    result = run_analyst("AIza-test", CANDLES, DEGREE, symbol="SYNTHETIC", client=client)
+    result = run_analyst("sk-or-test", CANDLES, DEGREE, symbol="SYNTHETIC", client=client)
 
     assert result.finished
     assert len(result.accepted) == 1
@@ -250,19 +257,20 @@ def test_the_agent_is_given_tools_and_the_playbook_not_a_pre_made_count():
             "summary": "s", "reasoning": "r",
         }),
     ])
-    run_analyst("AIza-test", CANDLES, DEGREE, symbol="SYNTHETIC", client=client)
+    run_analyst("sk-or-test", CANDLES, DEGREE, symbol="SYNTHETIC", client=client)
 
     payload = sent[0]
-    brief = payload["contents"][0]["parts"][0]["text"]
+    brief = payload["messages"][1]["content"]
     assert "No pivots have been computed for you" in brief
     # The brief carries the range and the size of the job, and no structure:
     # no swing list, no labels, no direction, nothing to agree with.
     for leak in ("wave 3", "impulse", "zigzag", "HIGH", "LOW", "uptrend", "downtrend"):
         assert leak not in brief, f"the opening brief leaks {leak!r}"
-    assert [d["name"] for d in payload["tools"][0]["functionDeclarations"]] == [
+    assert [t["function"]["name"] for t in payload["tools"]] == [
         "list_pivots", "get_candles", "measure_move", "fibonacci_levels",
         "check_count", "submit_count"]
-    system = payload["systemInstruction"]["parts"][0]["text"]
+    assert all(t["type"] == "function" for t in payload["tools"])
+    system = payload["messages"][0]["content"]
     assert "Wave 3 is never the shortest" in system
     assert "GUIDELINES" in system
 
@@ -276,21 +284,22 @@ def test_tool_results_are_fed_back_so_the_model_reasons_over_real_data():
             "summary": "s", "reasoning": "r",
         }),
     ])
-    run_analyst("AIza-test", CANDLES, DEGREE, client=client)
+    run_analyst("sk-or-test", CANDLES, DEGREE, client=client)
 
     second_request = sent[1]
-    roles = [turn["role"] for turn in second_request["contents"]]
-    assert roles == ["user", "model", "user"]
-    fed_back = second_request["contents"][2]["parts"][0]["functionResponse"]
+    roles = [turn["role"] for turn in second_request["messages"]]
+    assert roles == ["system", "user", "assistant", "tool"]
+    fed_back = second_request["messages"][3]
     assert fed_back["name"] == "list_pivots"
-    assert fed_back["response"]["pivot_count"] > 0
+    assert fed_back["tool_call_id"] == "call_1"
+    assert json.loads(fed_back["content"])["pivot_count"] > 0
 
 
 def test_a_model_that_never_submits_is_reported_as_unfinished_not_as_success():
     """The quiet failure this guards against: an empty result presented as
     a completed analysis."""
     client, _ = scripted_client([text_turn("I think this is probably a wave 3 somewhere.")])
-    result = run_analyst("AIza-test", CANDLES, DEGREE, client=client)
+    result = run_analyst("sk-or-test", CANDLES, DEGREE, client=client)
 
     assert not result.finished
     assert result.accepted == []
@@ -300,7 +309,7 @@ def test_a_model_that_never_submits_is_reported_as_unfinished_not_as_success():
 
 def test_a_model_that_loops_forever_is_stopped_by_the_step_budget():
     client, sent = scripted_client([function_call_turn("list_pivots", {"deviation_pct": 1.0})])
-    result = run_analyst("AIza-test", CANDLES, DEGREE, client=client, max_steps=4)
+    result = run_analyst("sk-or-test", CANDLES, DEGREE, client=client, max_steps=4)
 
     assert not result.finished
     assert result.steps_used == 4
@@ -312,12 +321,13 @@ def test_a_truncated_turn_is_reported_as_a_token_budget_problem():
     """This is the production failure that motivated the budget fix: the
     answer was cut off, and the error said 'Unterminated string', which
     sends you debugging JSON instead of raising the limit."""
-    empty_truncated = httpx.Response(200, json={"candidates": [
-        {"content": {"role": "model", "parts": []}, "finishReason": "MAX_TOKENS"}]})
+    empty_truncated = httpx.Response(200, json={"choices": [
+        {"index": 0, "message": {"role": "assistant", "content": ""},
+         "finish_reason": "length"}]})
     client, _ = scripted_client([empty_truncated])
 
     with pytest.raises(AIAdvisorError, match="output-token limit"):
-        run_analyst("AIza-test", CANDLES, DEGREE, client=client)
+        run_analyst("sk-or-test", CANDLES, DEGREE, client=client)
 
 
 def test_a_tool_error_does_not_end_the_run_it_is_handed_back_to_the_model():
@@ -330,14 +340,49 @@ def test_a_tool_error_does_not_end_the_run_it_is_handed_back_to_the_model():
             "summary": "s", "reasoning": "r",
         }),
     ])
-    result = run_analyst("AIza-test", CANDLES, DEGREE, client=client)
+    result = run_analyst("sk-or-test", CANDLES, DEGREE, client=client)
 
     assert result.finished
     assert "error" in result.steps[0].result_summary
-    handed_back = sent[1]["contents"][2]["parts"][0]["functionResponse"]["response"]
+    handed_back = json.loads(sent[1]["messages"][3]["content"])
     assert "does not exist" in handed_back["error"]
 
 
 def test_no_api_key_fails_before_anything_is_sent():
-    with pytest.raises(AIAdvisorError, match="No Gemini API key"):
+    with pytest.raises(AIAdvisorError, match="No OpenRouter API key"):
         run_analyst("", CANDLES, DEGREE)
+
+
+def test_malformed_tool_arguments_do_not_end_the_run():
+    """Models emit invalid JSON in the arguments string often enough that
+    it must be recoverable. The parse error goes back as the tool result -
+    the one thing that lets the model fix its next call."""
+    broken = httpx.Response(200, json={"choices": [{
+        "index": 0,
+        "message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "call_1", "type": "function",
+             "function": {"name": "list_pivots", "arguments": '{"deviation_pct": 1.0'}},
+        ]},
+        "finish_reason": "tool_calls",
+    }]})
+    client, sent = scripted_client([broken, function_call_turn("submit_count", {
+        "structures": [{"structure": "IMPULSE", "deviation_pct": 1.0,
+                        "direction": "UP", "waves": GOOD_IMPULSE}],
+        "summary": "s", "reasoning": "r",
+    }, call_id="call_2")])
+    result = run_analyst("sk-or-test", CANDLES, DEGREE, client=client)
+
+    assert result.finished
+    assert "not valid JSON" in result.steps[0].result_summary
+    assert "not valid JSON" in json.loads(sent[1]["messages"][3]["content"])["error"]
+
+
+def test_a_model_with_no_tool_support_answers_in_prose_and_is_reported_as_such():
+    """Not every router model supports tool calling. One that doesn't must
+    not look like a finished analysis with nothing in it."""
+    client, _ = scripted_client([text_turn("I cannot call functions, but here is my view: wave 3.")])
+    result = run_analyst("sk-or-test", CANDLES, DEGREE, client=client)
+
+    assert not result.finished
+    assert result.accepted == []
+    assert "cannot call functions" in result.note

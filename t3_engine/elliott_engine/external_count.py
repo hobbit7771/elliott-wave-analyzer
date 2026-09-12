@@ -1,6 +1,6 @@
 """Server-side validation of a wave count proposed by an EXTERNAL source.
 
-An external model (see ai_advisor/gemini.py) can suggest a count over the
+An external model (see ai_advisor/advisor.py) can suggest a count over the
 whole loaded history, which is something the deterministic engine
 deliberately does not do - it only ever anchors on recent pivots. That
 suggestion is useful, but it is also completely untrusted: a language
