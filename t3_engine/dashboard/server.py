@@ -37,6 +37,7 @@ from t3_engine.dashboard.serialization import (
     signal_to_dict,
     structure_event_to_dict,
 )
+from t3_engine.market_data.fallback_symbols import FALLBACK_USDT_PERPETUAL_SYMBOLS
 from t3_engine.market_data.rest_client import BinanceFuturesREST
 from t3_engine.pipeline.live_loop import LiveTradingEngine
 
@@ -150,23 +151,33 @@ _SYMBOLS_CACHE_TTL_SECONDS = 3600.0
 def list_symbols():
     now = time.time()
     if _symbols_cache["symbols"] is not None and (now - _symbols_cache["fetched_at"]) < _SYMBOLS_CACHE_TTL_SECONDS:
-        return {"symbols": _symbols_cache["symbols"], "cached": True}
+        return {"symbols": _symbols_cache["symbols"], "cached": True, "source": "live"}
 
-    _check_binance_backoff()
+    # Never let the picker come back empty just because Binance is
+    # temporarily unreachable (451/418/429/network error) - fall back to
+    # the static list (see fallback_symbols.py for why it's not
+    # exhaustive) instead of raising, so typing a letter always suggests
+    # something real while we wait this out.
+    if _binance_backoff_until > now:
+        return {"symbols": FALLBACK_USDT_PERPETUAL_SYMBOLS, "cached": False, "source": "fallback",
+                "reason": f"{_binance_backoff_message} ({_binance_backoff_until - now:.0f}s remaining in cooldown)"}
+
     rest = BinanceFuturesREST()
     try:
         symbols = rest.list_symbols()
     except httpx.HTTPStatusError as exc:
         _register_binance_failure(exc)
-        raise HTTPException(exc.response.status_code, binance_error_message(exc))
+        return {"symbols": FALLBACK_USDT_PERPETUAL_SYMBOLS, "cached": False, "source": "fallback",
+                "reason": binance_error_message(exc)}
     except httpx.RequestError as exc:
-        raise HTTPException(502, f"Could not reach Binance: {exc}")
+        return {"symbols": FALLBACK_USDT_PERPETUAL_SYMBOLS, "cached": False, "source": "fallback",
+                "reason": f"Could not reach Binance: {exc}"}
     finally:
         rest.close()
 
     _symbols_cache["symbols"] = symbols
     _symbols_cache["fetched_at"] = now
-    return {"symbols": symbols, "cached": False}
+    return {"symbols": symbols, "cached": False, "source": "live"}
 
 
 @app.get("/api/run")

@@ -14,6 +14,34 @@ def make_rest_client(handler):
     return BinanceFuturesREST(client=http_client)
 
 
+def test_rest_client_tracks_used_weight_header():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"openInterest": "100", "symbol": "BTCUSDT"},
+                               headers={"X-MBX-USED-WEIGHT-1M": "42"})
+
+    client = make_rest_client(handler)
+    assert client.last_used_weight is None
+    client.get_open_interest("BTCUSDT")
+    assert client.last_used_weight == 42
+    from t3_engine.market_data.rest_client import IP_WEIGHT_BUDGET_PER_MINUTE
+    assert client.weight_budget_remaining == IP_WEIGHT_BUDGET_PER_MINUTE - 42
+
+
+def test_rest_client_enforces_minimum_request_spacing():
+    from t3_engine.market_data.rest_client import MIN_REQUEST_INTERVAL_SECONDS
+    import time
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"openInterest": "1", "symbol": "BTCUSDT"})
+
+    client = make_rest_client(handler)
+    client.get_open_interest("BTCUSDT")
+    start = time.monotonic()
+    client.get_open_interest("BTCUSDT")
+    elapsed = time.monotonic() - start
+    assert elapsed >= MIN_REQUEST_INTERVAL_SECONDS * 0.9  # allow small scheduling jitter
+
+
 def test_get_klines_parses_binance_row_format():
     sample_row = [1620000000000, "100.5", "110.2", "99.1", "105.0", "1234.5",
                   1620000059999, "130000.0", 42, "600.0", "63000.0", "0"]

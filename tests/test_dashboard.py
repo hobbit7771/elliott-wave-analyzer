@@ -170,23 +170,30 @@ def test_list_symbols_returns_and_caches():
     with patch.object(server_module.BinanceFuturesREST, "list_symbols", return_value=["BTCUSDT", "ETHUSDT"]) as mock_list:
         resp1 = client.get("/api/symbols")
         assert resp1.status_code == 200
-        assert resp1.json() == {"symbols": ["BTCUSDT", "ETHUSDT"], "cached": False}
+        assert resp1.json() == {"symbols": ["BTCUSDT", "ETHUSDT"], "cached": False, "source": "live"}
 
         resp2 = client.get("/api/symbols")
         assert resp2.json()["cached"] is True
         mock_list.assert_called_once()  # second call served from cache, no second Binance hit
 
 
-def test_list_symbols_surfaces_network_error():
+def test_list_symbols_falls_back_to_static_list_on_network_error():
+    """The picker must never come back empty just because Binance can't be
+    reached - it should serve the static fallback list instead, clearly
+    tagged, so the frontend always has something to suggest."""
     _reset_binance_state()
     request = httpx.Request("GET", "https://fapi.binance.com/fapi/v1/exchangeInfo")
 
     with patch.object(server_module.BinanceFuturesREST, "list_symbols", side_effect=httpx.ConnectError("boom", request=request)):
         resp = client.get("/api/symbols")
-    assert resp.status_code == 502
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["source"] == "fallback"
+    assert "BTCUSDT" in data["symbols"]
+    assert "reach" in data["reason"].lower()
 
 
-def test_list_symbols_surfaces_451():
+def test_list_symbols_falls_back_to_static_list_on_451():
     _reset_binance_state()
     request = httpx.Request("GET", "https://fapi.binance.com/fapi/v1/exchangeInfo")
     response = httpx.Response(451, request=request, text="blocked")
@@ -194,14 +201,20 @@ def test_list_symbols_surfaces_451():
 
     with patch.object(server_module.BinanceFuturesREST, "list_symbols", side_effect=error):
         resp = client.get("/api/symbols")
-    assert resp.status_code == 451
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["source"] == "fallback"
+    assert "BTCUSDT" in data["symbols"]
 
 
 def test_418_triggers_shared_backoff_across_endpoints():
     """A 418 ('I'm a teapot' - Binance's documented IP-ban response) must
     stop ALL Binance-touching endpoints from calling out again until the
     cooldown expires - repeating requests during a ban is what turns a
-    short ban into a long one, per Binance's own rate-limit docs."""
+    short ban into a long one, per Binance's own rate-limit docs. The
+    symbol picker falls back to the static list instead of erroring; the
+    backtest endpoint (which has no sensible fallback data) still surfaces
+    a clear 429."""
     _reset_binance_state()
     request = httpx.Request("GET", "https://fapi.binance.com/fapi/v1/exchangeInfo")
     response = httpx.Response(418, request=request, text="teapot", headers={"Retry-After": "30"})
@@ -209,14 +222,17 @@ def test_418_triggers_shared_backoff_across_endpoints():
 
     with patch.object(server_module.BinanceFuturesREST, "list_symbols", side_effect=error) as mock_list:
         first = client.get("/api/symbols")
-        assert first.status_code == 418
-        assert "teapot" in first.json()["detail"].lower() or "banned" in first.json()["detail"].lower()
+        assert first.status_code == 200
+        first_data = first.json()
+        assert first_data["source"] == "fallback"
+        assert "teapot" in first_data["reason"].lower() or "banned" in first_data["reason"].lower()
 
         # second call must NOT hit Binance again - it's blocked by the
         # in-process cooldown the first 418 just registered
         second = client.get("/api/symbols")
-        assert second.status_code == 429
-        assert "remaining" in second.json()["detail"].lower()
+        assert second.json()["source"] == "fallback"
+        assert "remaining" in second.json()["reason"].lower()
+        mock_list.assert_called_once()
         mock_list.assert_called_once()
 
     # the cooldown is shared: /api/run's binance path is blocked too,

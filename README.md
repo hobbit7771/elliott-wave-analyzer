@@ -16,7 +16,7 @@
 
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine for
-Binance USDT-M Futures. 108 automated tests, all passing, cover every
+Binance USDT-M Futures. 129 automated tests, all passing, cover every
 module described below.
 
 ## Read this first: what "done" means here
@@ -84,7 +84,7 @@ t3_engine/
   ai_advisor/         optional BYO-key GPT second-opinion commentary (never a decision-maker)
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                108 tests, one file per module above
+tests/                129 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Binance in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -121,12 +121,26 @@ desktop web page:
   `render.yaml`'s `region` field, or the region picker when creating the
   service manually); this build's own sandbox separately blocks Binance
   entirely regardless of region (see "Known limitations" above).
-- **Symbol picker**: the symbol field is backed by `GET /api/symbols`
-  (cached in-process for an hour), which lists every actively-tradeable
-  Binance USDT-M perpetual futures symbol via `/fapi/v1/exchangeInfo` -
-  type to filter instead of guessing a ticker format. This is best-effort:
-  if it can't reach Binance (451-blocked region, or the free-tier instance
-  is still cold-starting), the field just falls back to plain text entry.
+- **Symbol picker**: the symbol field is a native HTML `<datalist>` backed
+  by `GET /api/symbols` (cached in-process for an hour) - type any letter
+  and the browser filters the list live, no need to type the full ticker.
+  When Binance is reachable this lists every actively-tradeable USDT-M
+  perpetual futures symbol via `/fapi/v1/exchangeInfo` (`"source": "live"`
+  in the response). When it isn't (451-blocked region, or an inherited
+  418/429 ban - see below), `/api/symbols` now **never returns an error**:
+  it serves a hand-picked static list of ~60 long-established symbols
+  instead (`t3_engine/market_data/fallback_symbols.py`, `"source":
+  "fallback"`), so the picker is always populated with something real even
+  during an outage, and swaps back to the live list transparently the next
+  time a fetch succeeds.
+- **Respecting Binance's rate limits**: `rest_client.py` funnels every
+  request through one `_get()` that (a) tracks Binance's own
+  `X-MBX-USED-WEIGHT-1M` response header (`last_used_weight`/
+  `weight_budget_remaining`, budget is 2400 weight/minute per IP per
+  Binance's docs) and (b) enforces a self-imposed minimum 0.5s spacing
+  between outbound requests (at most 2 req/s), so this app is never itself
+  the reason a shared Render IP gets rate-limited or banned. This is on
+  top of, not instead of, the shared 418/429 cooldown described next.
 - **Render free-tier cold starts**: a free Render web service spins down
   after ~15 minutes with no HTTP traffic and takes up to roughly a minute
   to wake back up on the next request - this looks exactly like an
@@ -215,7 +229,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (108 tests)
+# Run the automated test suite (129 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)
