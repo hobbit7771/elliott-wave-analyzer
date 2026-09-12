@@ -10,3 +10,18 @@ ta==0.10.2
 python-dotenv==1.0.0
 gunicorn==21.2.0
 Pillow==10.0.1
+
+# ---------------------------------------------------------------------------
+# T3 - Multi-Timeframe Elliott Wave Trading Engine (t3_engine/) dependencies.
+# This is a separate, independent system from the legacy app.py above - see
+# README.md "T3 Engine" section. Versions pinned to what was tested in CI.
+# ---------------------------------------------------------------------------
+httpx==0.28.1
+websockets==17.1
+SQLAlchemy==2.0.52
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+pydantic==2.13.5
+pydantic-settings==2.15.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
