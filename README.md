@@ -16,7 +16,7 @@
 
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine for
-Binance USDT-M Futures. 139 automated tests, all passing, cover every
+Binance USDT-M Futures. 147 automated tests, all passing, cover every
 module described below.
 
 ## Read this first: what "done" means here
@@ -84,7 +84,7 @@ t3_engine/
   ai_advisor/         optional BYO-key GPT second-opinion commentary (never a decision-maker)
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                139 tests, one file per module above
+tests/                147 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Binance in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -121,9 +121,10 @@ desktop web page:
   `render.yaml`'s `region` field, or the region picker when creating the
   service manually); this build's own sandbox separately blocks Binance
   entirely regardless of region (see "Known limitations" above).
-- **Symbol picker**: the symbol field is a native HTML `<datalist>` backed
-  by `GET /api/symbols` (cached in-process for an hour) - type any letter
-  and the browser filters the list live, no need to type the full ticker.
+- **Symbol picker**: the symbol field is backed by a custom JS dropdown
+  (not the native HTML `<datalist>` element - see below for why) fed by
+  `GET /api/symbols` (cached in-process for an hour) - type any letter and
+  a filtered suggestion list appears, no need to type the full ticker.
   When Binance is reachable this lists every actively-tradeable USDT-M
   perpetual futures symbol via `/fapi/v1/exchangeInfo` (`"source": "live"`
   in the response). When it isn't (451-blocked region, or an inherited
@@ -202,7 +203,50 @@ desktop web page:
   proxy) can hand back stale bytes before the service-worker-update check
   even runs. If you still see old behavior after this, fully close the
   tab/app (not just background it) and reopen - that guarantees a clean
-  script execution regardless of any in-memory state from before.
+  script execution regardless of any in-memory state from before. A
+  yellow `BUILD_VERSION` badge next to the title (also returned by
+  `GET /api/health`'s `build` field) exists purely so a deploy reaching
+  the server can be confirmed against what a user actually sees, with no
+  ambiguity from any of the caching layers above.
+- **Symbol autocomplete is a custom dropdown, not the native HTML
+  `<datalist>` this used to rely on**: Mobile Safari accepts an input's
+  `list` attribute without error but simply never renders the native
+  suggestion popup at all (a long-standing WebKit gap) - so on exactly
+  the platform this app targets, typing a letter produced no visible
+  suggestions no matter how correct the underlying symbol list was.
+  `index.html` now renders its own absolutely-positioned suggestion list
+  in plain JS, filtered client-side from the same `/api/symbols` data,
+  which works identically on every browser.
+- **Chart marker overlap (BOS/CHoCH labels stacking into unreadable
+  noise)**: structure events accumulate for an entire history/session with
+  no cap from the backend; drawing all of them as text markers on a long
+  series stacked dozens of labels on top of each other. This was mistaken
+  for the underlying Elliott/market-structure detection being wrong - it
+  was purely a chart-rendering limit (now capped to the most recent 30 via
+  `MAX_STRUCTURE_MARKERS` in `index.html`), not a signal bug; wave labels
+  were already correctly limited to the primary scenario only.
+- **Live source now falls back to Bybit automatically**: `run_live()`
+  (`pipeline/live_loop.py`) tries Binance's public WS first and switches to
+  Bybit's public WS (`market_data/bybit_ws_client.py`) if Binance hasn't
+  delivered a single trade within 15 seconds - the same rationale as the
+  REST fallback (a different exchange on different infrastructure, so a
+  Binance-side ban has no bearing on it), extended to the live stream
+  itself, not just historical klines/the symbol list. `/api/live/state`'s
+  `live_source` field says which one actually ended up feeding the
+  session, and its `error` field surfaces the underlying failure message
+  if a session's background task ever dies outright. This was necessary
+  because `BinanceFuturesWebSocketClient` never actually raises on a
+  persistent connection failure in production - it just retries the same
+  dead endpoint forever with backoff - so counting real trades was the
+  only reliable signal available to detect "stuck" versus "working".
+- **Server-side logging now actually reaches Render's log viewer**: a
+  batch of connection-visibility logging (WS connect/disconnect, first-
+  trade-received) was added in an earlier round and shipped, then
+  confirmed completely absent from production logs despite the code
+  definitely running - Python's root logger has no handler by default,
+  and gunicorn/uvicorn only configure their own loggers, not arbitrary
+  application ones. `server.py` now calls `logging.basicConfig(...)` at
+  import time so every module's logger actually reaches stdout.
 - **AI Advisor tab**: paste your own OpenAI API key (your ChatGPT/OpenAI
   subscription/credits - stored only in your browser's `localStorage`,
   forwarded per-request to `/api/ai/advice` and never written to disk
@@ -268,7 +312,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (139 tests)
+# Run the automated test suite (147 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)

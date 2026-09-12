@@ -77,10 +77,21 @@
       <option value="live">Binance (live, public WS)</option>
     </select>
   </label>
-  <label id="symbolField">Symbol
-    <input id="symbol" value="SYNTHETIC-DEMO" size="12" list="symbolsList" autocomplete="off" />
-    <datalist id="symbolsList"></datalist>
-  </label>
+  <span id="symbolField" style="position:relative;display:inline-flex;align-items:center;gap:4px;">
+    <label for="symbol">Symbol</label>
+    <input id="symbol" value="SYNTHETIC-DEMO" size="12" autocomplete="off" />
+    <!-- Deliberately a SIBLING of the <label>, not nested inside it: a
+         <label> forwards any click within its whole subtree to its
+         associated input (focusing it), so a suggestion box nested inside
+         one would re-focus #symbol immediately after a click - and the
+         focus handler below would then reopen the very dropdown that
+         click just picked from. Verified with a headless-browser check,
+         not just reasoning about it: clicking a suggestion left the
+         dropdown open until this was moved out from under the label. -->
+    <div id="symbolSuggestions" style="display:none;position:absolute;top:100%;left:0;z-index:50;
+      background:#1b2028;border:1px solid #2c3140;border-radius:6px;max-height:240px;overflow-y:auto;
+      min-width:180px;box-shadow:0 8px 20px rgba(0,0,0,.5);"></div>
+  </span>
   <label id="cyclesField">Cycles <input id="cycles" type="number" value="2" min="1" max="10" size="3" /></label>
   <label>Threshold <input id="threshold" type="number" value="60" min="0" max="100" size="3" /></label>
   <label id="tfField" style="display:none;">TF
@@ -197,9 +208,17 @@ function drawTradeLevels(signals) {
   });
 }
 
+// Structure events (BOS/CHoCH) accumulate for the entire history/session
+// with no cap from the backend - drawing all of them as text markers on a
+// long series stacks dozens of labels on top of each other into unreadable
+// noise (this was mistaken for the underlying wave/structure detection
+// itself being wrong; it's a chart-rendering limit, not a signal bug).
+// Only the most recent MAX_STRUCTURE_MARKERS are ever drawn.
+const MAX_STRUCTURE_MARKERS = 30;
+
 function markers(events, scenarios) {
   const m = [];
-  events.forEach(e => {
+  events.slice(-MAX_STRUCTURE_MARKERS).forEach(e => {
     m.push({ time: e.time, position: e.direction === 'UP' ? 'belowBar' : 'aboveBar',
              color: e.kind === 'CHoCH' ? '#facc15' : '#60a5fa', shape: e.direction === 'UP' ? 'arrowUp' : 'arrowDown',
              text: e.kind });
@@ -275,18 +294,29 @@ function renderDebugPanel(data) {
 
   const noteEl = document.getElementById('note');
   noteEl.classList.remove('error');
-  if (data.waiting_for_first_candle) {
+  if (data.error) {
+    // run_live() already tried Binance then Bybit before giving up - this
+    // is a real connection failure, not just "still waiting".
+    noteEl.style.display = 'block';
+    noteEl.classList.add('error');
+    noteEl.textContent = `Live connection failed: ${data.error}`;
+  } else if (data.waiting_for_first_candle) {
     noteEl.style.display = 'block';
     const trades = data.trades_received || 0;
+    const sourceMsg = data.live_source === 'bybit' ? ' (via Bybit, since Binance produced no data)' : '';
     const tradesMsg = trades > 0
-      ? `${trades} trade(s) received so far - market data IS flowing.`
-      : 'No trades received yet - if this stays at 0 for more than a few seconds, the WebSocket '
-        + 'connection likely failed (check that the symbol is correct and actively trading).';
+      ? `${trades} trade(s) received so far${sourceMsg} - market data IS flowing.`
+      : 'No trades received yet - Binance is tried first, then Bybit automatically after ~15s of '
+        + 'silence. If this stays at 0 much longer than that, check that the symbol is correct and '
+        + 'actively trading.';
     noteEl.textContent = 'Connected - no candle has closed yet for this timeframe. This is normal: '
       + 'a 5m/15m bar only appears once a full interval has actually elapsed after Start. ' + tradesMsg;
   } else if (data.note) {
     noteEl.style.display = 'block';
     noteEl.textContent = data.note;
+  } else if (data.live_source === 'bybit') {
+    noteEl.style.display = 'block';
+    noteEl.textContent = 'Live data is coming from Bybit (Binance produced no data for this symbol).';
   } else {
     noteEl.style.display = 'none';
   }
@@ -529,29 +559,71 @@ document.getElementById('askAi').addEventListener('click', async () => {
   }
 });
 
-// ---- symbol list (populates the datalist so users pick a real Binance
-// symbol instead of guessing a format). Best-effort: if this fails (e.g.
-// Binance 451-blocked, or the server is still asleep/cold-starting), the
-// symbol field just stays a plain text input - never a hard blocker. ----
+// ---- symbol autocomplete ----
+// A hand-rolled dropdown, NOT the native HTML datalist element this used
+// to rely on: Mobile Safari (iOS) accepts an input's `list` attribute
+// without any JS error but simply never renders the suggestion popup at
+// all - a long-standing WebKit gap, not a bug in this app's markup. Since
+// the whole point here is "type a letter, see matching coins" on a
+// *phone*, relying on that native element meant the feature silently did
+// nothing for exactly the audience it was built for. This dropdown is
+// plain absolutely-positioned HTML/JS so it works identically everywhere.
+let allSymbols = [];
+
+function renderSymbolSuggestions(filterText) {
+  const box = document.getElementById('symbolSuggestions');
+  const q = normalizeSymbol(filterText);
+  if (!q) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  const matches = allSymbols.filter(s => s.includes(q)).slice(0, 30);
+  if (!matches.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  box.innerHTML = matches.map(s => `<div class="symbol-suggestion" data-symbol="${s}"
+    style="padding:8px 10px;cursor:pointer;font-size:13px;border-bottom:1px solid #232733;">${s}</div>`).join('');
+  box.style.display = 'block';
+}
+
+const symbolInputEl = document.getElementById('symbol');
+const symbolSuggestionsEl = document.getElementById('symbolSuggestions');
+
+symbolInputEl.addEventListener('input', (e) => renderSymbolSuggestions(e.target.value));
+symbolInputEl.addEventListener('focus', (e) => { if (e.target.value) renderSymbolSuggestions(e.target.value); });
+
+symbolSuggestionsEl.addEventListener('click', (e) => {
+  const item = e.target.closest('.symbol-suggestion');
+  if (!item) return;
+  symbolInputEl.value = item.dataset.symbol;
+  symbolSuggestionsEl.style.display = 'none';
+});
+
+// mousedown (not blur) fires BEFORE the click on a suggestion, so it never
+// races the tap and hides the dropdown before the selection registers.
+document.addEventListener('mousedown', (e) => {
+  if (e.target !== symbolInputEl && !symbolSuggestionsEl.contains(e.target)) {
+    symbolSuggestionsEl.style.display = 'none';
+  }
+});
+
+// Populates `allSymbols` for the dropdown above. Best-effort: if this
+// fails (e.g. Binance/Bybit both unreachable, or the server is still
+// asleep/cold-starting), the symbol field just stays a plain text input -
+// never a hard blocker (see fallback_symbols.py server-side for why it
+// almost never actually comes back empty).
 async function loadSymbolList() {
-  const symbolInput = document.getElementById('symbol');
   try {
     const resp = await fetchWithTimeout('/api/symbols', {}, 20000);
     if (!resp.ok) {
       const detail = await parseErrorDetail(resp);
-      symbolInput.title = `Coin list unavailable: ${detail}`;
+      symbolInputEl.title = `Coin list unavailable: ${detail}`;
       console.warn('GET /api/symbols failed:', detail);
       return;
     }
     const data = await resp.json();
-    const listEl = document.getElementById('symbolsList');
-    listEl.innerHTML = data.symbols.map(s => `<option value="${s}"></option>`).join('');
+    allSymbols = data.symbols;
     const sourceNote = data.source === 'live' ? ''
       : data.source === 'bybit' ? ' (Binance unavailable - served from Bybit)'
       : ' (Binance & Bybit unavailable - showing a static common-symbols list)';
-    symbolInput.title = `${data.symbols.length} symbols loaded${sourceNote} - type to filter, or enter any symbol manually`;
+    symbolInputEl.title = `${data.symbols.length} symbols loaded${sourceNote} - type to filter, or enter any symbol manually`;
   } catch (e) {
-    symbolInput.title = `Coin list unavailable: ${e.message}`;
+    symbolInputEl.title = `Coin list unavailable: ${e.message}`;
     console.warn('GET /api/symbols failed:', e);
   }
 }

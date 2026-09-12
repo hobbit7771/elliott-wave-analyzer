@@ -5,6 +5,7 @@ import pytest
 
 from t3_engine.common.types import Timeframe
 from t3_engine.market_data.bybit_rest_client import BybitAPIError, BybitFuturesREST
+from t3_engine.market_data.bybit_ws_client import BybitFuturesWebSocketClient, parse_taker_side_is_buyer_maker
 from t3_engine.market_data.rest_client import BinanceFuturesREST
 from t3_engine.market_data.ws_client import BinanceFuturesWebSocketClient
 
@@ -202,12 +203,16 @@ def test_bybit_raises_on_http_error():
 class FakeWSConnection:
     def __init__(self, messages):
         self._messages = messages
+        self.sent = []
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
         return False
+
+    async def send(self, message):
+        self.sent.append(message)
 
     def __aiter__(self):
         return self._gen()
@@ -265,5 +270,70 @@ async def test_ws_reconnect_backoff_on_error_is_raised_in_test_mode():
 
     client = BinanceFuturesWebSocketClient(symbols=["BTCUSDT"], streams=["aggTrade"], on_message=on_message,
                                             connect_fn=bad_connect)
+    with pytest.raises(ConnectionError):
+        await client.run(max_iterations=1)
+
+
+# ---- Bybit WebSocket client (live-data fallback, see live_loop.py's run_live) ----
+
+def test_parse_taker_side_is_buyer_maker_matches_binance_semantics():
+    # Bybit S="Sell" means the taker sold -> same real event as Binance's
+    # m=True ("buyer is maker", i.e. the taker sold); S="Buy" -> m=False.
+    assert parse_taker_side_is_buyer_maker("Sell") is True
+    assert parse_taker_side_is_buyer_maker("Buy") is False
+
+
+@pytest.mark.asyncio
+async def test_bybit_ws_subscribes_on_connect():
+    messages = [json.dumps({"topic": "publicTrade.BTCUSDT",
+                             "data": [{"T": 1620000000000, "s": "BTCUSDT", "S": "Buy", "p": "100.5", "v": "2.0"}]})]
+    conn_holder = {}
+
+    def connect(url):
+        conn = FakeWSConnection(messages)
+        conn_holder["conn"] = conn
+        return conn
+
+    received = []
+
+    async def on_message(item):
+        received.append(item)
+
+    client = BybitFuturesWebSocketClient(symbols=["BTCUSDT"], on_message=on_message, connect_fn=connect)
+    await client.run(max_iterations=1)
+
+    assert len(conn_holder["conn"].sent) == 1
+    sent = json.loads(conn_holder["conn"].sent[0])
+    assert sent == {"op": "subscribe", "args": ["publicTrade.BTCUSDT"]}
+    assert len(received) == 1
+    assert received[0]["p"] == "100.5"
+
+
+@pytest.mark.asyncio
+async def test_bybit_ws_ignores_non_trade_topics():
+    messages = [
+        json.dumps({"success": True, "op": "subscribe"}),  # subscribe ack, not a trade
+        json.dumps({"topic": "publicTrade.BTCUSDT", "data": [{"T": 1, "s": "BTCUSDT", "S": "Sell", "p": "1", "v": "1"}]}),
+    ]
+    received = []
+
+    async def on_message(item):
+        received.append(item)
+
+    client = BybitFuturesWebSocketClient(symbols=["BTCUSDT"], on_message=on_message,
+                                          connect_fn=fake_connect_factory(messages))
+    await client.run(max_iterations=2)
+    assert len(received) == 1
+
+
+@pytest.mark.asyncio
+async def test_bybit_ws_reconnect_backoff_on_error_is_raised_in_test_mode():
+    async def on_message(item):
+        pass
+
+    def bad_connect(url):
+        raise ConnectionError("boom")
+
+    client = BybitFuturesWebSocketClient(symbols=["BTCUSDT"], on_message=on_message, connect_fn=bad_connect)
     with pytest.raises(ConnectionError):
         await client.run(max_iterations=1)
