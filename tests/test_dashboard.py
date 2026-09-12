@@ -91,6 +91,25 @@ def test_index_serves_html():
     assert "lightweight-charts" in resp.text
 
 
+def test_index_and_service_worker_are_never_cached():
+    """A stale HTTP-cached copy of either file silently defeats the
+    service-worker-update mechanism (the browser only detects a new SW by
+    diffing sw.js bytes it must actually re-fetch) - this was observed in
+    production: server logs showed fresh 200s reaching a phone seconds
+    after deploy while its already-open tab kept showing old UI text."""
+    resp = client.get("/")
+    assert "no-store" in resp.headers["cache-control"]
+
+    resp = client.get("/sw.js")
+    assert "no-store" in resp.headers["cache-control"]
+    assert "controllerchange" not in resp.text  # that logic belongs in index.html, not the worker itself
+
+
+def test_index_reloads_when_a_new_service_worker_takes_control():
+    resp = client.get("/")
+    assert "controllerchange" in resp.text
+
+
 def test_run_backtest_synthetic_returns_real_candles_and_metrics():
     resp = client.get("/api/run", params={"source": "synthetic", "cycles": 1, "threshold": 50})
     assert resp.status_code == 200

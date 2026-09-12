@@ -387,9 +387,23 @@ def dataclass_metrics_to_dict(m) -> dict:
     }
 
 
+# Both routes below MUST NOT be cacheable by anything sitting between the
+# browser and this process (the browser's own HTTP cache, a carrier/ISP
+# compression proxy, etc.) - a stale HTTP-cached copy of either file would
+# silently defeat the service-worker-update mechanism entirely, since the
+# browser only detects a new service worker by diffing sw.js's bytes, and
+# can't diff bytes it never actually re-fetched from the origin. This was
+# observed in practice: server logs showed a phone fetching both files
+# successfully seconds after a deploy went live, yet the already-open tab
+# kept showing old UI text - explicit no-store headers plus the
+# controllerchange auto-reload in index.html (see its <script>) close both
+# ends of that gap.
+_NO_CACHE_HEADERS = {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"}
+
+
 @app.get("/")
 def index():
-    return FileResponse(os.path.join(_STATIC_DIR, "index.html"))
+    return FileResponse(os.path.join(_STATIC_DIR, "index.html"), headers=_NO_CACHE_HEADERS)
 
 
 @app.get("/sw.js")
@@ -397,7 +411,8 @@ def service_worker():
     # Served from the root path (not /static/sw.js) so its default scope
     # covers the whole app - a service worker registered from /static/
     # could only ever control /static/* requests.
-    return FileResponse(os.path.join(_STATIC_DIR, "sw.js"), media_type="application/javascript")
+    return FileResponse(os.path.join(_STATIC_DIR, "sw.js"), media_type="application/javascript",
+                         headers=_NO_CACHE_HEADERS)
 
 
 app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")

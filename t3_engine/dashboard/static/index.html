@@ -130,6 +130,21 @@
 <script>
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+  // Without this, a tab/PWA session that was already open when a new
+  // version deploys keeps running the OLD page's JS in memory even after
+  // the new service worker takes over network requests in the background
+  // - the browser doesn't re-execute a page's script just because a new
+  // SW activated. This was observed in practice: server logs showed a
+  // fresh deploy correctly serving updated files to a phone within
+  // seconds, while the already-open tab kept displaying old UI text,
+  // because nothing ever told that tab to reload. `controllerchange`
+  // fires exactly when the new SW takes control - reload once, then.
+  let reloadedForNewWorker = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (reloadedForNewWorker) return;
+    reloadedForNewWorker = true;
+    window.location.reload();
+  });
 }
 
 const chartEl = document.getElementById('chart');
