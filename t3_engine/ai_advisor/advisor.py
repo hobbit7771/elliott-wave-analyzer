@@ -591,29 +591,104 @@ def request_wave_count(api_key: str, pivots: List[Dict[str, Any]], direction: st
 
 
 def ping(api_key: str, model: str = DEFAULT_MODEL, base_url: Optional[str] = None,
-         client: Optional[httpx.Client] = None, timeout: float = 60.0) -> Dict[str, Any]:
-    """One tiny round trip, to separate "the setup is wrong" from "this
-    particular job is too slow".
+         client: Optional[httpx.Client] = None,
+         timeout: float = DEFAULT_READ_TIMEOUT) -> Dict[str, Any]:
+    """One round trip, to separate "the setup is wrong" from "this model is
+    slow". Those look identical from the dashboard - a wrong key, a wrong
+    URL, a retired model id and a model that thinks for four minutes all
+    present as "nothing happened, then an error".
 
-    Worth its own function because those two failures look identical from
-    the dashboard: a wrong key, a wrong URL, a retired model id and a model
-    that simply queues for four minutes all present as "nothing happened".
-    This asks for a single token, so anything other than a prompt answer is
-    a configuration problem rather than a patience problem.
+    It STREAMS, and returns the moment the first byte of the answer arrives
+    instead of waiting for the whole thing. That distinction is the entire
+    point here. A non-streaming check against a reasoning model waits out
+    the model's whole thinking phase before it can say anything, so the one
+    call meant to diagnose slowness was itself the call most likely to time
+    out - which is exactly what happened in production: a 60s timeout on a
+    one-token request whose connection was fine.
 
-    It also reports whether the model advertises tool calling, which the AI
-    Analyst requires and many free models lack."""
+    What comes back is a diagnosis rather than a yes/no: the time to the
+    first token is the number that decides whether an agent run is feasible
+    at all, since the analyst pays it once per step."""
     payload = {
+        # No max_tokens cap: on most APIs a reasoning model's thinking
+        # counts against it, so a small cap can end the generation before
+        # any visible token exists - indistinguishable from a hang.
         "messages": [{"role": "user", "content": "Reply with the single word: ok"}],
-        "max_tokens": 16,
         "temperature": 0,
     }
-    data = _post(api_key, model, payload, client, timeout, base_url, stream=False)
-    message = _message_of(data)
-    return {
-        "ok": True,
-        "model": data.get("model") or model,
-        "endpoint": chat_url(base_url),
-        "answer": (message.get("content") or "").strip()[:200],
-        "finish_reason": _finish_reason(data),
-    }
+    if not api_key:
+        raise AIAdvisorError(f"No {PROVIDER_NAME} API key provided "
+                             "(get one at https://build.nvidia.com)")
+
+    url = chat_url(base_url)
+    body = {**payload, "model": model, "stream": True}
+    http_client = client or httpx.Client(timeout=build_timeout(timeout))
+    owns_client = client is None
+    started = time.monotonic()
+    try:
+        with http_client.stream("POST", url, headers=_headers(api_key, True), json=body) as resp:
+            if resp.status_code != 200:
+                resp.read()
+                raise AIAdvisorError(_api_error_message(resp, model))
+            for raw in resp.iter_lines():
+                line = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+                line = line.strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[len("data:"):].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(chunk, dict) and chunk.get("error"):
+                    error = chunk["error"]
+                    message = error.get("message") if isinstance(error, dict) else str(error)
+                    raise AIAdvisorError(f"{PROVIDER_NAME} returned an error for '{model}': {message}")
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                text = delta.get("content") or ""
+                thinking = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                if not text and not thinking:
+                    continue
+                elapsed = time.monotonic() - started
+                # Stop here. The question was "does this setup produce
+                # tokens", and it just did; waiting for the rest only risks
+                # the timeout this check exists to diagnose.
+                return {
+                    "ok": True,
+                    "model": chunk.get("model") or model,
+                    "endpoint": url,
+                    "answer": (text or thinking)[:200],
+                    "reasoning_first": bool(thinking and not text),
+                    "seconds_to_first_token": round(elapsed, 1),
+                    "advice": _speed_advice(elapsed),
+                }
+    except httpx.RequestError as exc:
+        raise AIAdvisorError(_transport_error_message(exc, url, timeout))
+    finally:
+        if owns_client:
+            http_client.close()
+
+    raise AIAdvisorError(
+        f"{PROVIDER_NAME} accepted the request for '{model}' and closed the stream without sending "
+        "a single token. The key, the URL and the model id are therefore fine - this model produced "
+        "nothing. Try another model id."
+    )
+
+
+def _speed_advice(seconds: float) -> str:
+    """Turn the measurement into the decision it informs. The analyst pays
+    the time-to-first-token once per step, so this number decides whether a
+    multi-step run is feasible at all."""
+    if seconds < 5:
+        return "Fast enough for a full analyst run at any step budget."
+    if seconds < 20:
+        return (f"About {seconds:.0f}s before this model starts answering, so a 10-step analyst run "
+                "is several minutes. Workable, but keep the step budget modest.")
+    return (f"{seconds:.0f}s before this model even starts answering. The analyst pays that once per "
+            "step, so a 10-step run would take far longer than the request budget allows. Use a "
+            "faster model for the analyst, lower the reasoning effort, or cut the step budget to 4-6.")
