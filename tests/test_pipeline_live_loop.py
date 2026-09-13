@@ -290,3 +290,55 @@ def test_candles_closing_after_the_count_arrives_are_traded_on_it():
     signal = tf_engine.signals[0]
     assert signal.wave_label.value == "5"
     assert signal.stop_loss is not None and signal.take_profits
+
+
+def test_every_take_profit_leg_and_stop_is_recorded_as_it_fills(monkeypatch):
+    """The screen that prompted this: a position with two of its four
+    take-profit legs filled read as "open: 1, closed: 0". on_price_update
+    already returned a reason for every fill and the loop threw it away."""
+    from t3_engine.ai_advisor import trade_journal
+    from t3_engine.backtest.synthetic_data import generate_synthetic_series
+    recorded = []
+    monkeypatch.setattr(trade_journal, "record", lambda event, **k: recorded.append(event))
+
+    candles = generate_synthetic_series(num_cycles=2)
+    engine = LiveTradingEngine(symbol="TESTUSDT", trading_timeframes=(Timeframe.M5,),
+                               entry_confidence_threshold=1.0, log_dir="/tmp/t3_test_logs")
+    engine.seed_history(Timeframe.M5, candles[:80])
+    engine.apply_ai_analysis(Timeframe.M5, _ai_analysis(candles[:80]))
+    engine.seed_history(Timeframe.M5, candles[80:])
+
+    assert engine.fills, "an entry and its fills should be recorded"
+    assert engine.fills[0]["event"] == "ENTRY"
+    # and the same events reached the durable journal
+    assert [e.event for e in recorded] == [f["event"] for f in engine.fills]
+    assert all(e.symbol == "TESTUSDT" and e.timeframe == "5m" for e in recorded)
+    # each one is tagged with the count that planned it, so "how did that
+    # count do" is answerable rather than inferred
+    assert all(e.count_fingerprint for e in recorded)
+
+
+def test_each_recorded_fill_carries_its_own_share_of_the_pnl(monkeypatch):
+    """Take-profit legs are partial closes: the position's running total
+    grows with each one. Journalling that total as the event's own P&L
+    would count the same money several times."""
+    from t3_engine.ai_advisor import trade_journal
+    from t3_engine.backtest.synthetic_data import generate_synthetic_series
+    recorded = []
+    monkeypatch.setattr(trade_journal, "record", lambda event, **k: recorded.append(event))
+
+    candles = generate_synthetic_series(num_cycles=2)
+    engine = LiveTradingEngine(symbol="TESTUSDT", trading_timeframes=(Timeframe.M5,),
+                               entry_confidence_threshold=1.0, log_dir="/tmp/t3_test_logs")
+    engine.seed_history(Timeframe.M5, candles[:80])
+    engine.apply_ai_analysis(Timeframe.M5, _ai_analysis(candles[:80]))
+    engine.seed_history(Timeframe.M5, candles[80:])
+
+    by_position = {}
+    for event in recorded:
+        by_position.setdefault(event.position_id, []).append(event)
+    for events in by_position.values():
+        # the per-event shares add up to the position's running total
+        # (each share is stored rounded, so compare with that tolerance)
+        assert sum(e.realized_pnl for e in events) == pytest.approx(
+            events[-1].position_realized_pnl, abs=1e-5)

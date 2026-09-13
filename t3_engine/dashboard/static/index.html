@@ -717,6 +717,29 @@ function aiAnalysisRows(data) {
         : '');
 }
 
+// Every stop and take-profit LEG that filled, newest first. This is the
+// thing that was missing entirely: the chart showed TP1 and TP2 crossed
+// and the panel below could only say "open positions: 1".
+function fillsTableHtml(fills) {
+  if (!fills || !fills.length) {
+    return '<div style="margin-top:12px;font-weight:600;">Fills</div>'
+      + '<div class="note">No take-profit or stop has filled yet.</div>';
+  }
+  const rows = fills.slice().reverse().map(f => {
+    const pnl = f.position_realized_pnl ?? 0;
+    const kind = f.event === 'TP_HIT' ? (f.label || 'TP')
+      : f.event === 'STOP_LOSS' ? 'STOP' : f.event;
+    const cls = f.event === 'STOP_LOSS' ? 'down' : (f.event === 'TP_HIT' ? 'up' : '');
+    return `<tr><td><span class="pill ${cls}">${escapeHtml(kind)}</span></td>`
+      + `<td>${escapeHtml(String(f.wave_label || ''))}</td>`
+      + `<td>${fmtTime(Math.round((f.at || 0) / 1000))}</td>`
+      + `<td>${f.price != null ? f.price.toFixed(4) : '—'}</td>`
+      + `<td>${(pnl > 0 ? '+' : '') + pnl.toFixed(2)}</td></tr>`;
+  }).join('');
+  return '<div style="margin-top:12px;font-weight:600;">Fills</div>'
+    + `<table><tr><th>Event</th><th>Wave</th><th>When</th><th>Price</th><th>Realized</th></tr>${rows}</table>`;
+}
+
 function renderDebugPanel(data) {
   const primary = data.scenarios[0];
   const debugEl = document.getElementById('debug');
@@ -771,12 +794,24 @@ function renderDebugPanel(data) {
     });
     html += '</table>';
   } else {
+    const rec = data.trade_record || {};
+    // Realized money on positions that are still OPEN was invisible: a
+    // trade with two of its four take-profit legs filled read as
+    // "open: 1, closed: 0" and nothing else. The legs are money, and the
+    // record below is what the AI is told on its next run.
+    const openRealized = (data.open_positions || [])
+      .reduce((sum, p) => sum + (p.realized_pnl || 0), 0);
     html += `<div style="margin-top:12px;font-weight:600;">Live</div><table><tr><th>Metric</th><th>Live</th></tr>
       <tr><td>Open positions</td><td>${(data.open_positions || []).length}</td></tr>
       <tr><td>Closed trades</td><td>${(data.closed_positions || []).length}</td></tr>
+      <tr><td>Take-profit legs filled</td><td>${rec.take_profits_hit ?? 0}</td></tr>
+      <tr><td>Stops hit</td><td>${rec.stops_hit ?? 0}</td></tr>
+      <tr><td>Realized (open trades)</td><td>${openRealized.toFixed(2)}</td></tr>
+      <tr><td>Realized (recorded)</td><td>${(rec.realized_pnl ?? 0).toFixed(2)}</td></tr>
       <tr><td>Equity</td><td>${(data.equity ?? 0).toFixed(2)}</td></tr>
       <tr><td>Trading enabled</td><td>${data.trading_enabled}</td></tr>
       </table>`;
+    html += fillsTableHtml(data.fills);
   }
   metricsEl.innerHTML = html;
 
@@ -1797,7 +1832,34 @@ function applyAnalystResult(data) {
              + data.projection.expected_bars + ' of them' : ''}. `
         + `Computed by the server from the waves already counted, not supplied by the model.</div>` : '')
     + (data.error ? `<div class="note error" style="margin-top:8px;">${escapeHtml(data.error)}</div>` : '')
-    + (data.note ? `<div class="hint">${escapeHtml(data.note)}</div>` : '');
+    + (data.note ? `<div class="hint">${escapeHtml(data.note)}</div>` : '')
+    + usageHtml(data.usage);
+}
+
+// What this run consumed and, where the provider publishes a price for the
+// model, what it cost — plus what that same run would cost repeated hourly
+// or every five minutes. The run rate is named rather than assumed:
+// continuous monitoring IS a run rate, and four analyses an hour is a very
+// different bill from twelve.
+function usageHtml(usage) {
+  if (!usage || !usage.total_tokens) return '';
+  const rate = r => r ? `$${r.per_run.toFixed(4)}/run · $${r.per_day.toFixed(2)}/day · `
+    + `$${r.per_month.toFixed(2)}/month` : '';
+  let html = `<div class="row"><span class="k">Tokens</span><span class="v">`
+    + `${usage.total_tokens.toLocaleString()} in ${usage.calls} call(s)`
+    + `${usage.cached_tokens ? ' · ' + usage.cached_tokens.toLocaleString() + ' cached' : ''}`
+    + `</span></div>`;
+  if (usage.cost_usd !== undefined) {
+    html += `<div class="row"><span class="k">This run cost</span>`
+      + `<span class="v">$${usage.cost_usd.toFixed(4)}</span></div>`
+      + `<div class="hint">Repeated once an hour: ${rate(usage.if_run_hourly)}.<br>`
+      + `Repeated every 5 minutes: ${rate(usage.if_run_every_5m)}.<br>`
+      + `Prices read from the provider's own model catalogue, not hardcoded.</div>`;
+  } else if (usage.pricing_known === false) {
+    html += `<div class="hint">The provider publishes no price for this model, so no cost is `
+      + `shown — a made-up number would look like a measurement.</div>`;
+  }
+  return html;
 }
 
 async function watchAnalystJob(jobId) {
@@ -1917,6 +1979,18 @@ fetch('/api/ai/config').then(r => r.json()).then(cfg => {
       + 'overrides it and stays in this browser only.';
   }
 }).catch(() => {});
+
+// Whether saved counts survive a deploy. The default SQLite file lives on
+// the container filesystem, which the host replaces on every deploy -
+// every labelled chart is erased by the next push. That has to be said out
+// loud here, because the only other way to learn it is to lose the work.
+fetch('/api/health').then(r => r.json()).then(h => {
+  if (h.storage_durable === false && h.storage_note) {
+    const el = document.getElementById('serverKeyHint');
+    el.innerHTML += `<div class="note error" style="margin-top:6px;">${escapeHtml(h.storage_note)}</div>`;
+  }
+}).catch(() => {});
+
 document.getElementById('saveKey').addEventListener('click', () => {
   localStorage.setItem(KEY_STORAGE, document.getElementById('aiKey').value.trim());
   localStorage.setItem(MODEL_STORAGE, aiModel());

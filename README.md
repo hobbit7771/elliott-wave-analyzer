@@ -261,6 +261,49 @@ desktop web page:
   saves all four; before this they vanished from that tab the moment it
   was reopened. A new run now **adds** to the list rather than replacing
   it.
+- **Every stop and take-profit leg is recorded, and the agent is told.**
+  A take-profit is a PARTIAL close: a position with two of its four legs
+  filled stays open, and the panel could only say "open positions: 1,
+  closed trades: 0" while two real fills sat inside it. `on_price_update`
+  had been returning a reason for every fill and the loop discarded it.
+  Now:
+  - `backtest/engine.py` surfaces each fill through an `on_fill` hook, and
+    the live loop writes it to `ai_advisor/trade_journal.py` - entry, each
+    take-profit leg, the stop, the close - tagged with the AI count that
+    planned it. The dashboard shows a Fills table plus realized P&L on
+    still-open trades.
+  - `stops_hit` counts stop EXITS, not losses: the runner leg exits on a
+    trailing structural stop and is often the most profitable of the
+    three. Wins and losses are decided by the sign of the money.
+  - On its next run the analyst's opening brief carries one factual line -
+    how many trades previous counts of this chart opened, how many legs
+    filled, how many stops hit, and the realized total. It is phrased as
+    history and carries **no instruction**: "your last count lost, so try
+    something else" is how a model is talked into fitting its next answer
+    to the last result instead of to the chart.
+- **What a run costs, measured rather than guessed.** The provider's usage
+  trailer was being dropped on the floor by the SSE reader;
+  `stream_options: {include_usage: true}` now asks for it and
+  `ai_advisor/usage.py` sums tokens across the dozen calls one run makes.
+  Prices are **read from the provider's own `/v1/models` catalogue**, never
+  hardcoded (a price typed into this repo would be wrong the first time
+  the provider changed it, and wrong silently). Cached input tokens are
+  billed at the published cache-read rate, which matters a lot here: an
+  agent loop resends its conversation every step, which is exactly the
+  shape that hits a prompt cache. The analyst panel shows the run's tokens
+  and dollar cost, and what the same run would come to repeated hourly and
+  every five minutes - the run rate is **named, not assumed**, because
+  continuous monitoring is nothing but a run rate.
+- **Saved work survives a deploy - once a real database is configured.**
+  The default `T3_DATABASE_URL` is a SQLite file on the container
+  filesystem, and that filesystem is replaced on every deploy: every
+  labelled chart and every journalled fill is erased by the next push.
+  `database/session.py` gains `is_durable()` and `normalize_database_url()`
+  (providers print `postgres://`, which SQLAlchemy 2 refuses outright, so
+  the string they give you is rewritten rather than left as a trap), the
+  Postgres driver is in requirements, and both `/api/health` and the AI tab
+  say plainly when storage is ephemeral. Point `T3_DATABASE_URL` at a
+  Postgres database and nothing is lost on deploy.
 - **Symbol picker**: the symbol field is backed by a custom JS dropdown
   (not the native HTML `<datalist>` element - see below for why) fed by
   `GET /api/symbols` (cached in-process for an hour) - type any letter and

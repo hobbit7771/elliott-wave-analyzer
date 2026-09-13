@@ -27,3 +27,10 @@ pytest-asyncio==1.4.0
 # work with our ASGI app). uvicorn alone is all `run_dashboard.py` and
 # `Procfile` need - this is here purely for Render compatibility.
 gunicorn==23.0.0
+
+# PostgreSQL driver. Only needed when T3_DATABASE_URL points at Postgres,
+# which is how saved analyses and the trade journal survive a redeploy:
+# the default SQLite file lives on the container filesystem, and that
+# filesystem is replaced every time the service deploys. See
+# database/session.py's is_durable().
+psycopg[binary]==3.2.12

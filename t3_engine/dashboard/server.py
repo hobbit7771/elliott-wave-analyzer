@@ -57,9 +57,10 @@ from t3_engine.ai_advisor.advisor import (
     resolve_api_key,
 )
 from t3_engine.ai_advisor.analyst import DEFAULT_MAX_STEPS, MAX_MAX_STEPS, run_analyst
-from t3_engine.ai_advisor import analysis_store, jobs
+from t3_engine.ai_advisor import analysis_store, jobs, trade_journal
 from t3_engine.ai_advisor.multi_timeframe import run_multi_timeframe
 from t3_engine.ai_advisor.target_odds import annotate_projection
+from t3_engine.ai_advisor.usage import UsageMeter, cost_of, fetch_pricing, monthly_estimate
 from t3_engine.ai_advisor.relational import (
     DEFAULT_RELATIONAL_MODEL,
     DEFAULT_RELATIONAL_URL,
@@ -92,6 +93,7 @@ from t3_engine.fibonacci.calculator import (
     wave5_targets,
     wave_c_targets,
 )
+from t3_engine.database.session import is_durable
 from t3_engine.market_data.bybit_rest_client import BybitAPIError, BybitFuturesREST
 from t3_engine.market_data.fallback_symbols import FALLBACK_USDT_PERPETUAL_SYMBOLS
 from t3_engine.pipeline.live_loop import LiveTradingEngine
@@ -161,12 +163,24 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-033"
+BUILD_VERSION = "BUILD-CHECK-034"
 
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "build": BUILD_VERSION}
+    durable = is_durable(analysis_store.DEFAULT_DATABASE_URL)
+    return {
+        "status": "ok", "build": BUILD_VERSION,
+        # Saved counts and the trade journal live in this database. On the
+        # default SQLite file that is the CONTAINER filesystem, which is
+        # replaced on every deploy - so every labelled chart is erased by
+        # the next push. Reported rather than left to be discovered.
+        "storage_durable": durable,
+        "storage_note": "" if durable else
+            "Saved analyses and the trade journal are in a SQLite file on the container "
+            "filesystem and will be erased by the next deploy. Set T3_DATABASE_URL to a "
+            "Postgres URL to keep them.",
+    }
 
 
 # --- symbol list cache: Bybit lists hundreds of linear perpetual symbols
@@ -500,6 +514,12 @@ def live_state(symbol: str = Query(...), timeframe: str = Query("5m")):
             tf_engine.scenario_engine.scenarios[0] if tf_engine.scenario_engine.scenarios else None
         ),
         "ai_only": engine.ai_only,
+        # Every stop and take-profit LEG that filled, in order. Without
+        # this a position with two of its four legs filled showed as
+        # "open: 1, closed: 0" and nothing else - the fills were real and
+        # nothing on screen said so.
+        "fills": [f for f in engine.fills if f["timeframe"] == tf.value][-50:],
+        "trade_record": trade_journal.summary_for("bybit", symbol, tf.value),
         "seeded_candles": engine.seeded.get(tf, 0),
         # The saved AI analysis for this exact series, so a live chart opens
         # with the model's markup already on it instead of a bare stream.
@@ -725,6 +745,36 @@ MTF_CACHE_KEY = "mtf-verdict"
 TIMEFRAME_ORDER = {"1m": 0, "5m": 1, "15m": 2, "1h": 3, "4h": 4}
 
 
+def run_cost(usage: Dict, api_key: str, model: str, base_url: str) -> Dict:
+    """Token counts plus a dollar figure when one can be established.
+
+    The estimate below is deliberately parametric: it says what ONE run
+    cost and what a given number of runs per hour would come to, and it
+    names the run rate rather than assuming one silently. Continuous
+    monitoring is just a run rate - four analyses an hour is a different
+    bill from forty, and only the caller knows which they mean."""
+    out = dict(usage or {})
+    if not out.get("total_tokens"):
+        return out
+    meter = UsageMeter(
+        calls=out.get("calls", 0), prompt_tokens=out.get("prompt_tokens", 0),
+        completion_tokens=out.get("completion_tokens", 0),
+        reasoning_tokens=out.get("reasoning_tokens", 0),
+        cached_tokens=out.get("cached_tokens", 0),
+    )
+    pricing = fetch_pricing(api_key, model, base_url)
+    cost = cost_of(meter, pricing)
+    out["pricing_known"] = pricing is not None
+    if cost is not None:
+        out["cost_usd"] = round(cost, 6)
+        # One representative rate, stated as an assumption rather than a
+        # prediction: a 5m chart produces a new candle twelve times an hour,
+        # and re-analysing on every one of them is the busiest sane cadence.
+        out["if_run_hourly"] = monthly_estimate(cost, 1.0)
+        out["if_run_every_5m"] = monthly_estimate(cost, 12.0)
+    return out
+
+
 def run_multi_work(api_key: str, source: str, symbol: str, limit: int, cycles: int, model: str,
                    base_url: str, timeout: float, thinking: str, max_steps: int, force: bool,
                    on_progress=None) -> Dict:
@@ -772,10 +822,15 @@ def run_analyst_work(api_key: str, source: str, symbol: str, timeframe: str, lim
     """One analyst run, as a plain function - see run_multi_work."""
     candles, symbol, tf = load_candles(source, symbol, timeframe, limit, cycles)
 
+    # What the paper trades opened from previous counts of THIS chart
+    # actually did. Stated to the agent as history, never as a steer - see
+    # trade_journal.brief_line.
+    record = trade_journal.summary_for(source, symbol, tf.value)
     result = run_analyst(resolve_api_key(api_key), candles, tf, symbol=symbol, model=model,
                          max_steps=max_steps, base_url=base_url, timeout=timeout,
                          reasoning_effort=reasoning_effort,
-                         thinking=parse_thinking(thinking), on_progress=on_progress)
+                         thinking=parse_thinking(thinking), on_progress=on_progress,
+                         record_line=trade_journal.brief_line(record, symbol, tf.value))
 
     projection = annotate_projection(result.projection, candles)
     # Save it under the SAME key the multi-timeframe view and the live
@@ -806,6 +861,11 @@ def run_analyst_work(api_key: str, source: str, symbol: str, timeframe: str, lim
         "summary": result.summary,
         "reasoning": result.reasoning,
         "steps_used": result.steps_used,
+        # What this run consumed and, when the provider publishes a price
+        # for this model, what it cost. Read from the catalogue, never
+        # hardcoded - a price typed into this repo would be wrong the first
+        # time the provider changed it, and wrong silently.
+        "usage": run_cost(result.usage, resolve_api_key(api_key), result.model, base_url),
         "steps": [{"tool": call.name, "args": call.args, "result": call.result_summary}
                   for call in result.steps],
         # The conversation itself. "Why did it stop there" is unanswerable

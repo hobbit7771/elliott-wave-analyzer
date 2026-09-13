@@ -45,6 +45,7 @@ from __future__ import annotations
 import logging
 from typing import AsyncIterator, Dict, List
 
+from t3_engine.ai_advisor import trade_journal as journal
 from t3_engine.ai_advisor.ai_trading import analysis_fingerprint, scenario_from_analysis
 from t3_engine.backtest.engine import BacktestConfig, BacktestEngine
 from t3_engine.candle_builder.aggregator import MultiTimeframeCandleBuilder, Trade
@@ -109,6 +110,58 @@ class LiveTradingEngine:
         # fingerprint that identifies it - so "has the agent changed its
         # mind" is answerable without re-deriving the count every poll.
         self.ai_counts: Dict[Timeframe, str] = {}
+        # Every fill, in order, as it happened. The in-memory half of the
+        # trade journal: the dashboard reads this, and trade_journal writes
+        # the same events to the database so they survive a restart.
+        self.fills: List[Dict] = []
+        # Realized P&L already journalled per position, so each event can
+        # carry ITS share rather than the running total counted again.
+        self._last_realized: Dict[str, float] = {}
+        for timeframe, engine in self.engines.items():
+            engine.on_fill = self._make_fill_recorder(timeframe)
+
+    def _make_fill_recorder(self, timeframe: Timeframe):
+        """Bind one timeframe's fills to the journal.
+
+        A take-profit leg filling is the moment the count was RIGHT about
+        something, and a stop is the moment it was wrong. Until this
+        existed both went unrecorded: a position with two of four legs
+        filled read as "open: 1, closed: 0" and the agent was asked to
+        label the same chart again knowing nothing about either."""
+        def record(position, reason: str, price: float, candle: Candle) -> None:
+            event, label = reason, None
+            if reason.startswith("TP_HIT:"):
+                event, label = "TP_HIT", reason.split(":", 1)[1]
+            entry = {
+                "event": event, "label": label, "price": price,
+                "timeframe": timeframe.value, "position_id": position.position_id,
+                "wave_label": position.wave_label.value if position.wave_label else None,
+                "side": position.side.value,
+                "quantity": position.initial_quantity if event == "ENTRY" else position.quantity,
+                "position_realized_pnl": round(position.realized_pnl, 6),
+                "at": candle.close_time,
+                "closed": position.closed,
+            }
+            self.fills.append(entry)
+            logger.info("[live %s] %s %s @ %s (realized %+g)", self.symbol, timeframe.value,
+                        reason, price, position.realized_pnl)
+            journal.record(journal.TradeEvent(
+                source=self.live_source, symbol=self.symbol, timeframe=timeframe.value,
+                position_id=position.position_id, event=event, label=label,
+                wave_label=entry["wave_label"], side=entry["side"], price=price,
+                quantity=entry["quantity"],
+                # On a partial leg the position's running total is what is
+                # known; the per-event share is the change since the last
+                # recorded event for this position.
+                realized_pnl=round(position.realized_pnl - self._last_realized.get(
+                    position.position_id, 0.0), 6),
+                position_realized_pnl=round(position.realized_pnl, 6),
+                equity=self.engines[timeframe].risk_manager.equity,
+                count_fingerprint=self.ai_counts.get(timeframe, ""),
+                at=candle.close_time,
+            ))
+            self._last_realized[position.position_id] = position.realized_pnl
+        return record
 
     def apply_ai_analysis(self, timeframe: Timeframe, analysis) -> bool:
         """Hand this timeframe's engine the agent's current count.

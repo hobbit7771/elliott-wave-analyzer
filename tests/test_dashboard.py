@@ -603,6 +603,7 @@ class _FakeAnalystResult:
         self.steps = []
         self.model = "~openai/gpt-astra-latest"
         self.steps_used = 3
+        self.usage = {}
         self.finished = True
         self.note = note
 
@@ -1592,3 +1593,37 @@ def test_index_stops_repainting_the_whole_live_series_every_poll():
     assert "candleSeries.update(c)" in resp.text
     assert "overlaySignature" in resp.text
     assert "Saved counts" in resp.text
+
+
+def test_health_says_whether_saved_work_survives_a_deploy():
+    """The default SQLite file is on the container filesystem, which the
+    host replaces on every deploy. The only other way to learn that is to
+    lose the work."""
+    body = client.get("/api/health").json()
+    assert "storage_durable" in body
+    if not body["storage_durable"]:
+        assert "deploy" in body["storage_note"]
+
+
+def test_live_state_reports_fills_and_the_recorded_record(tmp_path, monkeypatch):
+    _seed_store(tmp_path, monkeypatch)
+    from t3_engine.ai_advisor import trade_journal
+    monkeypatch.setattr(trade_journal, "_factory", None)
+    engine, _ = _live_engine_for("FILLSUSDT", monkeypatch)
+    engine.fills.append({"event": "TP_HIT", "label": "TP1", "price": 6.19, "timeframe": "5m",
+                         "position_id": "p1", "wave_label": "3", "side": "LONG",
+                         "quantity": 1.0, "position_realized_pnl": 4.0, "at": 1,
+                         "closed": False})
+    body = client.get("/api/live/state",
+                      params={"symbol": "FILLSUSDT", "timeframe": "5m"}).json()
+    assert body["fills"][0]["label"] == "TP1"
+    assert "take_profits_hit" in body["trade_record"]
+
+
+def test_index_shows_take_profit_legs_that_filled():
+    """A position with two of four legs filled used to read as
+    "open positions: 1, closed trades: 0" and nothing else."""
+    resp = client.get("/")
+    assert "Take-profit legs filled" in resp.text
+    assert "fillsTableHtml" in resp.text
+    assert "Realized (open trades)" in resp.text
