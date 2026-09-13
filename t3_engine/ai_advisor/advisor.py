@@ -78,7 +78,7 @@ import httpx
 # Back on OpenRouter, which is the fifth provider this module has been
 # pointed at. Every provider-specific value stays a field for that reason;
 # none of them is worth a redeploy.
-DEFAULT_MODEL = os.getenv("T3_AI_MODEL", "nvidia/nemotron-3-ultra-550b-a55b:free")
+DEFAULT_MODEL = os.getenv("T3_AI_MODEL", "~openai/gpt-astra-latest")
 DEFAULT_API_BASE = os.getenv("T3_AI_API_BASE", "https://openrouter.ai/api/v1")
 PROVIDER_NAME = "OpenRouter"
 
@@ -147,23 +147,17 @@ def resolve_api_key(supplied: Optional[str]) -> str:
 # 400 on a provider that does not know it - the UI offers it explicitly.
 VALID_REASONING_EFFORTS = ("low", "medium", "high", "max")
 
-# NIM-hosted models expose their chat template's switches through
-# `chat_template_kwargs`, and for the reasoning models in this catalogue
-# the one that matters is `thinking`.
+# OpenRouter's own reasoning control: `reasoning: {enabled, effort}`. This
+# replaced a NIM-specific `chat_template_kwargs: {thinking}`, which was the
+# right field for models served directly by NVIDIA and the wrong one here -
+# a router normalises reasoning across vendors and this is the field it
+# normalises to.
 #
-# Default OFF, for a reason found by measurement rather than preference:
-# the diagnostic showed the chat endpoint returning no response HEADERS at
-# all for 45s while the catalogue listing answered in 0.08s. Headers that
-# late mean the gateway buffers the whole response before sending any of
-# it - so the wait is the full generation, and with thinking on that is
-# minutes per step. NVIDIA's own snippet for deepseek-v4-pro sets exactly
-# this flag to False.
-#
-# It is a switch, not a constant: thinking genuinely helps a wave count,
-# and someone on a faster tier should be able to turn it back on. Sent only
-# when set, because a model that has never heard of the field answers 400
-# rather than ignoring it.
-DEFAULT_THINKING: Optional[bool] = False
+# Default ON. It was off while the models were free ones behind a shared
+# GPU pool, where thinking meant minutes to first byte; on a paid model
+# thinking is the whole reason to use it, and an Elliott count is exactly
+# the kind of work it helps. Still a switch.
+DEFAULT_THINKING: Optional[bool] = True
 
 # Sampling temperatures, chosen per job rather than one number everywhere.
 #
@@ -419,15 +413,18 @@ def apply_model_options(payload: Dict[str, Any], seed: Optional[int] = DEFAULT_S
     out = dict(payload)
     if seed is not None:
         out["seed"] = int(seed)
+    reasoning: Dict[str, Any] = {}
     if reasoning_effort:
         effort = str(reasoning_effort).strip().lower()
         if effort not in VALID_REASONING_EFFORTS:
             raise AIAdvisorError(
                 f"reasoning_effort must be one of {', '.join(VALID_REASONING_EFFORTS)}, got {reasoning_effort!r}"
             )
-        out["reasoning_effort"] = effort
+        reasoning["effort"] = effort
     if thinking is not None:
-        out["chat_template_kwargs"] = {"thinking": bool(thinking)}
+        reasoning["enabled"] = bool(thinking)
+    if reasoning:
+        out["reasoning"] = reasoning
     if top_p is not None:
         out["top_p"] = float(top_p)
     return out
@@ -455,11 +452,34 @@ def _merge_tool_call_deltas(accumulated: Dict[int, Dict[str, Any]], deltas: List
             slot["function"]["arguments"] += function["arguments"]
 
 
+def _merge_reasoning_details(accumulated: Dict[int, Dict[str, Any]],
+                             deltas: List[Dict[str, Any]]) -> None:
+    """Reassemble streamed reasoning blocks, keyed by index like tool calls.
+
+    Text fields are concatenated; everything else (type, signature, ids,
+    encrypted payloads) is taken as given and never altered - these are
+    what let the provider resume the model's own reasoning, and a
+    re-encoded blob is a broken one."""
+    for delta in deltas or []:
+        if not isinstance(delta, dict):
+            continue
+        index = delta.get("index", len(accumulated))
+        slot = accumulated.setdefault(index, {})
+        for key, value in delta.items():
+            if key == "index":
+                slot["index"] = value
+            elif isinstance(value, str) and isinstance(slot.get(key), str):
+                slot[key] += value
+            else:
+                slot[key] = value
+
+
 def _consume_stream(lines, model: str) -> Dict[str, Any]:
     """Reassemble an SSE stream into the ordinary non-streaming response
     shape, so nothing downstream needs to know how the bytes arrived."""
     content_parts: List[str] = []
     reasoning_parts: List[str] = []
+    reasoning_details: Dict[int, Dict[str, Any]] = {}
     tool_calls: Dict[int, Dict[str, Any]] = {}
     finish_reason = ""
     saw_any_chunk = False
@@ -507,6 +527,8 @@ def _consume_stream(lines, model: str) -> Dict[str, Any]:
                 break
         if delta.get("tool_calls"):
             _merge_tool_call_deltas(tool_calls, delta["tool_calls"])
+        if delta.get("reasoning_details"):
+            _merge_reasoning_details(reasoning_details, delta["reasoning_details"])
         if choice.get("finish_reason"):
             finish_reason = choice["finish_reason"]
 
@@ -521,6 +543,13 @@ def _consume_stream(lines, model: str) -> Dict[str, Any]:
     message: Dict[str, Any] = {"role": "assistant", "content": "".join(content_parts)}
     if reasoning_parts:
         message["reasoning_content"] = "".join(reasoning_parts)
+    if reasoning_details:
+        # Passed back UNMODIFIED on the next turn. A reasoning model picks
+        # up where it left off from these, and the agent loop is many turns
+        # long - dropping them makes every step start its thinking over,
+        # which is both worse and more expensive. Some are signed or
+        # encrypted blobs, so they are carried verbatim, never rebuilt.
+        message["reasoning_details"] = [reasoning_details[i] for i in sorted(reasoning_details)]
     if tool_calls:
         message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
     return {"choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
@@ -1083,7 +1112,7 @@ PROBE_VARIANTS = (
     ("thinking off, streamed", {"thinking": False, "stream": True}),
     ("thinking off, not streamed", {"thinking": False, "stream": False}),
     ("thinking on, streamed", {"thinking": True, "stream": True}),
-    ("no chat_template_kwargs", {"thinking": None, "stream": True}),
+    ("no reasoning field", {"thinking": None, "stream": True}),
 )
 
 

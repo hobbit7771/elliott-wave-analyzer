@@ -160,7 +160,7 @@
     <div id="tab-ai" style="display:none;">
       <div class="note">
         Runs on <strong>OpenRouter</strong> (<code>openrouter.ai/api/v1</code>),
-        <code>nvidia/nemotron-3-ultra-550b-a55b:free</code> by default. If the server has a key configured you can leave the
+        <code>~openai/gpt-astra-latest</code> by default. If the server has a key configured you can leave the
         field below empty; otherwise paste your own — it is sent to your own backend for one request at
         a time and never stored server-side (see <code>ai_advisor/advisor.py</code>). The model can give
         a second opinion and propose a wave count; it can never override the rule-based engine's
@@ -175,7 +175,7 @@
 
       <h2>Model</h2>
       <div class="field-row">
-        <input id="aiModel" type="text" placeholder="nvidia/nemotron-3-ultra-550b-a55b:free" />
+        <input id="aiModel" type="text" placeholder="~openai/gpt-astra-latest" />
       </div>
       <div class="hint">
         One id, or <strong>several separated by commas</strong> — the router walks the list and uses
@@ -228,19 +228,20 @@
       <h2>Model thinking</h2>
       <div class="field-row">
         <select id="aiThinking" style="flex:1;">
-          <option value="off" selected>Off — fast (recommended)</option>
-          <option value="on">On — better counts, much slower</option>
+          <option value="on" selected>On — better counts (recommended)</option>
+          <option value="off">Off — faster and cheaper</option>
           <option value="">Do not send the field</option>
         </select>
       </div>
       <div class="hint">
-        Sent as <code>chat_template_kwargs: {thinking: …}</code>, which is what NVIDIA's own snippet
-        for these models sets. <strong>Off by default because it was measured, not preferred:</strong>
-        the catalogue listing answers in 0.08s while the chat endpoint sent no response headers at all
-        for 45s — the gateway buffers the whole response, so the wait is the entire generation, and
-        with thinking on that is minutes per step. Turn it on only if Diagnose shows both modes
-        answering. "Do not send" is for a model that has never heard of the field and answers
-        <code>400</code> rather than ignoring it.
+        Sent as OpenRouter's own <code>reasoning: {enabled, effort}</code>. <strong>On by default now
+        that the model is paid</strong> — it was off while the free models sat behind a shared GPU pool,
+        where thinking meant minutes before the first byte; on a paid model thinking is the reason to
+        use it, and an Elliott count is exactly the kind of work it helps. The model's reasoning is
+        also <em>carried across steps</em> (<code>reasoning_details</code> passed back unmodified), so
+        the agent picks up where it left off instead of re-thinking from scratch on every step.
+        "Do not send" is for a model that has never heard of the field and answers <code>400</code>
+        rather than ignoring it.
       </div>
 
       <h2>Check the connection</h2>
@@ -1155,7 +1156,7 @@ document.getElementById('runAnalyst').addEventListener('click', async () => {
 const KEY_STORAGE = 't3_openrouter2_key';
 const MODEL_STORAGE = 't3_openrouter2_model';
 const BASE_URL_STORAGE = 't3_openrouter2_base_url';
-const DEFAULT_AI_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b:free';
+const DEFAULT_AI_MODEL = '~openai/gpt-astra-latest';
 const TIMEOUT_STORAGE = 't3_openrouter2_timeout';
 const EFFORT_STORAGE = 't3_openrouter2_effort';
 const THINKING_STORAGE = 't3_openrouter2_thinking';

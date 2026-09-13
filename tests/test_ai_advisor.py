@@ -545,9 +545,9 @@ def test_analysis_runs_at_temperature_zero_and_commentary_only_mildly_warm():
 
 
 def test_reasoning_effort_is_absent_unless_asked_for():
-    """An unsupported parameter is a 400, not a graceful ignore, and the
-    endpoint is user-editable - so an unset field must be an ABSENT field
-    rather than a default value."""
+    """Effort rides inside OpenRouter's own `reasoning` object, and an unset
+    field is an ABSENT field - an unsupported parameter is a 400, not a
+    graceful ignore, on an endpoint the user can point anywhere."""
     seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -555,11 +555,11 @@ def test_reasoning_effort_is_absent_unless_asked_for():
         return chat_response("ok")
 
     request_commentary("sk-test", {"wave": "3"}, client=make_client(handler))
-    assert "reasoning_effort" not in seen
+    assert "effort" not in seen.get("reasoning", {})
 
     seen.clear()
-    request_commentary("sk-test", {"wave": "3"}, reasoning_effort="max", client=make_client(handler))
-    assert seen["reasoning_effort"] == "max"
+    request_commentary("sk-test", {"wave": "3"}, reasoning_effort="high", client=make_client(handler))
+    assert seen["reasoning"]["effort"] == "high"
 
 
 def test_an_invalid_reasoning_effort_is_refused_before_the_request():
@@ -823,7 +823,7 @@ def test_the_probe_pins_thinking_mode_as_the_cause_when_it_is():
     from t3_engine.ai_advisor.advisor import probe_variants
 
     thinking_off_only = _variant_handler(
-        lambda b: (b.get("chat_template_kwargs") or {}).get("thinking") is False)
+        lambda b: (b.get("reasoning") or {}).get("enabled") is False)
     report = probe_variants("sk-test", client=make_client(thinking_off_only))
 
     by_label = {v["variant"]: v for v in report["variants"]}
@@ -857,28 +857,6 @@ def test_the_probe_reports_both_modes_working_rather_than_inventing_a_cause():
     report = probe_variants("sk-test", client=make_client(_variant_handler(lambda b: True)))
     assert "Both thinking modes work" in report["verdict"]
     assert "Thinking mode is the cause" not in report["verdict"]
-
-
-def test_thinking_is_off_by_default_and_sent_as_chat_template_kwargs():
-    """NVIDIA's own snippet for deepseek-v4-pro sets exactly this, and the
-    diagnostic showed why: with thinking on, the buffering gateway sends no
-    headers at all until the whole generation finishes."""
-    seen = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.update(json.loads(request.content))
-        return chat_response("ok")
-
-    request_commentary("sk-test", {"wave": "3"}, client=make_client(handler))
-    assert seen["chat_template_kwargs"] == {"thinking": False}
-
-    seen.clear()
-    request_commentary("sk-test", {"wave": "3"}, thinking=True, client=make_client(handler))
-    assert seen["chat_template_kwargs"] == {"thinking": True}
-
-    seen.clear()
-    request_commentary("sk-test", {"wave": "3"}, thinking=None, client=make_client(handler))
-    assert "chat_template_kwargs" not in seen      # a model that never heard of it answers 400
 
 
 # ---- models that cannot chat at all ----

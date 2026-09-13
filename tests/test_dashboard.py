@@ -452,7 +452,7 @@ def test_ai_advice_requires_key():
 def test_ai_advice_success_with_a_mocked_model():
     class FakeResponse:
         text = "Looks like a reasonable wave 3 setup, watch for extension risk."
-        model = "nvidia/nemotron-3-ultra-550b-a55b:free"
+        model = "~openai/gpt-astra-latest"
         raw = {}
 
     with patch.object(server_module, "request_commentary", return_value=FakeResponse()):
@@ -471,7 +471,7 @@ class _FakeProposal:
     def __init__(self, waves, reasoning="because"):
         self.waves = waves
         self.reasoning = reasoning
-        self.model = "nvidia/nemotron-3-ultra-550b-a55b:free"
+        self.model = "~openai/gpt-astra-latest"
         self.raw = {}
 
 
@@ -599,7 +599,7 @@ class _FakeAnalystResult:
         self.summary = "Five waves up look complete."
         self.reasoning = "Wave 3 is the longest."
         self.steps = []
-        self.model = "nvidia/nemotron-3-ultra-550b-a55b:free"
+        self.model = "~openai/gpt-astra-latest"
         self.steps_used = 3
         self.finished = True
         self.note = note
@@ -745,10 +745,10 @@ def test_ping_passes_the_whole_setup_through_so_it_tests_what_the_real_run_uses(
 
     with patch.object(server_module, "ai_ping", side_effect=fake_ping):
         client.post("/api/ai/ping", json={
-            "api_key": "sk-test", "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+            "api_key": "sk-test", "model": "~openai/gpt-astra-latest",
             "base_url": "https://openrouter.ai/api/v1"})
     assert seen["key"] == "sk-test"
-    assert seen["model"] == "nvidia/nemotron-3-ultra-550b-a55b:free"
+    assert seen["model"] == "~openai/gpt-astra-latest"
     assert seen["base_url"] == "https://openrouter.ai/api/v1"
 
 
@@ -943,9 +943,9 @@ def test_thinking_is_a_tri_state_because_not_sending_the_field_is_a_real_choice(
     assert parse_thinking("nonsense") is None
 
 
-def test_thinking_defaults_to_off_on_the_analyst_endpoint():
-    """Measured, not preferred: with thinking on the gateway sent no
-    response headers at all for 45s."""
+def test_thinking_defaults_to_on_now_that_the_model_is_paid():
+    """It was off while the free models sat behind a shared GPU pool. On a
+    paid model, thinking is the reason to use it."""
     seen = {}
 
     def fake_run(api_key, candles, degree, **kwargs):
@@ -955,12 +955,12 @@ def test_thinking_defaults_to_off_on_the_analyst_endpoint():
     with patch.object(server_module, "run_analyst", side_effect=fake_run):
         client.post("/api/ai/analyst", json={"api_key": "sk-or-test", "source": "synthetic",
                                              "cycles": 2})
-    assert seen["thinking"] is False
+    assert seen["thinking"] is True
 
     with patch.object(server_module, "run_analyst", side_effect=fake_run):
         client.post("/api/ai/analyst", json={"api_key": "sk-or-test", "source": "synthetic",
-                                             "cycles": 2, "thinking": "on"})
-    assert seen["thinking"] is True
+                                             "cycles": 2, "thinking": "off"})
+    assert seen["thinking"] is False
 
 
 def test_diagnose_runs_the_variant_probe_that_names_the_cause():
@@ -977,7 +977,15 @@ def test_diagnose_runs_the_variant_probe_that_names_the_cause():
 def test_index_exposes_the_thinking_switch():
     resp = client.get("/")
     assert "aiThinking" in resp.text
-    assert "chat_template_kwargs" in resp.text
+    assert "reasoning: {enabled, effort}" in resp.text
+    assert "chat_template_kwargs" not in resp.text      # a NIM-ism, not the router's field
+
+
+def test_index_says_reasoning_is_carried_across_steps():
+    """The agent loop is many turns long. Without reasoning_details passed
+    back, every step starts its thinking over - worse answers, larger bill."""
+    resp = client.get("/")
+    assert "reasoning_details" in resp.text
 
 
 # ---------------------------------------------------------------------------
@@ -1028,11 +1036,11 @@ def test_diagnose_reports_whether_the_chosen_model_can_run_the_analyst():
                       return_value={"ok": True, "seconds": 0.2, "model_count": 310,
                                     "models": [], "tool_capable": ["a/b:free"],
                                     "tool_capable_count": 1, "model_supports_tools": False,
-                                    "checked_model": "nvidia/nemotron-3-ultra-550b-a55b:free"}), \
+                                    "checked_model": "~openai/gpt-astra-latest"}), \
          patch.object(server_module, "ai_diagnose", return_value={"status": 200}), \
          patch.object(server_module, "ai_probe_variants", return_value={"variants": [], "verdict": ""}):
         resp = client.post("/api/ai/diagnose", json={
-            "api_key": "sk-or-test", "model": "nvidia/nemotron-3-ultra-550b-a55b:free"})
+            "api_key": "sk-or-test", "model": "~openai/gpt-astra-latest"})
     access = resp.json()["access"]
     assert access["model_supports_tools"] is False
     assert access["tool_capable_count"] == 1
