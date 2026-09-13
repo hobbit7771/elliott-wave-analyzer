@@ -55,6 +55,13 @@ from t3_engine.ai_advisor.advisor import (
     resolve_api_key,
 )
 from t3_engine.ai_advisor.analyst import DEFAULT_MAX_STEPS, MAX_MAX_STEPS, run_analyst
+from t3_engine.ai_advisor.relational import (
+    DEFAULT_RELATIONAL_MODEL,
+    DEFAULT_RELATIONAL_URL,
+    RelationalUnavailable,
+    predict_trade_quality,
+    rows_from_backtest,
+)
 from t3_engine.ai_advisor.analyst_tools import ToolError
 from t3_engine.backtest.engine import BacktestConfig, BacktestEngine
 from t3_engine.backtest.metrics import compute_metrics, compute_metrics_by_wave
@@ -147,7 +154,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-022"
+BUILD_VERSION = "BUILD-CHECK-023"
 
 
 @app.get("/api/health")
@@ -556,6 +563,57 @@ def parse_thinking(raw: str):
     if value in ("off", "false", "0", "no"):
         return False
     return None
+
+
+@app.post("/api/ai/signal-quality")
+def ai_signal_quality(api_key: str = Body("", embed=True), source: str = Body("synthetic", embed=True),
+                      symbol: str = Body("SYNTHETIC", embed=True),
+                      timeframe: str = Body("5m", embed=True),
+                      limit: int = Body(1500, embed=True, ge=100, le=10000),
+                      cycles: int = Body(2, embed=True, ge=1, le=10),
+                      equity: float = Body(10_000.0, embed=True, gt=0, le=1e9),
+                      model: str = Body(DEFAULT_RELATIONAL_MODEL, embed=True),
+                      url: str = Body(DEFAULT_RELATIONAL_URL, embed=True),
+                      timeout: float = Body(120.0, embed=True, gt=0, le=MAX_READ_TIMEOUT)):
+    """How often did setups scoring like this one actually work out?
+
+    A different kind of model from everything else in the AI tab:
+    `kumo-relational` takes a relational schema plus rows and returns a
+    probability per row. It has no text output and no tool calling, so it
+    cannot label waves or replace the chat model - but the engine already
+    produces exactly the table it wants, since every signal carries its
+    eight score components and every closed trade carries its outcome.
+
+    Strictly advisory, like the second opinion. It never gates a trade,
+    never moves a stop and never edits a count - the hard Elliott rules and
+    the risk engine decide, and a model fitted to a few dozen of the
+    engine's own past trades is a hint, not an edge.
+
+    422 rather than a number when the history cannot answer honestly: too
+    few closed trades, or all of them the same outcome. A probability from
+    four trades would be believed, and should not be."""
+    candles, symbol, tf = load_candles(source, symbol, timeframe, limit, cycles)
+    config = BacktestConfig(symbol=symbol, degree=tf, initial_equity=equity)
+    engine = BacktestEngine(config)
+    engine.run(candles)
+
+    context, predict = rows_from_backtest(
+        engine.signals, engine.position_manager.closed_positions, tf.value)
+    try:
+        result = predict_trade_quality(resolve_api_key(api_key), context, predict,
+                                       model=model, url=url, timeout=timeout)
+    except RelationalUnavailable as exc:
+        raise HTTPException(422, str(exc))
+    except AIAdvisorError as exc:
+        raise HTTPException(502, str(exc))
+
+    return {
+        "model": result.model,
+        "context_trades": result.context_trades,
+        "wins_in_context": result.wins_in_context,
+        "scored": [{"signal_id": p.signal_id, "win_probability": p.win_probability,
+                    "prediction": p.prediction} for p in result.predictions],
+    }
 
 
 @app.post("/api/ai/diagnose")

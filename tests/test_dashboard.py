@@ -978,3 +978,44 @@ def test_index_exposes_the_thinking_switch():
     resp = client.get("/")
     assert "aiThinking" in resp.text
     assert "chat_template_kwargs" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# kumo-relational: trade quality, not a second analyst
+# ---------------------------------------------------------------------------
+
+def test_signal_quality_refuses_rather_than_inventing_a_number():
+    """The synthetic fixture produces few or no closed trades, so the
+    honest answer is "not enough history" - a 422 with the reason, not a
+    probability nobody should trust."""
+    resp = client.post("/api/ai/signal-quality",
+                       json={"api_key": "nvapi-test", "source": "synthetic", "cycles": 2})
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert "closed trade" in detail or "No signals to score" in detail
+
+
+def test_signal_quality_returns_the_context_size_with_every_probability():
+    """A probability without the size and balance of the history behind it
+    invites more trust than it has earned."""
+    from t3_engine.ai_advisor.relational import RelationalPrediction, RelationalResult
+
+    fake = RelationalResult(
+        predictions=[RelationalPrediction(signal_id="sig-1", win_probability=0.64, prediction=True)],
+        context_trades=41, wins_in_context=18, model="kumo-relational")
+    with patch.object(server_module, "predict_trade_quality", return_value=fake):
+        resp = client.post("/api/ai/signal-quality",
+                           json={"api_key": "nvapi-test", "source": "synthetic", "cycles": 2})
+    body = resp.json()
+    assert body["context_trades"] == 41
+    assert body["wins_in_context"] == 18
+    assert body["scored"][0]["win_probability"] == 0.64
+
+
+def test_signal_quality_uses_the_relational_host_not_the_chat_one():
+    """Two different NVIDIA hosts with the same key; crossing them produces
+    a 404 that reads like a broken model id."""
+    from t3_engine.ai_advisor.relational import DEFAULT_RELATIONAL_URL
+
+    assert "ai.api.nvidia.com" in DEFAULT_RELATIONAL_URL
+    assert "integrate.api.nvidia.com" not in DEFAULT_RELATIONAL_URL
