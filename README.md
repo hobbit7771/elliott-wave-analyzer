@@ -17,7 +17,7 @@
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine, live
 market data from Bybit USDT perpetuals (see "Mobile app + live Bybit"
-below for why Binance was dropped). 341 automated tests, all passing,
+below for why Binance was dropped). 361 automated tests, all passing,
 cover every module described below.
 
 ## Read this first: what "done" means here
@@ -90,7 +90,7 @@ t3_engine/
                       analyst_tools.py = the tools it may use). Never a decision-maker.
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                341 tests, one file per module above
+tests/                361 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Bybit in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -591,6 +591,53 @@ own colour so it can't be mistaken for the engine's own conclusion.
 `tests/test_external_count.py` is written from the attacker's side: each
 test is a shape of nonsense a model realistically returns.
 
+## kumo-relational: trade quality, not a second analyst
+
+`kumo-relational` is a different *kind* of model from everything else in
+`ai_advisor/`. It takes a relational schema plus rows and returns a
+prediction and a probability per row. It has no text output and no tool
+calling, so it **cannot label waves, hold a conversation, or replace the
+chat model** behind the AI Analyst.
+
+It fits exactly one job here, and fits it well. The engine already produces
+the table it wants: every signal carries its eight score components
+(elliott, price_action, fibonacci, volume, momentum, derivatives,
+orderbook, higher_tf) plus confidence and risk/reward, and every closed
+trade carries its outcome. So "given how this setup scored, how often did
+setups like it end green?" is a binary classification over the engine's own
+past.
+
+**Strictly advisory.** It never gates a trade, never moves a stop and never
+edits a count - the hard Elliott rules and the risk engine decide, exactly
+as with the second opinion. A model fitted to a few dozen of the engine's
+own past trades is a hint, not an edge, and treating it as one would be the
+same mistake as curve-fitting the parameters.
+
+Two refusals matter more than the number:
+
+* **Too few closed trades** (under 12) returns the reason rather than a
+  probability. A number computed from four trades would be believed, and
+  should not be.
+* **A history where everything won or everything lost** is refused too: a
+  table with one outcome can only repeat that outcome back.
+
+The result always carries the size and balance of the history behind it,
+and the dashboard prints each probability against that base rate - a 60%
+that beats a 44% baseline says something very different from a 60% that
+does not.
+
+**No lookahead**, on the same terms as the rest of the engine: context rows
+are filtered here to trades that had already *closed*, and open trades are
+excluded entirely. The model is given `anchor_time` and could enforce that
+itself, but a guarantee that depends on someone else honouring it is not a
+guarantee - the same reason external wave counts are re-validated on this
+server.
+
+Note the host: this lives on `ai.api.nvidia.com`, **not** the
+`integrate.api.nvidia.com` the chat models use, though it takes the same
+key. Crossing the two produces a 404 that reads like a broken model id, so
+the error message names which URL it means.
+
 ## The AI Analyst: a clean chart, an agent, and the same trust boundary
 
 The AI labelling above is one shot: the model is handed a pre-computed
@@ -743,7 +790,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (341 tests)
+# Run the automated test suite (361 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)

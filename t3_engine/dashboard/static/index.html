@@ -263,6 +263,19 @@
       <div class="hint" id="aiStatus"></div>
       <div class="signal" id="ai-answer" style="margin-top:10px; display:none;"></div>
 
+      <h2>Signal quality (kumo-relational)</h2>
+      <div class="note">
+        A different <em>kind</em> of model: it takes a relational table and returns a probability per
+        row, with no text output and no tool calling — so it cannot label waves or replace the chat
+        model. What it can answer is the one question the engine already has the table for: given how
+        a setup scored on its eight components, how often did setups like it actually end green?
+        <strong>Strictly advisory</strong> — it never gates a trade, moves a stop or edits a count. A
+        model fitted to a few dozen of the engine's own past trades is a hint, not an edge.
+      </div>
+      <button class="panel-btn" id="askSignalQuality">Score the open signals</button>
+      <div class="hint" id="signalQualityStatus"></div>
+      <div class="signal" id="signal-quality-answer" style="margin-top:10px; display:none;"></div>
+
       <h2>AI wave labelling</h2>
       <div class="note">
         The model proposes a count across the whole loaded history — the one thing the deterministic engine
@@ -1296,6 +1309,63 @@ document.getElementById('diagnoseAi').addEventListener('click', async () => {
     out.innerHTML = html;
   } catch (e) {
     statusEl.textContent = e.message || 'Network error during diagnosis.';
+  }
+});
+
+document.getElementById('askSignalQuality').addEventListener('click', async () => {
+  const statusEl = document.getElementById('signalQualityStatus');
+  const answerEl = document.getElementById('signal-quality-answer');
+  const source = document.getElementById('source').value;
+  if (source === 'live') {
+    statusEl.textContent = 'Switch to Synthetic or Bybit (history) — this scores a backtest\u2019s own trades.';
+    return;
+  }
+  statusEl.textContent = 'Scoring the open signals against this history\u2026';
+  answerEl.style.display = 'none';
+  try {
+    const resp = await fetchWithTimeout('/api/ai/signal-quality', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_key: aiKey(), source,
+        symbol: normalizeSymbol(document.getElementById('symbol').value),
+        timeframe: document.getElementById('timeframe').value,
+        limit: Number(document.getElementById('limit').value),
+        cycles: Number(document.getElementById('cycles').value),
+        equity: Number(document.getElementById('equity').value) || 10000,
+        timeout: aiTimeout(),
+      }),
+    }, 180000);
+    const data = await resp.json();
+    // 422 is the honest answer, not a failure: this history cannot support
+    // a probability, and the reason says why.
+    if (!resp.ok) { statusEl.textContent = data.detail || 'Request failed.'; return; }
+
+    statusEl.textContent = '';
+    answerEl.style.display = '';
+    const base = data.context_trades
+      ? Math.round(100 * data.wins_in_context / data.context_trades) : 0;
+    let html = `<div class="row"><span class="k">Learned from</span>`
+      + `<span class="v">${data.context_trades} closed trades, ${data.wins_in_context} green `
+      + `(${base}%)</span></div>`;
+    if (!data.scored.length) {
+      html += `<div class="hint">No open signals to score right now.</div>`;
+    } else {
+      // The base rate sits next to every number on purpose: a 60% that beats
+      // a 55% baseline says something very different from a 60% that does not.
+      html += `<table><tr><th>Signal</th><th>Win probability</th></tr>`
+        + data.scored.map(s => {
+          const p = s.win_probability;
+          const shown = p === null || p === undefined ? '—' : Math.round(p * 100) + '%';
+          const better = p !== null && p !== undefined && p * 100 > base;
+          return `<tr><td>${escapeHtml(s.signal_id)}</td>`
+            + `<td style="color:${better ? '#4ade80' : '#9aa3b2'};">${shown}</td></tr>`;
+        }).join('') + `</table>`
+        + `<div class="hint">Green means above this history's own base rate of ${base}%. `
+        + `Advisory only — nothing here changes what the engine trades.</div>`;
+    }
+    answerEl.innerHTML = html;
+  } catch (e) {
+    statusEl.textContent = e.message || 'Network error scoring signals.';
   }
 });
 
