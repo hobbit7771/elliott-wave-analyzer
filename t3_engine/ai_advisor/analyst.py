@@ -96,7 +96,8 @@ DEFAULT_RUN_BUDGET_SECONDS = 600.0
 KEEP_FULL_TOOL_RESULTS = 3
 
 FINAL_STEP_NUDGE = (
-    "This is your LAST step. Call submit_count now with whatever you are genuinely confident in, "
+    "This is your LAST step. Call submit_count with complete=true now, with whatever you are "
+    "genuinely confident in, "
     "even if that is a single structure or a partial count, and say in `reasoning` what you did not "
     "get to check. A small verified count is worth far more than nothing. Do not call any other tool."
 )
@@ -122,6 +123,10 @@ class AnalystResult:
     # thinking, what it called, and what came back. Without this the only
     # answer to "why did it stop there" is a guess.
     transcript: List[Dict[str, Any]] = field(default_factory=list)
+    # What the count says comes next, computed server-side from the waves
+    # already on the chart, and how much of the history got labelled.
+    projection: Optional[Dict[str, Any]] = None
+    coverage: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def waves(self) -> List[Dict[str, Any]]:
@@ -284,7 +289,7 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
         # cuts the model off mid-thought produces nothing; a budget the
         # model KNOWS about produces a smaller count.
         final_step = step == max_steps - 1
-        if final_step and toolbox.submitted is None:
+        if final_step and not toolbox.finished:
             messages.append({"role": "user", "content": FINAL_STEP_NUDGE})
             transcript.append({"role": "system", "step": step + 1, "text": FINAL_STEP_NUDGE})
 
@@ -350,7 +355,7 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
 
         trim_tool_history(messages)
 
-        if toolbox.submitted is not None:
+        if toolbox.finished:
             break
     else:
         if toolbox.submitted is None:
@@ -361,6 +366,8 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
 
     submitted = toolbox.submitted or {}
     return AnalystResult(
+        projection=submitted.get("projection"),
+        coverage=submitted.get("coverage") or {},
         accepted=submitted.get("accepted", []),
         rejected=submitted.get("rejected", []),
         summary=submitted.get("summary", ""),

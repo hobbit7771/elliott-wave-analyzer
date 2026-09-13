@@ -17,7 +17,7 @@
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine, live
 market data from Bybit USDT perpetuals (see "Mobile app + live Bybit"
-below for why Binance was dropped). 379 automated tests, all passing,
+below for why Binance was dropped). 389 automated tests, all passing,
 cover every module described below.
 
 ## Read this first: what "done" means here
@@ -90,7 +90,7 @@ t3_engine/
                       analyst_tools.py = the tools it may use). Never a decision-maker.
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                379 tests, one file per module above
+tests/                389 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Bybit in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -720,6 +720,28 @@ model does, and one that doesn't will answer in prose instead - which
 comes back as `finished: false` with the model's own last message attached,
 rather than as an empty result presented as a finished analysis.
 
+**Submissions accumulate, and the chart gets finished.** `submit_count` can
+be called many times; each result reports what percentage of the history is
+now labelled and which stretches are still bare, and the run continues
+until the model sets `complete=true` or the gaps are gone. Before this, the
+first submission ended the run - which is how a live run came back with the
+oldest third labelled and the recent two thirds untouched, the model having
+simply stopped with nothing asking it to go on. The recent part is the part
+anyone trades, so the playbook now says to reach the last candle.
+
+**The count says where price goes next.** A count that stops at the last
+confirmed pivot answers "what happened"; the reason to count waves at all
+is what the count implies comes next, and that is arithmetic over waves
+already on the chart. So the model names which structure is still unfolding
+and which wave it expects (2, 3, 4, 5, B or C), and **the server computes
+the targets** with the same Fibonacci code the deterministic engine uses -
+wave 5 off wave 1's length from the end of wave 4, wave C off wave A's from
+the end of B, and so on. The model never supplies a price. The dashboard
+draws the targets forward from the last labelled swing, dashed and in their
+own colour, because they are the one thing on that chart that has not
+happened yet. A projection that needs a wave the count does not have comes
+back absent rather than invented.
+
 A run that **stalls part way keeps the work it already did**. The agent
 makes up to `max_steps` sequential calls, so a slow model can exhaust the
 per-request timeout mid-run; when that happens the tool transcript up to
@@ -846,7 +868,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (379 tests)
+# Run the automated test suite (389 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)
