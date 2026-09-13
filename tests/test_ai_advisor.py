@@ -1,7 +1,7 @@
-"""NVIDIA API Catalog client tests.
+"""OpenRouter client tests.
 
 Every one runs against a mocked transport - this sandbox has no outbound
-access to integrate.api.nvidia.com, and more importantly the whole point of
+access to openrouter.ai, and more importantly the whole point of
 the design is that nothing downstream depends on a live model call
 succeeding.
 
@@ -55,7 +55,7 @@ def plain_response(text: str, finish_reason: str = "stop") -> httpx.Response:
 def test_request_commentary_parses_a_chat_completion():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["authorization"] == "Bearer sk-test"
-        assert str(request.url) == "https://integrate.api.nvidia.com/v1/chat/completions"
+        assert str(request.url) == "https://openrouter.ai/api/v1/chat/completions"
         return chat_response("This wave 3 count looks reasonable but watch for extension.")
 
     result = request_commentary("sk-test", {"wave": "3", "confidence": 82}, client=make_client(handler))
@@ -79,7 +79,7 @@ def test_commentary_sends_the_instruction_as_a_system_message_not_a_user_turn():
 
 
 def test_request_commentary_raises_without_key():
-    with pytest.raises(AIAdvisorError, match="No NVIDIA API Catalog API key"):
+    with pytest.raises(AIAdvisorError, match="No OpenRouter API key"):
         request_commentary("", {"wave": "3"})
 
 
@@ -87,7 +87,7 @@ def test_request_commentary_raises_on_api_error():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, text="invalid request")
 
-    with pytest.raises(AIAdvisorError, match="NVIDIA API Catalog API error 400"):
+    with pytest.raises(AIAdvisorError, match="OpenRouter API error 400"):
         request_commentary("sk-bad", {"wave": "3"}, client=make_client(handler))
 
 
@@ -137,9 +137,9 @@ def test_the_api_base_url_is_overridable_without_a_redeploy():
         seen["url"] = str(request.url)
         return chat_response("ok")
 
-    request_commentary("sk-test", {"wave": "3"}, base_url="https://integrate.api.nvidia.com/v2",
+    request_commentary("sk-test", {"wave": "3"}, base_url="https://openrouter.ai/v2",
                        client=make_client(handler))
-    assert seen["url"] == "https://integrate.api.nvidia.com/v2/chat/completions"
+    assert seen["url"] == "https://openrouter.ai/v2/chat/completions"
 
 
 def test_a_pasted_full_endpoint_is_not_doubled_up():
@@ -153,9 +153,9 @@ def test_a_pasted_full_endpoint_is_not_doubled_up():
         return chat_response("ok")
 
     request_commentary("sk-test", {"wave": "3"},
-                       base_url="https://integrate.api.nvidia.com/v1/chat/completions/",
+                       base_url="https://openrouter.ai/api/v1/chat/completions/",
                        client=make_client(handler))
-    assert seen["url"] == "https://integrate.api.nvidia.com/v1/chat/completions"
+    assert seen["url"] == "https://openrouter.ai/api/v1/chat/completions"
 
 
 def test_the_model_id_actually_reaches_the_request_body():
@@ -167,9 +167,9 @@ def test_the_model_id_actually_reaches_the_request_body():
         seen.update(json.loads(request.content))
         return chat_response("ok")
 
-    request_commentary("sk-test", {"wave": "3"}, model="moonshotai/kimi-k3",
+    request_commentary("sk-test", {"wave": "3"}, model="nvidia/nemotron-3-ultra-550b-a55b:free",
                        client=make_client(handler))
-    assert seen["model"] == "moonshotai/kimi-k3"
+    assert seen["model"] == "nvidia/nemotron-3-ultra-550b-a55b:free"
 
 
 def test_an_error_body_returned_with_http_200_is_still_an_error():
@@ -260,7 +260,7 @@ def test_ping_confirms_the_key_url_and_model_from_the_first_token():
         seen.update(json.loads(request.content))
         return chat_response("ok")
 
-    result = ping("sk-test", model="moonshotai/kimi-k3", client=make_client(handler))
+    result = ping("sk-test", model="nvidia/nemotron-3-ultra-550b-a55b:free", client=make_client(handler))
     assert result["ok"] is True
     assert result["answer"].startswith("o")
     assert result["endpoint"].endswith("/chat/completions")
@@ -678,14 +678,15 @@ def test_access_check_verifies_key_and_url_without_running_a_model():
     def handler(request: httpx.Request) -> httpx.Response:
         seen["url"] = str(request.url)
         seen["method"] = request.method
-        return httpx.Response(200, json={"data": [{"id": "moonshotai/kimi-k3"},
-                                                  {"id": "deepseek-ai/deepseek-v4-pro-0813"}]})
+        return httpx.Response(200, json={"data": [{"id": "nvidia/nemotron-3-ultra-550b-a55b:free",
+                                                   "supported_parameters": ["tools", "temperature"]},
+                                                  {"id": "some/embedding-model"}]})
 
     result = check_access("sk-test", client=make_client(handler))
     assert seen["method"] == "GET"
-    assert seen["url"] == "https://integrate.api.nvidia.com/v1/models"
+    assert seen["url"] == "https://openrouter.ai/api/v1/models"
     assert result["model_count"] == 2
-    assert "moonshotai/kimi-k3" in result["models"]
+    assert "nvidia/nemotron-3-ultra-550b-a55b:free" in result["models"]
 
 
 def test_a_failing_access_check_says_it_is_not_about_model_speed():
@@ -708,9 +709,9 @@ def test_the_access_check_tolerates_a_base_url_with_the_endpoint_pasted_on():
         seen["url"] = str(request.url)
         return httpx.Response(200, json={"data": []})
 
-    check_access("sk-test", base_url="https://integrate.api.nvidia.com/v1/chat/completions",
+    check_access("sk-test", base_url="https://openrouter.ai/api/v1/chat/completions",
                  client=make_client(handler))
-    assert seen["url"] == "https://integrate.api.nvidia.com/v1/models"
+    assert seen["url"] == "https://openrouter.ai/api/v1/models"
 
 
 def test_diagnose_reports_observations_and_never_raises_on_a_timeout():
@@ -878,3 +879,76 @@ def test_thinking_is_off_by_default_and_sent_as_chat_template_kwargs():
     seen.clear()
     request_commentary("sk-test", {"wave": "3"}, thinking=None, client=make_client(handler))
     assert "chat_template_kwargs" not in seen      # a model that never heard of it answers 400
+
+
+# ---- models that cannot chat at all ----
+# A different failure from a wrong id: these are real, working models of the
+# wrong KIND. Pointing the analyst at one fails in a way that reads as a
+# broken app rather than a wrong choice.
+
+def test_an_embedding_model_is_refused_before_a_request_is_ever_sent():
+    from t3_engine.ai_advisor.advisor import non_chat_reason
+
+    reason = non_chat_reason("nvidia/llama-nemotron-embed-vl-1b-v2:free")
+    assert reason is not None
+    assert "embedding" in reason
+    assert "no tool calling" in reason
+
+    called = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        called.append(1)
+        return chat_response("should never happen")
+
+    with pytest.raises(AIAdvisorError, match="embedding"):
+        request_commentary("sk-or-test", {"wave": "3"},
+                           model="nvidia/llama-nemotron-embed-vl-1b-v2:free",
+                           client=make_client(handler))
+    assert not called          # no point spending a request on it
+
+
+def test_an_ordinary_chat_model_is_not_refused():
+    """The guard must not reject a working model over a substring."""
+    from t3_engine.ai_advisor.advisor import non_chat_reason
+
+    assert non_chat_reason("nvidia/nemotron-3-ultra-550b-a55b:free") is None
+    assert non_chat_reason("moonshotai/kimi-k3") is None
+    assert non_chat_reason("deepseek-ai/deepseek-v4-pro-0813") is None
+
+
+def test_an_empty_model_id_says_how_to_pick_one():
+    with pytest.raises(AIAdvisorError, match="press Diagnose"):
+        request_commentary("sk-or-test", {"wave": "3"}, model="")
+
+
+def test_the_catalogue_answers_whether_the_chosen_model_supports_tools():
+    """The one fact that decides whether the AI Analyst can run, taken from
+    the catalogue rather than guessed from the model's name."""
+    from t3_engine.ai_advisor.advisor import check_access
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [
+            {"id": "vendor/with-tools:free", "supported_parameters": ["tools", "temperature"]},
+            {"id": "vendor/no-tools:free", "supported_parameters": ["temperature"]},
+        ]})
+
+    result = check_access("sk-or-test", model="vendor/with-tools:free", client=make_client(handler))
+    assert result["tool_capable"] == ["vendor/with-tools:free"]
+    assert result["tool_capable_count"] == 1
+    assert result["model_supports_tools"] is True
+
+    result = check_access("sk-or-test", model="vendor/no-tools:free", client=make_client(handler))
+    assert result["model_supports_tools"] is False
+
+
+def test_a_catalogue_without_capability_metadata_says_unknown_not_no():
+    """Absent metadata is not evidence of absence - reporting "no tools"
+    there would send the user chasing a problem that may not exist."""
+    from t3_engine.ai_advisor.advisor import check_access
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"id": "vendor/model"}]})
+
+    result = check_access("sk-or-test", model="vendor/model", client=make_client(handler))
+    assert result["model_supports_tools"] is None
+    assert result["tool_capable_count"] == 0

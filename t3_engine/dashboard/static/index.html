@@ -159,8 +159,8 @@
     </div>
     <div id="tab-ai" style="display:none;">
       <div class="note">
-        Runs on the <strong>NVIDIA API Catalog</strong> (<code>integrate.api.nvidia.com</code>),
-        <code>moonshotai/kimi-k3</code> by default. If the server has a key configured you can leave the
+        Runs on <strong>OpenRouter</strong> (<code>openrouter.ai/api/v1</code>),
+        <code>nvidia/nemotron-3-ultra-550b-a55b:free</code> by default. If the server has a key configured you can leave the
         field below empty; otherwise paste your own — it is sent to your own backend for one request at
         a time and never stored server-side (see <code>ai_advisor/advisor.py</code>). The model can give
         a second opinion and propose a wave count; it can never override the rule-based engine's
@@ -168,17 +168,17 @@
       </div>
       <h2>API key</h2>
       <div class="field-row">
-        <input id="aiKey" type="password" placeholder="nvapi-… (optional if the server has one)" />
+        <input id="aiKey" type="password" placeholder="sk-or-v1-… (optional if the server has one)" />
         <button class="panel-btn" id="saveKey">Save</button>
       </div>
       <div class="hint" id="serverKeyHint">Saved only in this browser (localStorage), never sent anywhere except your own backend.</div>
 
       <h2>Model</h2>
       <div class="field-row">
-        <input id="aiModel" type="text" placeholder="moonshotai/kimi-k3" />
+        <input id="aiModel" type="text" placeholder="nvidia/nemotron-3-ultra-550b-a55b:free" />
       </div>
       <div class="hint">
-        A catalogue id, <code>vendor/model</code>. Editable because catalogues change; if a call comes
+        A router id, <code>vendor/model</code>, optionally with a <code>:free</code> suffix. Editable because catalogues change; if a call comes
         back <code>404</code> the id no longer resolves — paste the current one here, no redeploy
         needed. The AI Analyst needs a model that supports <em>tool calling</em>; one that doesn't will
         answer in prose and submit nothing.
@@ -186,11 +186,10 @@
 
       <h2>API base URL</h2>
       <div class="field-row">
-        <input id="aiBaseUrl" type="text" placeholder="https://integrate.api.nvidia.com/v1" />
+        <input id="aiBaseUrl" type="text" placeholder="https://openrouter.ai/api/v1" />
       </div>
       <div class="hint">
-        From NVIDIA's own API-catalog snippet. This build cannot reach the host to confirm it, so it
-        stays editable: if every call returns <code>404</code> no matter which model you pick, the path
+        This build cannot reach the host to confirm it, so it stays editable: if every call returns <code>404</code> no matter which model you pick, the path
         is wrong. Pasting the full endpoint works too; it won't be doubled up.
       </div>
 
@@ -1146,14 +1145,14 @@ document.getElementById('runAnalyst').addEventListener('click', async () => {
 // provider would be silently forwarded to this one and rejected as
 // invalid, which reads as "the app is broken" rather than "that key is for
 // the wrong service". Bumped on every provider change for that reason.
-const KEY_STORAGE = 't3_nvidia_key';
-const MODEL_STORAGE = 't3_nvidia_model';
-const BASE_URL_STORAGE = 't3_nvidia_base_url';
-const DEFAULT_AI_MODEL = 'moonshotai/kimi-k3';
-const TIMEOUT_STORAGE = 't3_nvidia_timeout';
-const EFFORT_STORAGE = 't3_nvidia_effort';
-const THINKING_STORAGE = 't3_nvidia_thinking';
-const DEFAULT_AI_BASE_URL = 'https://integrate.api.nvidia.com/v1';
+const KEY_STORAGE = 't3_openrouter2_key';
+const MODEL_STORAGE = 't3_openrouter2_model';
+const BASE_URL_STORAGE = 't3_openrouter2_base_url';
+const DEFAULT_AI_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b:free';
+const TIMEOUT_STORAGE = 't3_openrouter2_timeout';
+const EFFORT_STORAGE = 't3_openrouter2_effort';
+const THINKING_STORAGE = 't3_openrouter2_thinking';
+const DEFAULT_AI_BASE_URL = 'https://openrouter.ai/api/v1';
 const DEFAULT_AI_TIMEOUT = 180;
 
 function aiKey() {
@@ -1272,7 +1271,27 @@ document.getElementById('diagnoseAi').addEventListener('click', async () => {
     let html = `<div class="signal ${a.ok ? 'accepted' : 'rejected'}">`
       + `<div class="row"><span class="k">1 · Catalogue (no model)</span>`
       + `<span class="v">${a.ok ? 'OK in ' + a.seconds + 's' : 'FAILED'}</span></div>`;
-    html += a.ok ? row('Models visible', a.model_count) : `<div class="hint">${escapeHtml(a.error || '')}</div>`;
+    if (a.ok) {
+      html += row('Models visible', a.model_count);
+      if (a.tool_capable_count) html += row('Support tool calling', a.tool_capable_count);
+      // The one fact that decides whether the AI Analyst can work at all,
+      // taken from the catalogue rather than guessed from the model's name.
+      if (a.model_supports_tools === true) {
+        html += `<div class="hint" style="color:#4ade80;">`
+          + `${escapeHtml(a.checked_model || '')} supports tool calling — the AI Analyst can run.</div>`;
+      } else if (a.model_supports_tools === false) {
+        html += `<div class="hint" style="color:#fca5a5;">`
+          + `${escapeHtml(a.checked_model || 'This model')} does <strong>not</strong> advertise tool `
+          + `calling. Second opinion and whole-history labelling still work; the AI Analyst needs one `
+          + `of the ${a.tool_capable_count} models that do.</div>`;
+        const picks = (a.tool_capable || []).filter(m => m.includes(':free')).slice(0, 8);
+        if (picks.length) {
+          html += `<div class="hint">Free ones that do: ${picks.map(escapeHtml).join(', ')}</div>`;
+        }
+      }
+    } else {
+      html += `<div class="hint">${escapeHtml(a.error || '')}</div>`;
+    }
     html += `</div>`;
 
     html += `<div class="signal ${c.status === 200 ? 'accepted' : 'rejected'}">`

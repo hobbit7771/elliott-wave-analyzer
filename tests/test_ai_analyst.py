@@ -388,7 +388,7 @@ def test_a_tool_error_does_not_end_the_run_it_is_handed_back_to_the_model():
 
 
 def test_no_api_key_fails_before_anything_is_sent():
-    with pytest.raises(AIAdvisorError, match="No NVIDIA API Catalog API key"):
+    with pytest.raises(AIAdvisorError, match="No OpenRouter API key"):
         run_analyst("", CANDLES, DEGREE)
 
 
