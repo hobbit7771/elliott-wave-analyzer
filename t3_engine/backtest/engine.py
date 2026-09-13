@@ -96,6 +96,22 @@ class BacktestEngine:
         # waves it dropped go with them instead of outliving their parent.
         self.subwaves_by_parent: Dict[tuple, List] = {}
         self._subwaves_attempted: set = set()
+        # AI-ONLY MODE (live Bybit). When `ai_only` is set, this engine
+        # still tracks pivots and structure - the entry score needs them -
+        # but it trades ONLY the count in `ai_scenario`, which is rebuilt
+        # from the agent's saved, server-validated structures (see
+        # ai_advisor/ai_trading.py). Its own scenario engine keeps running
+        # and is simply not traded from: the live chart shows the AI's read
+        # of the market, so the trading on that chart has to come from the
+        # same place, not from a second opinion drawn underneath.
+        #
+        # With no AI count yet, ai_only means NO trades at all. That is the
+        # correct behaviour and not a gap: a count that did not exist when
+        # a candle closed cannot have been traded on it.
+        self.ai_only: bool = False
+        self.ai_scenario = None
+        self._ai_fingerprint: str = ""
+        self._ai_evaluated_id: str = ""
 
     def run(self, candles: List[Candle]) -> Dict:
         for i, candle in enumerate(candles):
@@ -132,7 +148,43 @@ class BacktestEngine:
             direction = self.structure.trend or Direction.UP
             scenarios = self.scenario_engine.rebuild(self.pivot_detector.pivots[:index + 1], direction)
             self._update_subwaves(history)
-            self._maybe_open_trade(scenarios, direction, candle, index, history)
+            if not self.ai_only:
+                self._maybe_open_trade(scenarios, direction, candle, index, history)
+
+        if self.ai_only:
+            self._maybe_open_ai_trade(candle, index, history, new_pivot=pivot is not None)
+
+    def set_ai_scenario(self, scenario, fingerprint: str) -> bool:
+        """Install the count the agent produced. Returns whether it changed.
+
+        The fingerprint is what makes "changed" mean something: a
+        re-analysis that reached the same conclusion must not re-trigger an
+        entry evaluation, and a genuinely new count must."""
+        if fingerprint == self._ai_fingerprint:
+            return False
+        self._ai_fingerprint = fingerprint
+        self.ai_scenario = scenario
+        return True
+
+    def _maybe_open_ai_trade(self, candle: Candle, index: int, history: List[Candle],
+                             new_pivot: bool) -> None:
+        """Evaluate an entry against the AI's count.
+
+        Timing matters here. The engine's own path evaluates on a new pivot
+        because that is when its count can change. An AI count changes at
+        two moments instead: when a new pivot brings new price information,
+        and when the agent hands over a new count. Evaluating on every
+        candle would instead fill the signal log with the same rejected
+        decision over and over."""
+        scenario = self.ai_scenario
+        if scenario is None:
+            return
+        if not new_pivot and scenario.scenario_id == self._ai_evaluated_id:
+            return
+        self._ai_evaluated_id = scenario.scenario_id
+        current = scenario.current_wave
+        direction = current.direction if current is not None else (self.structure.trend or Direction.UP)
+        self._maybe_open_trade([scenario], direction, candle, index, history)
 
     @property
     def subwave_history(self) -> List:

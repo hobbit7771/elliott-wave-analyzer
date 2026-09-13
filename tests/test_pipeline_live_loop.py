@@ -84,8 +84,13 @@ async def test_live_engine_logs_signals_to_disk(tmp_path):
     from t3_engine.backtest.synthetic_data import generate_synthetic_series
     candles = generate_synthetic_series(num_cycles=1)
 
+    # ai_only=False drives the ENGINE's own count. A live session defaults
+    # to the AI's count instead (see test_ai_only_live_session_does_not_trade
+    # _without_a_count below), which with no count produces no signals at
+    # all - correct there, useless for exercising the logging path here.
     engine = LiveTradingEngine(symbol="TESTUSDT", trading_timeframes=(Timeframe.M5,),
-                                entry_confidence_threshold=1.0, log_dir=str(tmp_path))
+                                entry_confidence_threshold=1.0, log_dir=str(tmp_path),
+                                ai_only=False)
     await engine.run_from_trade_stream(_trade_stream_from_candles(candles))
 
     signals_file = tmp_path / "signals.jsonl"
@@ -167,3 +172,121 @@ def test_seed_history_keeps_every_tracked_timeframe_separate():
     assert engine.seeded[Timeframe.M5] == len(candles)
     assert engine.seeded[Timeframe.M15] == 0
     assert engine.history[Timeframe.M15] == []
+
+
+# --- a live session trades the agent's count, not the engine's ----------
+# The live chart shows the AI's read of the market and nothing else, so
+# the paper trading on that chart comes from the same place.
+
+def _ai_analysis(candles, next_label="5"):
+    """A saved AI count over a real synthetic series, in the shape the
+    analysis cache stores (chart times, i.e. seconds)."""
+    def leg(label, a, b):
+        return {"label": label,
+                "start_time": candles[a].open_time // 1000,
+                "end_time": candles[b].open_time // 1000,
+                "start_price": candles[a].close, "end_price": candles[b].close,
+                "direction": "UP" if candles[b].close >= candles[a].close else "DOWN"}
+    return {
+        "analysed_at": 1_700_000_000,
+        "accepted": [{"structure": "IMPULSE", "waves": [
+            leg("1", 0, 20), leg("2", 20, 30), leg("3", 30, 60), leg("4", 60, 70)]}],
+        "projection": {"next_label": next_label,
+                       "targets": [{"ratio": 1.0, "price": candles[-1].close * 1.2,
+                                    "primary": True}]},
+    }
+
+
+def test_an_ai_only_live_session_does_not_trade_without_a_count():
+    """No count, no trades - and that is right, not a gap: a count that did
+    not exist when a candle closed cannot have been traded on it."""
+    from t3_engine.backtest.synthetic_data import generate_synthetic_series
+    candles = generate_synthetic_series(num_cycles=1)
+
+    engine = LiveTradingEngine(symbol="TESTUSDT", trading_timeframes=(Timeframe.M5,),
+                               entry_confidence_threshold=1.0, log_dir="/tmp/t3_test_logs")
+    assert engine.ai_only is True
+    engine.seed_history(Timeframe.M5, candles)
+
+    tf_engine = engine.engines[Timeframe.M5]
+    assert tf_engine.signals == []
+    # ...while the structure underneath it was still tracked, because the
+    # entry score needs it the moment a count does arrive.
+    assert len(tf_engine.pivot_detector.pivots) > 0
+
+
+def test_applying_an_ai_analysis_installs_a_tradeable_count():
+    from t3_engine.backtest.synthetic_data import generate_synthetic_series
+    candles = generate_synthetic_series(num_cycles=1)
+
+    engine = LiveTradingEngine(symbol="TESTUSDT", trading_timeframes=(Timeframe.M5,),
+                               entry_confidence_threshold=1.0, log_dir="/tmp/t3_test_logs")
+    engine.seed_history(Timeframe.M5, candles[:80])
+    assert engine.apply_ai_analysis(Timeframe.M5, _ai_analysis(candles)) is True
+
+    scenario = engine.engines[Timeframe.M5].ai_scenario
+    assert scenario is not None
+    assert scenario.current_wave.label.value == "5"
+
+
+def test_re_applying_the_same_analysis_changes_nothing():
+    """A live chart is polled every few seconds. Re-installing an
+    unchanged count each time would re-evaluate the same entry forever."""
+    from t3_engine.backtest.synthetic_data import generate_synthetic_series
+    candles = generate_synthetic_series(num_cycles=1)
+
+    engine = LiveTradingEngine(symbol="TESTUSDT", trading_timeframes=(Timeframe.M5,),
+                               log_dir="/tmp/t3_test_logs")
+    analysis = _ai_analysis(candles)
+    assert engine.apply_ai_analysis(Timeframe.M5, analysis) is True
+    first = engine.engines[Timeframe.M5].ai_scenario
+    assert engine.apply_ai_analysis(Timeframe.M5, analysis) is False
+    assert engine.engines[Timeframe.M5].ai_scenario is first
+    # a genuinely different count does take effect
+    assert engine.apply_ai_analysis(Timeframe.M5, _ai_analysis(candles, next_label="A")) is True
+
+
+def test_the_ai_count_is_not_applied_retroactively():
+    """Trading a count back over the history it was derived from is
+    lookahead of the plainest kind - the agent saw that whole history
+    before naming the waves."""
+    from t3_engine.backtest.synthetic_data import generate_synthetic_series
+    candles = generate_synthetic_series(num_cycles=1)
+
+    engine = LiveTradingEngine(symbol="TESTUSDT", trading_timeframes=(Timeframe.M5,),
+                               entry_confidence_threshold=1.0, log_dir="/tmp/t3_test_logs")
+    engine.seed_history(Timeframe.M5, candles)
+    engine.apply_ai_analysis(Timeframe.M5, _ai_analysis(candles))
+    # Installing the count evaluates nothing on its own: every candle it
+    # could have been traded on is already in the past.
+    assert engine.engines[Timeframe.M5].signals == []
+
+
+def test_an_analysis_for_an_untracked_timeframe_is_ignored():
+    engine = LiveTradingEngine(symbol="TESTUSDT", trading_timeframes=(Timeframe.M5,),
+                               log_dir="/tmp/t3_test_logs")
+    assert engine.apply_ai_analysis(Timeframe.H4, {"accepted": []}) is False
+
+
+def test_candles_closing_after_the_count_arrives_are_traded_on_it():
+    """The other half of "not retroactive": once the agent's count is in,
+    the next candles ARE evaluated against it, through the same entry
+    plans, scoring, risk sizing and position manager the engine uses."""
+    from t3_engine.backtest.synthetic_data import generate_synthetic_series
+    candles = generate_synthetic_series(num_cycles=2)
+
+    engine = LiveTradingEngine(symbol="TESTUSDT", trading_timeframes=(Timeframe.M5,),
+                               entry_confidence_threshold=1.0, log_dir="/tmp/t3_test_logs")
+    engine.seed_history(Timeframe.M5, candles[:80])
+    engine.apply_ai_analysis(Timeframe.M5, _ai_analysis(candles[:80]))
+    tf_engine = engine.engines[Timeframe.M5]
+    assert tf_engine.signals == []
+
+    engine.seed_history(Timeframe.M5, candles[80:])
+
+    assert tf_engine.signals, "a count in place should be evaluated on new candles"
+    # It is the AI's wave that was traded, and its prices came from the
+    # server's own plan - the model never supplies a price.
+    signal = tf_engine.signals[0]
+    assert signal.wave_label.value == "5"
+    assert signal.stop_loss is not None and signal.take_profits

@@ -343,6 +343,16 @@
         <div id="analystProgress" class="joblog"></div>
       </div>
 
+      <div id="analystSavedWrap" style="display:none;">
+        <h2>Saved counts</h2>
+        <div class="hint" style="margin-bottom:6px;">
+          Every timeframe that has ever been analysed for this instrument, newest work included —
+          a multi-timeframe pass adds four at once. Click one to draw it. Nothing here is
+          recomputed or re-paid for; a new run <strong>adds</strong> to this list rather than
+          replacing it.
+        </div>
+        <div id="analystSaved"></div>
+      </div>
       <div id="analystSummary" style="display:none;">
         <h2>Read</h2>
         <div class="signal" id="analystRead"></div>
@@ -813,8 +823,63 @@ function normalizeSymbol(raw) {
 // and it's consumed (never fires again) on the very next render.
 let shouldFitOnNextData = true;
 
+// What identifies "the same series" - a live poll every few seconds is
+// the SAME chart with one more bar on it, while a symbol or timeframe
+// change is a different chart entirely and must be reset.
+function seriesKeyOf(data) {
+  return `${data.symbol || ''}|${data.timeframe || ''}|${(data.candles || []).length ? data.candles[0].time : 0}`;
+}
+
+// A cheap signature of everything drawn ON TOP of the candles. Rebuilding
+// the overlay set means removing and re-adding a dozen line series, which
+// is what made the live chart flicker and jump every four seconds; with
+// this it only happens when the overlays have actually changed.
+function overlaySignature(data) {
+  const ai = data.ai_analysis;
+  return JSON.stringify([
+    (data.pivots || []).length,
+    (data.scenarios || []).map(s => s.waves.map(w => w.label + w.end_time).join()),
+    (data.confirmed_chain || []).length,
+    (data.subwave_history || []).length,
+    (data.fibonacci_levels || []).map(l => l.price),
+    (data.structure_events || []).length,
+    ai ? [ai.analysed_at, (ai.accepted || []).length, ai.projection && ai.projection.next_label] : null,
+    (data.signals || []).length,
+    aiLabelWaves.length,
+  ]);
+}
+
+let lastSeriesKey = null;
+let lastOverlaySignature = null;
+let lastCandleCount = 0;
+
 function applyChartData(data) {
-  candleSeries.setData(data.candles);
+  // THE JITTER FIX. setData() replaces the whole series: on a live poll
+  // that is 1000 candles re-sent every four seconds, which repaints the
+  // chart, and combined with the overlay rebuild below made it tick,
+  // flicker and drift on its own. A live update is one bar - the forming
+  // one, plus any that closed since the last poll - so that is what gets
+  // sent now. setData stays for a genuinely new series.
+  const key = seriesKeyOf(data);
+  const candles = data.candles || [];
+  if (key !== lastSeriesKey || candles.length < lastCandleCount) {
+    candleSeries.setData(candles);
+    lastSeriesKey = key;
+  } else {
+    // Re-send only the tail. update() must be called in time order and
+    // never for a bar older than the last one the series has seen.
+    const fresh = candles.slice(Math.max(0, lastCandleCount - 1));
+    fresh.forEach(c => candleSeries.update(c));
+  }
+  lastCandleCount = candles.length;
+
+  const signature = overlaySignature(data);
+  if (signature === lastOverlaySignature) {
+    renderDebugPanel(data);
+    lastData = data;
+    return;         // nothing on top of the candles changed - leave it alone
+  }
+  lastOverlaySignature = signature;
   clearOverlays();
   // Full swing-structure context FIRST (drawn underneath), then the
   // current scenario's labelled waves on top - see each function's own
@@ -827,18 +892,27 @@ function applyChartData(data) {
   // over the same candles that read as visual noise / "broken" rather
   // than as useful alternative counts.
   const primary = data.scenarios && data.scenarios[0];
-  if (primary) drawWaves(primary.waves);
+  // On an AI-only live chart `scenarios[0]` IS the agent's count - the
+  // server sends it there so the panel below reads the thing actually
+  // being traded. Drawing it here as well would label every wave twice,
+  // once from the scenario and once from `ai_analysis`. The panel keeps
+  // it; the chart gets it from drawLiveAiAnalysis alone.
+  if (primary && !data.ai_only) drawWaves(primary.waves);
   // A server-VALIDATED AI count, if one has been accepted, drawn in its
   // own colour so it never reads as the engine's own conclusion. An
   // unvalidated or rejected proposal never gets here - aiLabelWaves is
   // only ever filled from a response whose `valid` was true.
-  drawAiCount(aiLabelWaves);
+  // Not on an AI-only live chart: the agent's own count is already there,
+  // and a second one over the same candles is the superimposed mess the
+  // analyst tab exists to avoid.
+  if (!data.ai_only) drawAiCount(aiLabelWaves);
   drawTradeLevels(data.signals);
   drawFibonacciLevels(data.fibonacci_levels);
   // Before markers(): it merges liveAiMarkers into the single marker set
   // the candle series can hold, so this has to have filled them first.
   drawLiveAiAnalysis(data.ai_analysis);
-  markers(data.structure_events || [], primary ? [primary] : [], data.confirmed_chain || [], data.subwave_history || []);
+  markers(data.structure_events || [], (primary && !data.ai_only) ? [primary] : [],
+          data.confirmed_chain || [], data.subwave_history || []);
   if (shouldFitOnNextData) {
     chart.timeScale().fitContent();
     shouldFitOnNextData = false;
@@ -932,6 +1006,11 @@ async function run() {
   // TF) - the chart SHOULD fit to it once. See applyChartData's comment
   // for why this must NOT happen again on every subsequent live poll.
   shouldFitOnNextData = true;
+  // ...and the incremental-update state has to forget the previous series,
+  // or the first render of the new one would try to extend the old one.
+  lastSeriesKey = null;
+  lastOverlaySignature = null;
+  lastCandleCount = 0;
 
   if (source === 'live') {
     if (!symbol) { showError('Enter a symbol first, e.g. BTCUSDT.'); return; }
@@ -1068,6 +1147,7 @@ document.querySelectorAll('#tabs button').forEach(btn => {
     document.getElementById('analystChart').style.display = onAnalyst ? 'block' : 'none';
     if (onAnalyst) ensureAnalystChart();
     if (active === 'mtf') loadSavedMtf();
+    if (active === 'analyst') loadSavedCounts();
   });
 });
 
@@ -1485,6 +1565,86 @@ function elapsed(snap) {
   return secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`;
 }
 
+// ---- saved counts, per timeframe -------------------------------------
+// The analyst tab used to show exactly one count: whatever had just been
+// run. A multi-timeframe pass computes four, saves all four, and the tab
+// forgot them the moment it was reopened. This panel is the list of what
+// is actually stored, so the tab accumulates instead of replacing.
+let savedCounts = [];
+
+async function loadSavedCounts() {
+  const source = document.getElementById('source').value;
+  if (source === 'live') return;      // live has its own AI overlay already
+  try {
+    const params = new URLSearchParams({
+      source, symbol: normalizeSymbol(document.getElementById('symbol').value),
+    });
+    const resp = await fetchWithTimeout('/api/ai/saved?' + params.toString(), {}, 30000);
+    if (!resp.ok) return;
+    const body = await resp.json();
+    savedCounts = body.timeframes || [];
+    renderSavedCounts();
+  } catch (e) { /* a list that cannot be fetched is not worth an error banner */ }
+}
+
+function renderSavedCounts() {
+  const wrap = document.getElementById('analystSavedWrap');
+  const el = document.getElementById('analystSaved');
+  if (!savedCounts.length) { wrap.style.display = 'none'; return; }
+  wrap.style.display = '';
+  el.innerHTML = savedCounts.map((row, i) => {
+    const cover = (row.coverage || {}).covered_fraction;
+    const next = row.projection && row.projection.next_label;
+    return `<div class="signal accepted" data-saved="${i}" style="cursor:pointer;">`
+      + `<div class="row"><span class="k">${escapeHtml(row.timeframe)}</span>`
+      + `<span class="v">${row.structures} structure(s)`
+      + `${cover !== undefined ? ' · ' + Math.round(cover * 100) + '% labelled' : ''}</span></div>`
+      + `<div class="row"><span class="k">Analysed</span>`
+      + `<span class="v">${fmtTime(row.analysed_at)}</span></div>`
+      + (next ? `<div class="row"><span class="k">Expects next</span>`
+          + `<span class="v" style="color:#f0abfc;">wave ${escapeHtml(String(next))}</span></div>` : '')
+      + (row.summary ? `<div class="hint">${escapeHtml(row.summary)}</div>` : '')
+      + `</div>`;
+  }).join('');
+  el.querySelectorAll('[data-saved]').forEach(node => {
+    node.addEventListener('click', () => drawSavedCount(Number(node.dataset.saved)));
+  });
+}
+
+// Draws a stored count on the analyst chart, fetching the candles it
+// belongs to. The count itself is never recomputed - this is the whole
+// point of the panel.
+async function drawSavedCount(index) {
+  const row = savedCounts[index];
+  if (!row) return;
+  ensureAnalystChart();
+  const statusEl = document.getElementById('analystStatus');
+  statusEl.textContent = `Loading ${row.timeframe} candles…`;
+  try {
+    const params = new URLSearchParams({
+      source: document.getElementById('source').value,
+      symbol: normalizeSymbol(document.getElementById('symbol').value),
+      timeframe: row.timeframe,
+      limit: document.getElementById('limit').value,
+      cycles: document.getElementById('cycles').value,
+    });
+    const resp = await fetchWithTimeout('/api/run?' + params.toString(), {}, 120000);
+    const data = await resp.json();
+    if (!resp.ok) { statusEl.textContent = data.detail || 'Could not load candles.'; return; }
+    analystSeries.setData(data.candles);
+    if (data.candles.length) {
+      analystFirstTime = data.candles[0].time;
+      analystLastTime = data.candles[data.candles.length - 1].time;
+    }
+    drawAnalystCount(row.accepted);
+    drawAnalystProjection(row.projection);
+    analystChart.timeScale().fitContent();
+    statusEl.textContent = `Showing the saved ${row.timeframe} count from ${fmtTime(row.analysed_at)}.`;
+  } catch (e) {
+    statusEl.textContent = e.message || 'Network error loading candles.';
+  }
+}
+
 // Follows an already-started multi-timeframe job to its end. Split out
 // from the button handler because the same code has to run when a reload
 // reattaches to a job that was already in flight.
@@ -1501,6 +1661,9 @@ async function watchMtfJob(jobId) {
     ensureAnalystChart();
     mtfShowing = true;
     renderMtf(data);
+    // A multi-timeframe pass just saved four counts - the analyst tab's
+    // list is what makes them findable afterwards.
+    loadSavedCounts();
     flagTab('mtf');
     statusEl.textContent = data.note
       || `Recomputed ${(data.recomputed || []).join(', ') || 'nothing'}.`;
@@ -1648,6 +1811,7 @@ async function watchAnalystJob(jobId) {
       statusEl.textContent = `Running for ${elapsed(snap)} — ${last}`;
     });
     applyAnalystResult(data);
+    loadSavedCounts();          // the run just added to the list
     flagTab('analyst');
   } catch (e) {
     statusEl.textContent = e.message || 'The analyst run failed.';

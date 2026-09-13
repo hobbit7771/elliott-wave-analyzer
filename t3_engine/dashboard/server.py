@@ -161,7 +161,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-032"
+BUILD_VERSION = "BUILD-CHECK-033"
 
 
 @app.get("/api/health")
@@ -455,6 +455,13 @@ def live_state(symbol: str = Query(...), timeframe: str = Query("5m")):
 
     tf_engine = engine.engines[tf]
     candles = list(engine.history[tf])
+    # Hand this timeframe's engine whatever count the agent has saved for
+    # it, before reporting state. Idempotent by fingerprint, so polling
+    # every few seconds costs nothing and a re-analysis takes effect on the
+    # next candle that closes - never retroactively over the history the
+    # agent already saw.
+    analysis = live_ai_analysis(symbol, tf, candles)
+    engine.apply_ai_analysis(tf, analysis)
     # The current, still-forming bar isn't in `history` yet (it only gets
     # appended once its bucket closes - see candle_builder/aggregator.py's
     # no-lookahead guarantee), but a live chart should still show it
@@ -470,20 +477,35 @@ def live_state(symbol: str = Query(...), timeframe: str = Query("5m")):
         "trades_received": engine.trades_received,
         "live_source": engine.live_source,
         "error": _live_errors.get(symbol),
-        "scenarios": [scenario_to_dict(s) for s in tf_engine.scenario_engine.scenarios],
-        "structure_events": [structure_event_to_dict(e) for e in tf_engine.structure.events],
-        "pivots": [pivot_to_dict(p) for p in tf_engine.pivot_detector.pivots],
-        "confirmed_chain": [wave_to_dict(w) for w in tf_engine.scenario_engine.confirmed_chain],
-        "subwave_history": [wave_to_dict(w) for w in tf_engine.subwave_history],
-        "fibonacci_levels": fibonacci_levels_for_scenario(
+        # In AI-only mode (the default for a live session) the chart is the
+        # AGENT'S read of the market and nothing else. The engine's own
+        # pivots, scenarios, confirmed chain, subwaves and Fibonacci grid
+        # are still computed - the entry score needs the structure - but
+        # they are not sent, because a second count drawn underneath the
+        # agent's is exactly the superimposed mess the analyst tab exists
+        # to avoid. `scenarios` carries the AI's count instead, so the
+        # existing debug panel reads the thing actually being traded.
+        "scenarios": ([scenario_to_dict(tf_engine.ai_scenario)] if tf_engine.ai_scenario else []
+                      ) if engine.ai_only else
+                     [scenario_to_dict(s) for s in tf_engine.scenario_engine.scenarios],
+        "structure_events": [] if engine.ai_only else
+                            [structure_event_to_dict(e) for e in tf_engine.structure.events],
+        "pivots": [] if engine.ai_only else
+                  [pivot_to_dict(p) for p in tf_engine.pivot_detector.pivots],
+        "confirmed_chain": [] if engine.ai_only else
+                           [wave_to_dict(w) for w in tf_engine.scenario_engine.confirmed_chain],
+        "subwave_history": [] if engine.ai_only else
+                           [wave_to_dict(w) for w in tf_engine.subwave_history],
+        "fibonacci_levels": [] if engine.ai_only else fibonacci_levels_for_scenario(
             tf_engine.scenario_engine.scenarios[0] if tf_engine.scenario_engine.scenarios else None
         ),
+        "ai_only": engine.ai_only,
         "seeded_candles": engine.seeded.get(tf, 0),
         # The saved AI analysis for this exact series, so a live chart opens
         # with the model's markup already on it instead of a bare stream.
         # `candles_since` is how far behind it has fallen - a saved count
         # shown without that would read as current when it is not.
-        "ai_analysis": live_ai_analysis(symbol, tf, candles),
+        "ai_analysis": analysis,
         "tradeable": tf in TRADEABLE_TIMEFRAMES,
         "signals": [signal_to_dict(s) for s in tf_engine.signals[-50:]],
         "open_positions": [position_to_dict(p) for p in tf_engine.position_manager.positions.values() if not p.closed],
@@ -697,6 +719,10 @@ def ai_signal_quality(api_key: str = Body("", embed=True), source: str = Body("s
 # dropped connection, which is exactly what a twelve-minute run must not
 # be allowed to lose.
 MTF_CACHE_KEY = "mtf-verdict"
+
+# Saved counts are listed shortest timeframe first, the way the timeframe
+# picker reads, rather than by when they happened to be computed.
+TIMEFRAME_ORDER = {"1m": 0, "5m": 1, "15m": 2, "1h": 3, "4h": 4}
 
 
 def run_multi_work(api_key: str, source: str, symbol: str, limit: int, cycles: int, model: str,
@@ -922,6 +948,38 @@ def ai_job(job_id: str = Query(...), since: int = Query(0, ge=0)):
     snapshot["progress"] = snapshot["progress"][since:]
     snapshot["progress_total"] = len(job.progress)
     return snapshot
+
+
+@app.get("/api/ai/saved")
+def ai_saved(source: str = Query("synthetic"), symbol: str = Query("SYNTHETIC")):
+    """Every timeframe ever analysed for this instrument, newest first.
+
+    The analyst tab used to show exactly one count: whatever was just run.
+    A multi-timeframe pass computes four and they vanished from that tab
+    the moment it was reopened, even though all four were saved. This is
+    the list that makes the tab ACCUMULATE - a new run on 4h adds to what
+    is there rather than replacing it, and a count paid for yesterday is
+    still one click away."""
+    resolved = normalize_symbol(symbol) if source == "bybit" else symbol
+    out = []
+    for cached in analysis_store.list_for(source, resolved):
+        if cached.timeframe == MTF_CACHE_KEY:
+            continue                # the verdict, not a timeframe - /api/ai/multi/saved serves it
+        payload = cached.payload
+        out.append({
+            "timeframe": cached.timeframe,
+            "analysed_at": cached.created_at,
+            "last_candle_time": cached.last_candle_time,
+            "candles": cached.candle_count,
+            "model": cached.model,
+            "structures": len(payload.get("accepted") or []),
+            "coverage": payload.get("coverage", {}),
+            "summary": payload.get("summary", ""),
+            "accepted": payload.get("accepted", []),
+            "projection": payload.get("projection"),
+        })
+    out.sort(key=lambda row: TIMEFRAME_ORDER.get(row["timeframe"], 99))
+    return {"symbol": resolved, "source": source, "timeframes": out}
 
 
 @app.get("/api/ai/multi/saved")

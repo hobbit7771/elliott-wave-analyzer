@@ -1490,3 +1490,105 @@ def test_index_follows_jobs_instead_of_holding_a_twelve_minute_request_open():
     assert "/api/ai/job?job_id=" in resp.text
     assert "resumeJobs" in resp.text          # a reload reattaches to a running analysis
     assert "Live progress" in resp.text       # and it is visible while it runs
+
+
+# ---- live is the agent's chart, and only the agent's --------------------
+
+def _live_engine_for(symbol, monkeypatch, ai_only=True):
+    from t3_engine.backtest.synthetic_data import generate_synthetic_series
+    from t3_engine.pipeline.live_loop import LiveTradingEngine
+    candles = generate_synthetic_series(num_cycles=1)
+    engine = LiveTradingEngine(symbol=symbol, trading_timeframes=(Timeframe.M5,),
+                               log_dir="/tmp/t3_test_logs", ai_only=ai_only)
+    engine.seed_history(Timeframe.M5, candles)
+    monkeypatch.setitem(server_module._live_engines, symbol, engine)
+    return engine, candles
+
+
+def test_live_state_sends_no_engine_markup_in_ai_only_mode(tmp_path, monkeypatch):
+    """A second count drawn underneath the agent's is exactly the
+    superimposed mess the analyst tab exists to avoid."""
+    _seed_store(tmp_path, monkeypatch)
+    _live_engine_for("AIONLYUSDT", monkeypatch)
+    body = client.get("/api/live/state",
+                      params={"symbol": "AIONLYUSDT", "timeframe": "5m"}).json()
+    assert body["ai_only"] is True
+    assert body["pivots"] == []
+    assert body["confirmed_chain"] == []
+    assert body["subwave_history"] == []
+    assert body["structure_events"] == []
+    assert body["fibonacci_levels"] == []
+    assert body["scenarios"] == []          # no AI count saved yet either
+    assert body["candles"]                  # the candles themselves are still there
+
+
+def test_live_state_shows_the_engines_own_count_when_ai_only_is_off(tmp_path, monkeypatch):
+    _seed_store(tmp_path, monkeypatch)
+    _live_engine_for("ENGINEUSDT", monkeypatch, ai_only=False)
+    body = client.get("/api/live/state",
+                      params={"symbol": "ENGINEUSDT", "timeframe": "5m"}).json()
+    assert body["ai_only"] is False
+    assert body["pivots"]
+
+
+def test_live_state_installs_the_saved_ai_count_and_reports_it_as_the_scenario(tmp_path, monkeypatch):
+    store = _seed_store(tmp_path, monkeypatch)
+    engine, candles = _live_engine_for("COUNTUSDT", monkeypatch)
+
+    def leg(label, a, b):
+        return {"label": label, "start_time": candles[a].open_time // 1000,
+                "end_time": candles[b].open_time // 1000,
+                "start_price": candles[a].close, "end_price": candles[b].close,
+                "direction": "UP" if candles[b].close >= candles[a].close else "DOWN"}
+
+    store.save("bybit", "COUNTUSDT", "5m", candles[-1].open_time, len(candles), {
+        "accepted": [{"structure": "IMPULSE", "waves": [
+            leg("1", 0, 20), leg("2", 20, 30), leg("3", 30, 60), leg("4", 60, 70)]}],
+        "projection": {"next_label": "5",
+                       "targets": [{"ratio": 1.0, "price": candles[-1].close * 1.2,
+                                    "primary": True}]},
+        "coverage": {}, "summary": "impulse up",
+    }, model="test-model")
+
+    body = client.get("/api/live/state",
+                      params={"symbol": "COUNTUSDT", "timeframe": "5m"}).json()
+    # The scenario the live panel shows IS the agent's count - the thing
+    # actually being traded, not a second opinion.
+    assert len(body["scenarios"]) == 1
+    assert body["scenarios"][0]["waves"][-1]["label"] == "5"
+    assert engine.engines[Timeframe.M5].ai_scenario is not None
+
+
+def test_saved_counts_list_accumulates_every_analysed_timeframe(tmp_path, monkeypatch):
+    """A multi-timeframe pass saves four counts. The analyst tab used to
+    forget all of them the moment it was reopened."""
+    store = _seed_store(tmp_path, monkeypatch)
+    for tf, structures in (("4h", 2), ("5m", 1), ("1h", 3)):
+        store.save("bybit", "INJUSDT", tf, 1000, 500, {
+            "accepted": [{"structure": "IMPULSE", "waves": []}] * structures,
+            "projection": {"next_label": "3"}, "coverage": {"covered_fraction": 0.7},
+            "summary": f"{tf} read",
+        }, model="m")
+    # the multi-timeframe verdict shares the cache but is not a timeframe
+    store.save("bybit", "INJUSDT", server_module.MTF_CACHE_KEY, 1000, 500, {"verdict": {}}, model="m")
+
+    body = client.get("/api/ai/saved", params={"source": "bybit", "symbol": "INJUSDT"}).json()
+    assert [row["timeframe"] for row in body["timeframes"]] == ["5m", "1h", "4h"]
+    assert body["timeframes"][2]["structures"] == 2
+    assert body["timeframes"][0]["projection"]["next_label"] == "3"
+
+
+def test_saved_counts_list_is_empty_not_an_error_for_a_fresh_instrument(tmp_path, monkeypatch):
+    _seed_store(tmp_path, monkeypatch)
+    resp = client.get("/api/ai/saved", params={"source": "bybit", "symbol": "FRESHUSDT"})
+    assert resp.status_code == 200
+    assert resp.json()["timeframes"] == []
+
+
+def test_index_stops_repainting_the_whole_live_series_every_poll():
+    """The live chart ticked, flickered and drifted because every four
+    second poll replaced 1000 candles and rebuilt every overlay."""
+    resp = client.get("/")
+    assert "candleSeries.update(c)" in resp.text
+    assert "overlaySignature" in resp.text
+    assert "Saved counts" in resp.text
