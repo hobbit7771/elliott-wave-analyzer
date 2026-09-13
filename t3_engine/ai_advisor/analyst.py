@@ -17,7 +17,7 @@ difference matters:
   computed rather than over anything it remembered or invented.
 
 PROVIDER NOTE: this loop needs a model that supports tool calling. Not
-every model on OpenRouter does, and one that does not will either error or
+every model on OrcaRouter does, and one that does not will either error or
 answer in prose - which comes back as `finished: False` with the model's
 last message attached, rather than as an empty result dressed up as a
 finished analysis.
@@ -153,7 +153,8 @@ def _parse_tool_arguments(call: Dict[str, Any]) -> Dict[str, Any]:
 
 def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: str = "",
                 model: str = DEFAULT_MODEL, max_steps: int = DEFAULT_MAX_STEPS,
-                client: Optional[httpx.Client] = None, timeout: float = 120.0) -> AnalystResult:
+                client: Optional[httpx.Client] = None, timeout: float = 120.0,
+                base_url: Optional[str] = None) -> AnalystResult:
     """Run the label-from-scratch loop and return whatever survived
     validation. Raises AIAdvisorError only for transport/API failures - a
     model that produces a bad count is a RESULT (with the broken rules
@@ -168,7 +169,7 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
     steps_used = 0
     for step in range(max_steps):
         steps_used = step + 1
-        data = _post(api_key, model, _tool_payload(ELLIOTT_PLAYBOOK, messages), client, timeout)
+        data = _post(api_key, model, _tool_payload(ELLIOTT_PLAYBOOK, messages), client, timeout, base_url)
         message = _assistant_turn(data)
         calls = message.get("tool_calls") or []
 

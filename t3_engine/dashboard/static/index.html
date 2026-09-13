@@ -143,14 +143,14 @@
     </div>
     <div id="tab-ai" style="display:none;">
       <div class="note">
-        Bring your own OpenRouter API key (<code>openrouter.ai/keys</code>). It is sent to your own
-        backend for one request at a time, forwarded to OpenRouter, and never stored server-side — see
+        Bring your own OrcaRouter API key (<code>orcarouter.ai</code>). It is sent to your own
+        backend for one request at a time, forwarded to OrcaRouter, and never stored server-side — see
         <code>ai_advisor/advisor.py</code>. The model can give a second opinion and propose a wave count;
         it can never override the rule-based engine's accept/reject decision.
       </div>
-      <h2>OpenRouter API key</h2>
+      <h2>OrcaRouter API key</h2>
       <div class="field-row">
-        <input id="aiKey" type="password" placeholder="sk-or-v1-..." />
+        <input id="aiKey" type="password" placeholder="your OrcaRouter key" />
         <button class="panel-btn" id="saveKey">Save</button>
       </div>
       <div class="hint">Saved only in this browser (localStorage), never sent anywhere except your own backend.</div>
@@ -160,11 +160,24 @@
         <input id="aiModel" type="text" placeholder="deepseek/deepseek-v4-flash-free" />
       </div>
       <div class="hint">
-        A router id, <code>vendor/model</code>, optionally with a variant suffix like <code>:free</code>.
-        Editable because OpenRouter's catalogue changes constantly — if a call comes back
-        <code>404</code>, the id no longer resolves; find the current one at <code>openrouter.ai/models</code>
-        and paste it here. Saved with the key, no redeploy needed. The AI Analyst needs a model that
-        supports <em>tool calling</em>; one that doesn't will answer in prose and submit nothing.
+        A router id, <code>vendor/model</code> — e.g. <code>deepseek/deepseek-v4-flash</code>, or
+        <code>orcarouter/free</code> to let the router pick by complexity. Editable because a router's
+        catalogue changes constantly; if a call comes back <code>404</code>, the id no longer resolves —
+        check the Models page and paste the current one here. Saved with the key, no redeploy needed.
+        The AI Analyst needs a model that supports <em>tool calling</em>; one that doesn't will answer
+        in prose and submit nothing.
+      </div>
+
+      <h2>API base URL</h2>
+      <div class="field-row">
+        <input id="aiBaseUrl" type="text" placeholder="https://orcarouter.ai/api/v1" />
+      </div>
+      <div class="hint">
+        Editable for an honest reason: the sandbox this was built in cannot reach
+        <code>orcarouter.ai</code>, so the default path is the OpenAI-compatible convention every router
+        of this kind uses — <em>not</em> something verified against the live service. If every call
+        returns <code>404</code> no matter which model you pick, the path is wrong: paste the one from
+        OrcaRouter's own docs here. Pasting the full endpoint works too; it won't be doubled up.
       </div>
 
       <h2>Ask the model about the current setup</h2>
@@ -900,7 +913,7 @@ function renderAnalystStructures(data) {
 document.getElementById('runAnalyst').addEventListener('click', async () => {
   const apiKey = aiKey();
   const statusEl = document.getElementById('analystStatus');
-  if (!apiKey) { statusEl.textContent = 'Enter and save your OpenRouter API key in the AI Advisor tab first.'; return; }
+  if (!apiKey) { statusEl.textContent = 'Enter and save your OrcaRouter API key in the AI Advisor tab first.'; return; }
   const source = document.getElementById('source').value;
   if (source === 'live') {
     statusEl.textContent = 'Switch to Synthetic or Bybit (history) — the analyst works a loaded history, not a live stream.';
@@ -916,6 +929,7 @@ document.getElementById('runAnalyst').addEventListener('click', async () => {
       body: JSON.stringify({
         api_key: apiKey,
         model: aiModel(),
+        base_url: aiBaseUrl(),
         source,
         symbol: normalizeSymbol(document.getElementById('symbol').value),
         timeframe: document.getElementById('timeframe').value,
@@ -949,39 +963,51 @@ document.getElementById('runAnalyst').addEventListener('click', async () => {
   }
 });
 
-// ---- AI advisor + labelling (BYO OpenRouter key) ----
-// Storage keys are provider-scoped: an old Gemini key left in localStorage
-// would be silently sent to OpenRouter and rejected as invalid, which reads
-// as "the app is broken" rather than "that key is for the wrong service".
-const KEY_STORAGE = 't3_openrouter_key';
-const MODEL_STORAGE = 't3_openrouter_model';
+// ---- AI advisor + labelling (BYO OrcaRouter key) ----
+// Storage keys are provider-scoped: a key left over from a previous
+// provider would be silently forwarded to this one and rejected as
+// invalid, which reads as "the app is broken" rather than "that key is for
+// the wrong service". Bumped on every provider change for that reason.
+const KEY_STORAGE = 't3_orcarouter_key';
+const MODEL_STORAGE = 't3_orcarouter_model';
+const BASE_URL_STORAGE = 't3_orcarouter_base_url';
 const DEFAULT_AI_MODEL = 'deepseek/deepseek-v4-flash-free';
+const DEFAULT_AI_BASE_URL = 'https://orcarouter.ai/api/v1';
 
 function aiKey() {
   return localStorage.getItem(KEY_STORAGE) || document.getElementById('aiKey').value.trim();
 }
 // The model name travels with every request rather than being baked into
-// the server: a router carries hundreds of models whose ids, prices and
-// free tiers change week to week, so the correct model is a property of
-// whose key it is, not of this deployment.
+// the server: a router's catalogue, prices and free tiers change week to
+// week, so the correct model is a property of whose key it is, not of this
+// deployment.
 function aiModel() {
   return document.getElementById('aiModel').value.trim()
     || localStorage.getItem(MODEL_STORAGE)
     || DEFAULT_AI_MODEL;
 }
+// The endpoint is a field for the same reason the model is: neither could
+// be verified from the build sandbox, and neither should need a redeploy.
+function aiBaseUrl() {
+  return document.getElementById('aiBaseUrl').value.trim()
+    || localStorage.getItem(BASE_URL_STORAGE)
+    || DEFAULT_AI_BASE_URL;
+}
 document.getElementById('aiKey').value = localStorage.getItem(KEY_STORAGE) || '';
 document.getElementById('aiModel').value = localStorage.getItem(MODEL_STORAGE) || DEFAULT_AI_MODEL;
+document.getElementById('aiBaseUrl').value = localStorage.getItem(BASE_URL_STORAGE) || DEFAULT_AI_BASE_URL;
 document.getElementById('saveKey').addEventListener('click', () => {
   localStorage.setItem(KEY_STORAGE, document.getElementById('aiKey').value.trim());
   localStorage.setItem(MODEL_STORAGE, aiModel());
-  document.getElementById('aiStatus').textContent = 'Key and model saved in this browser.';
+  localStorage.setItem(BASE_URL_STORAGE, aiBaseUrl());
+  document.getElementById('aiStatus').textContent = 'Key, model and API URL saved in this browser.';
 });
 
 document.getElementById('askAi').addEventListener('click', async () => {
   const apiKey = aiKey();
   const statusEl = document.getElementById('aiStatus');
   const answerEl = document.getElementById('ai-answer');
-  if (!apiKey) { statusEl.textContent = 'Enter and save your OpenRouter API key first.'; return; }
+  if (!apiKey) { statusEl.textContent = 'Enter and save your OrcaRouter API key first.'; return; }
   if (!lastData) { statusEl.textContent = 'Run an analysis first.'; return; }
 
   const primary = lastData.scenarios[0];
@@ -1006,7 +1032,7 @@ document.getElementById('askAi').addEventListener('click', async () => {
     // request that hangs forever looks identical to one that failed.
     const resp = await fetchWithTimeout('/api/ai/advice', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ api_key: apiKey, context, model: aiModel() }),
+      body: JSON.stringify({ api_key: apiKey, context, model: aiModel(), base_url: aiBaseUrl() }),
     }, 90000);
     const data = await resp.json();
     if (!resp.ok) { statusEl.textContent = data.detail || 'Request failed.'; return; }
@@ -1025,7 +1051,7 @@ document.getElementById('askAiLabel').addEventListener('click', async () => {
   const apiKey = aiKey();
   const statusEl = document.getElementById('aiLabelStatus');
   const answerEl = document.getElementById('ai-label-answer');
-  if (!apiKey) { statusEl.textContent = 'Enter and save your OpenRouter API key first.'; return; }
+  if (!apiKey) { statusEl.textContent = 'Enter and save your OrcaRouter API key first.'; return; }
 
   const source = document.getElementById('source').value;
   if (source === 'live') {
@@ -1041,6 +1067,7 @@ document.getElementById('askAiLabel').addEventListener('click', async () => {
       body: JSON.stringify({
         api_key: apiKey,
         model: aiModel(),
+        base_url: aiBaseUrl(),
         source,
         symbol: normalizeSymbol(document.getElementById('symbol').value),
         timeframe: document.getElementById('timeframe').value,

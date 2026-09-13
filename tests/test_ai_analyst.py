@@ -237,7 +237,7 @@ def test_the_agent_works_the_chart_then_submits_a_validated_count():
             "reasoning": "Wave 3 is the longest; wave 4 stays clear of wave 1.",
         }),
     ])
-    result = run_analyst("sk-or-test", CANDLES, DEGREE, symbol="SYNTHETIC", client=client)
+    result = run_analyst("sk-test", CANDLES, DEGREE, symbol="SYNTHETIC", client=client)
 
     assert result.finished
     assert len(result.accepted) == 1
@@ -257,7 +257,7 @@ def test_the_agent_is_given_tools_and_the_playbook_not_a_pre_made_count():
             "summary": "s", "reasoning": "r",
         }),
     ])
-    run_analyst("sk-or-test", CANDLES, DEGREE, symbol="SYNTHETIC", client=client)
+    run_analyst("sk-test", CANDLES, DEGREE, symbol="SYNTHETIC", client=client)
 
     payload = sent[0]
     brief = payload["messages"][1]["content"]
@@ -284,7 +284,7 @@ def test_tool_results_are_fed_back_so_the_model_reasons_over_real_data():
             "summary": "s", "reasoning": "r",
         }),
     ])
-    run_analyst("sk-or-test", CANDLES, DEGREE, client=client)
+    run_analyst("sk-test", CANDLES, DEGREE, client=client)
 
     second_request = sent[1]
     roles = [turn["role"] for turn in second_request["messages"]]
@@ -299,7 +299,7 @@ def test_a_model_that_never_submits_is_reported_as_unfinished_not_as_success():
     """The quiet failure this guards against: an empty result presented as
     a completed analysis."""
     client, _ = scripted_client([text_turn("I think this is probably a wave 3 somewhere.")])
-    result = run_analyst("sk-or-test", CANDLES, DEGREE, client=client)
+    result = run_analyst("sk-test", CANDLES, DEGREE, client=client)
 
     assert not result.finished
     assert result.accepted == []
@@ -309,7 +309,7 @@ def test_a_model_that_never_submits_is_reported_as_unfinished_not_as_success():
 
 def test_a_model_that_loops_forever_is_stopped_by_the_step_budget():
     client, sent = scripted_client([function_call_turn("list_pivots", {"deviation_pct": 1.0})])
-    result = run_analyst("sk-or-test", CANDLES, DEGREE, client=client, max_steps=4)
+    result = run_analyst("sk-test", CANDLES, DEGREE, client=client, max_steps=4)
 
     assert not result.finished
     assert result.steps_used == 4
@@ -327,7 +327,7 @@ def test_a_truncated_turn_is_reported_as_a_token_budget_problem():
     client, _ = scripted_client([empty_truncated])
 
     with pytest.raises(AIAdvisorError, match="output-token limit"):
-        run_analyst("sk-or-test", CANDLES, DEGREE, client=client)
+        run_analyst("sk-test", CANDLES, DEGREE, client=client)
 
 
 def test_a_tool_error_does_not_end_the_run_it_is_handed_back_to_the_model():
@@ -340,7 +340,7 @@ def test_a_tool_error_does_not_end_the_run_it_is_handed_back_to_the_model():
             "summary": "s", "reasoning": "r",
         }),
     ])
-    result = run_analyst("sk-or-test", CANDLES, DEGREE, client=client)
+    result = run_analyst("sk-test", CANDLES, DEGREE, client=client)
 
     assert result.finished
     assert "error" in result.steps[0].result_summary
@@ -349,7 +349,7 @@ def test_a_tool_error_does_not_end_the_run_it_is_handed_back_to_the_model():
 
 
 def test_no_api_key_fails_before_anything_is_sent():
-    with pytest.raises(AIAdvisorError, match="No OpenRouter API key"):
+    with pytest.raises(AIAdvisorError, match="No OrcaRouter API key"):
         run_analyst("", CANDLES, DEGREE)
 
 
@@ -370,7 +370,7 @@ def test_malformed_tool_arguments_do_not_end_the_run():
                         "direction": "UP", "waves": GOOD_IMPULSE}],
         "summary": "s", "reasoning": "r",
     }, call_id="call_2")])
-    result = run_analyst("sk-or-test", CANDLES, DEGREE, client=client)
+    result = run_analyst("sk-test", CANDLES, DEGREE, client=client)
 
     assert result.finished
     assert "not valid JSON" in result.steps[0].result_summary
@@ -381,7 +381,7 @@ def test_a_model_with_no_tool_support_answers_in_prose_and_is_reported_as_such()
     """Not every router model supports tool calling. One that doesn't must
     not look like a finished analysis with nothing in it."""
     client, _ = scripted_client([text_turn("I cannot call functions, but here is my view: wave 3.")])
-    result = run_analyst("sk-or-test", CANDLES, DEGREE, client=client)
+    result = run_analyst("sk-test", CANDLES, DEGREE, client=client)
 
     assert not result.finished
     assert result.accepted == []

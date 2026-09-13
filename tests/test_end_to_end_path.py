@@ -80,7 +80,7 @@ def test_stage2_hallucinated_count_is_stopped_before_it_can_be_drawn():
     with patch.object(server_module, "request_wave_count",
                       return_value=_FakeProposal([{"label": "1", "start_pivot_index": 0,
                                                    "end_pivot_index": 10_000}])):
-        resp = client.post("/api/ai/label", json={"api_key": "sk-or-test", "source": "synthetic", "cycles": 2})
+        resp = client.post("/api/ai/label", json={"api_key": "sk-test", "source": "synthetic", "cycles": 2})
     body = resp.json()
     assert resp.status_code == 200
     assert body["valid"] is False and body["waves"] == []

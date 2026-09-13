@@ -18,11 +18,19 @@ different amounts of trust:
   chart or a trade. The model picks which pivots to connect; the server
   decides what is a legal wave.
 
-PROVIDER: OpenRouter (https://openrouter.ai). This replaced Google's
+PROVIDER: OrcaRouter (https://orcarouter.ai). This replaced Google's
 Gemini API on request, which had itself replaced OpenAI. The wire format
 is OpenAI-compatible chat completions, so the payloads here are plain
 `messages` + `tools` rather than Gemini's `contents`/`systemInstruction`/
 `functionCall` shapes.
+
+UNVERIFIED ENDPOINT: the sandbox this was written in cannot reach
+orcarouter.ai (the egress proxy refuses the CONNECT), so `/api/v1/chat/
+completions` below is the OpenAI-compatible convention every router of
+this kind exposes - it is NOT something this code has confirmed against
+the live service. That is exactly why the base URL is overridable per
+request and by environment variable, the same way the model id is: if the
+real path differs, it is a paste in the dashboard rather than a redeploy.
 
 The practical reason this keeps changing, and why the model name is an
 editable field in the UI rather than a constant in this file: a router
@@ -35,7 +43,7 @@ never written to disk, DB or logs. See dashboard/server.py's
 `/api/ai/advice`, `/api/ai/label` and `/api/ai/analyst` endpoints.
 
 NETWORK NOTE: same situation as market_data/ - this sandbox blocks
-outbound access to openrouter.ai as well. The request-building and
+outbound access to orcarouter.ai as well. The request-building and
 response-parsing below is real and unit-tested against a mocked HTTP
 transport (tests/test_ai_advisor.py); it has not completed a real call in
 this session. Everything downstream of it - validation, chart rendering,
@@ -47,6 +55,7 @@ pipeline.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -58,10 +67,9 @@ import httpx
 # constantly, so the dashboard keeps the model name editable and surfaces
 # the API's own error text verbatim when a name stops resolving.
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash-free"
-API_BASE = "https://openrouter.ai/api/v1"
-CHAT_URL = f"{API_BASE}/chat/completions"
+DEFAULT_API_BASE = os.getenv("T3_AI_API_BASE", "https://orcarouter.ai/api/v1")
 
-# Sent so the call is attributable on OpenRouter's side. Neither header is
+# Sent so the call is attributable on the router's side. Neither header is
 # required, and neither carries anything about the user.
 APP_TITLE = "T3 Elliott Wave Engine"
 APP_URL = "https://github.com/hobbit7771/elliott-wave-analyzer"
@@ -138,6 +146,20 @@ def build_messages(system_prompt: str, user_content: str) -> List[Dict[str, Any]
     ]
 
 
+def chat_url(base_url: Optional[str] = None) -> str:
+    """Resolve the chat-completions endpoint.
+
+    Overridable at three levels - argument, T3_AI_API_BASE, hardcoded
+    default - because the endpoint could not be verified from the build
+    sandbox. A trailing '/chat/completions' in the supplied base is
+    tolerated: people paste the full endpoint they see in a docs page far
+    more often than they paste a bare base."""
+    base = (base_url or DEFAULT_API_BASE).strip().rstrip("/")
+    if base.endswith("/chat/completions"):
+        return base
+    return f"{base}/chat/completions"
+
+
 def _api_error_message(resp: httpx.Response, model: str) -> str:
     """Pass the router's own error through verbatim, and add the one piece
     of context it can't know: that this app has a Model field you can edit.
@@ -149,19 +171,19 @@ def _api_error_message(resp: httpx.Response, model: str) -> str:
     detail = resp.text[:400]
     hint = ""
     if resp.status_code == 404:
-        hint = (f" | This usually means the model id '{model}' does not exist on OpenRouter (or was "
-                "renamed/retired) rather than anything being wrong with the key. Check the current "
-                "id at openrouter.ai/models and put it in the dashboard's Model field (AI tab).")
+        hint = (f" | Either the model id '{model}' does not exist on OrcaRouter, or the API base URL "
+                "is wrong - both come back as 404 and both are fixed in the AI tab (Model field / API "
+                "base URL field), no redeploy needed. Check the id on orcarouter.ai's Models page.")
     elif resp.status_code in (401, 403):
         hint = (" | Check the API key itself - it may be invalid, revoked, or missing access to this "
-                "model. OpenRouter keys start with 'sk-or-'.")
+                "model.")
     elif resp.status_code == 402:
-        hint = (" | Out of credits for this model. Free models (ids ending in ':free') have their own "
-                "hard rate limits; a paid model needs credit on the account.")
+        hint = (" | Out of credits for this model. Free models have their own hard rate limits; a paid "
+                "model needs credit on the account.")
     elif resp.status_code == 429:
         hint = (" | Rate limited. Free models are throttled aggressively - wait, or switch to another "
                 "model in the Model field.")
-    return f"OpenRouter API error {resp.status_code}: {detail}{hint}"
+    return f"OrcaRouter API error {resp.status_code}: {detail}{hint}"
 
 
 def _headers(api_key: str) -> Dict[str, str]:
@@ -174,20 +196,22 @@ def _headers(api_key: str) -> Dict[str, str]:
 
 
 def _post(api_key: str, model: str, payload: Dict[str, Any],
-          client: Optional[httpx.Client], timeout: float) -> Dict[str, Any]:
+          client: Optional[httpx.Client], timeout: float,
+          base_url: Optional[str] = None) -> Dict[str, Any]:
     if not api_key:
-        raise AIAdvisorError("No OpenRouter API key provided (get one at https://openrouter.ai/keys)")
+        raise AIAdvisorError("No OrcaRouter API key provided (get one at https://orcarouter.ai)")
 
+    url = chat_url(base_url)
     body = {**payload, "model": model}
     http_client = client or httpx.Client(timeout=timeout)
     owns_client = client is None
     try:
-        resp = http_client.post(CHAT_URL, headers=_headers(api_key), json=body)
+        resp = http_client.post(url, headers=_headers(api_key), json=body)
         if resp.status_code != 200:
             raise AIAdvisorError(_api_error_message(resp, model))
         data = resp.json()
     except httpx.RequestError as exc:
-        raise AIAdvisorError(f"Could not reach the OpenRouter API: {exc}")
+        raise AIAdvisorError(f"Could not reach the OrcaRouter API at {url}: {exc}")
     finally:
         if owns_client:
             http_client.close()
@@ -199,7 +223,7 @@ def _post(api_key: str, model: str, payload: Dict[str, Any],
     if isinstance(data, dict) and data.get("error"):
         error = data["error"]
         message = error.get("message") if isinstance(error, dict) else str(error)
-        raise AIAdvisorError(f"OpenRouter returned an error for '{model}': {message}")
+        raise AIAdvisorError(f"OrcaRouter returned an error for '{model}': {message}")
     return data
 
 
@@ -242,7 +266,8 @@ def _extract_text(data: Dict[str, Any]) -> str:
 
 
 def request_commentary(api_key: str, context: Dict[str, Any], model: str = DEFAULT_MODEL,
-                        client: Optional[httpx.Client] = None, timeout: float = 60.0) -> AdvisorResponse:
+                        client: Optional[httpx.Client] = None, timeout: float = 60.0,
+                        base_url: Optional[str] = None) -> AdvisorResponse:
     user_content = (
         "Here is the current Elliott Wave engine state as JSON. Give your second opinion.\n\n"
         + json.dumps(context, indent=2, default=str)
@@ -252,7 +277,7 @@ def request_commentary(api_key: str, context: Dict[str, Any], model: str = DEFAU
         "temperature": 0.4,
         "max_tokens": COMMENTARY_MAX_OUTPUT_TOKENS,
     }
-    data = _post(api_key, model, payload, client, timeout)
+    data = _post(api_key, model, payload, client, timeout, base_url)
     return AdvisorResponse(text=_extract_text(data), model=model, raw=data)
 
 
@@ -276,7 +301,7 @@ def _parse_count_json(text: str) -> Dict[str, Any]:
 
 def request_wave_count(api_key: str, pivots: List[Dict[str, Any]], direction: str,
                         model: str = DEFAULT_MODEL, client: Optional[httpx.Client] = None,
-                        timeout: float = 90.0) -> WaveCountProposal:
+                        timeout: float = 90.0, base_url: Optional[str] = None) -> WaveCountProposal:
     """Ask for a count over the whole pivot history. The returned `waves`
     are RAW model output - structurally unvalidated on purpose. Pass them
     straight to elliott_engine.external_count.validate_external_count;
@@ -292,7 +317,7 @@ def request_wave_count(api_key: str, pivots: List[Dict[str, Any]], direction: st
         "max_tokens": COUNT_MAX_OUTPUT_TOKENS,
         "response_format": {"type": "json_object"},
     }
-    data = _post(api_key, model, payload, client, timeout)
+    data = _post(api_key, model, payload, client, timeout, base_url)
     parsed = _parse_count_json(_extract_text(data))
     waves = parsed.get("waves")
     if waves is None:
