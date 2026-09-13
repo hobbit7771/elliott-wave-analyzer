@@ -17,7 +17,7 @@
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine, live
 market data from Bybit USDT perpetuals (see "Mobile app + live Bybit"
-below for why Binance was dropped). 296 automated tests, all passing,
+below for why Binance was dropped). 303 automated tests, all passing,
 cover every module described below.
 
 ## Read this first: what "done" means here
@@ -90,7 +90,7 @@ t3_engine/
                       analyst_tools.py = the tools it may use). Never a decision-maker.
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                296 tests, one file per module above
+tests/                303 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Bybit in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -364,10 +364,22 @@ desktop web page:
   The API's own error text is surfaced verbatim plus a hint, and the status
   code is most of the diagnosis: `404` = the model id or the endpoint,
   `401/403` = the key, `400` = a parameter this model rejects (clear
-  reasoning effort or seed), `429` = rate limit. A `200` carrying an error
-  body - including one that arrives mid-stream, after the headers already
-  said OK - is treated as an error too, since printing it as an empty
-  second opinion would read as "the model had no concerns".
+  reasoning effort or seed). A `200` carrying an error body - including one
+  that arrives mid-stream, after the headers already said OK - is treated
+  as an error too, since printing it as an empty second opinion would read
+  as "the model had no concerns".
+
+  **`429` is retried, not reported.** Rate limiting is the dominant failure
+  on a free tier and it is a *wait*, not a defect: the run was going fine
+  and the quota window closed. Up to three retries with growing backoff
+  (4s, 12s, 30s), and the server's own `Retry-After` wins over that when it
+  sends one - guessing shorter than the quota window burns another attempt
+  and on some services extends the ban. Only after those does it surface,
+  with advice that fits the cause (wait, lower the step budget, lower the
+  reasoning effort, or change model). This matters most for the analyst,
+  which makes one call per step: a 14-step run is 14 chances to be
+  throttled, and `reasoning_effort: max` makes each step cost more, so it
+  hits the limit soonest.
 
   **Timeouts are split by phase**, because one number for everything gives
   the wrong diagnosis. Connecting is either fast or broken (15s); *reading*
@@ -543,8 +555,13 @@ Two things this does **not** change:
   do is waste its own steps.
 
 Rejected structures are shown in the panel with the rule they broke, next
-to a transcript of every tool call the agent made - the point being that
-you can audit *how* it got there, not just what it concluded. It has its
+to a transcript of every tool call the agent made - **with its arguments**,
+so the transcript says which swings it listed and which legs it compared
+rather than just naming verbs. The section is never hidden: "it made no
+tool calls at all" is itself the finding when a model answers in prose
+instead of working the chart, and an absent section reads as a rendering
+bug rather than as that answer. The point is that you can audit *how* it
+got there, not just what it concluded. It has its
 own chart on purpose: a model shown an existing markup tends to agree with
 it, and the two counts are only worth comparing if they were reached
 independently.
@@ -607,7 +624,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (296 tests)
+# Run the automated test suite (303 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)

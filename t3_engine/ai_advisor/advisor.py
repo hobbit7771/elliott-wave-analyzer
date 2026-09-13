@@ -63,7 +63,9 @@ pipeline.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -127,6 +129,15 @@ COUNT_MAX_OUTPUT_TOKENS = 16384
 # exactly this - a read timeout at 120s on the analyst, reported as "could
 # not reach the API", which is the wrong diagnosis: the connection worked
 # fine.
+# Rate limiting is the dominant failure on a free tier, and it is a WAIT,
+# not a defect: the run was going fine and the quota window simply closed.
+# Retrying it inside one call is what turns "the analyst died at step 5"
+# into "the analyst paused at step 5". Bounded, because a 429 that never
+# clears must not hold a request open forever.
+MAX_RATE_LIMIT_RETRIES = 3
+RATE_LIMIT_BACKOFF_SECONDS = (4.0, 12.0, 30.0)
+MAX_RETRY_AFTER_SECONDS = 60.0
+
 CONNECT_TIMEOUT = 15.0
 WRITE_TIMEOUT = 60.0
 DEFAULT_READ_TIMEOUT = 180.0
@@ -232,7 +243,10 @@ def _api_error_message(resp: httpx.Response, model: str) -> str:
     elif resp.status_code == 402:
         hint = " | Out of credits for this model."
     elif resp.status_code == 429:
-        hint = " | Rate limited. Wait, or switch models in the Model field."
+        hint = (f" | Rate limited, and still rate limited after {MAX_RATE_LIMIT_RETRIES} automatic "
+                "retries with backoff. A free tier's quota window is usually per-minute: wait a "
+                "little, lower the step budget, or switch models in the Model field. Reasoning "
+                "effort makes each step cost more, so 'max' hits this soonest.")
     return f"{PROVIDER_NAME} API error {resp.status_code}: {detail}{hint}"
 
 
@@ -263,6 +277,21 @@ def _transport_error_message(exc: httpx.RequestError, url: str, read_seconds: fl
     if isinstance(exc, httpx.WriteTimeout):
         return f"Timed out sending the request to {url}. The history may be too large."
     return f"Request to {url} failed: {exc}"
+
+
+def _sleep(seconds: float) -> None:
+    """Indirection so tests can exercise the retry policy without actually
+    waiting 46 seconds for it."""
+    time.sleep(seconds)
+
+
+def _on_rate_limit(attempt: int, sleep_for: float) -> None:
+    """A pause the user cannot see looks like a hang, so it goes to the
+    log. Nothing here is a hard failure yet."""
+    logging.getLogger(__name__).info(
+        "Rate limited by %s; waiting %.0fs before retry %d/%d",
+        PROVIDER_NAME, sleep_for, attempt + 1, MAX_RATE_LIMIT_RETRIES,
+    )
 
 
 def _headers(api_key: str, stream: bool) -> Dict[str, str]:
@@ -366,6 +395,22 @@ def _consume_stream(lines, model: str) -> Dict[str, Any]:
             "model": model}
 
 
+def retry_delay_for(resp: httpx.Response, attempt: int) -> float:
+    """How long to wait before retrying a 429.
+
+    The server's own Retry-After wins when it sends one - guessing shorter
+    than the quota window just burns another attempt and can extend the
+    ban. Capped, because some servers answer with an hour."""
+    header = resp.headers.get("retry-after", "").strip()
+    if header:
+        try:
+            return min(float(header), MAX_RETRY_AFTER_SECONDS)
+        except ValueError:
+            pass          # HTTP-date form; fall through to the backoff
+    index = min(attempt, len(RATE_LIMIT_BACKOFF_SECONDS) - 1)
+    return RATE_LIMIT_BACKOFF_SECONDS[index]
+
+
 def _raise_for_error_body(data: Any, model: str) -> None:
     """An API can answer 200 with an error body. Treating that as a normal
     empty answer is how "the model had no concerns" gets printed when the
@@ -390,24 +435,41 @@ def _post(api_key: str, model: str, payload: Dict[str, Any],
     http_client = client or httpx.Client(timeout=build_timeout(timeout))
     owns_client = client is None
     try:
-        if stream:
-            with http_client.stream("POST", url, headers=_headers(api_key, True), json=body) as resp:
+        for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
+            try:
+                if stream:
+                    with http_client.stream("POST", url, headers=_headers(api_key, True),
+                                            json=body) as resp:
+                        if resp.status_code == 429 and attempt < MAX_RATE_LIMIT_RETRIES:
+                            resp.read()
+                            sleep_for = retry_delay_for(resp, attempt)
+                            _on_rate_limit(attempt, sleep_for)
+                            _sleep(sleep_for)
+                            continue
+                        if resp.status_code != 200:
+                            resp.read()   # the body is not loaded yet in stream mode
+                            raise AIAdvisorError(_api_error_message(resp, model))
+                        return _consume_stream(resp.iter_lines(), model)
+                    # unreachable, the `with` above either returns or raises
+                resp = http_client.post(url, headers=_headers(api_key, False), json=body)
+                if resp.status_code == 429 and attempt < MAX_RATE_LIMIT_RETRIES:
+                    sleep_for = retry_delay_for(resp, attempt)
+                    _on_rate_limit(attempt, sleep_for)
+                    _sleep(sleep_for)
+                    continue
                 if resp.status_code != 200:
-                    resp.read()           # the body is not loaded yet in stream mode
                     raise AIAdvisorError(_api_error_message(resp, model))
-                return _consume_stream(resp.iter_lines(), model)
-        resp = http_client.post(url, headers=_headers(api_key, False), json=body)
-        if resp.status_code != 200:
-            raise AIAdvisorError(_api_error_message(resp, model))
-        data = resp.json()
-    except httpx.RequestError as exc:
-        raise AIAdvisorError(_transport_error_message(exc, url, timeout))
+                data = resp.json()
+            except httpx.RequestError as exc:
+                raise AIAdvisorError(_transport_error_message(exc, url, timeout))
+            _raise_for_error_body(data, model)
+            return data
     finally:
         if owns_client:
             http_client.close()
-
-    _raise_for_error_body(data, model)
-    return data
+    raise AIAdvisorError(  # pragma: no cover - the loop always returns or raises
+        f"{PROVIDER_NAME} kept rate limiting '{model}' after {MAX_RATE_LIMIT_RETRIES} retries."
+    )
 
 
 def _message_of(data: Dict[str, Any]) -> Dict[str, Any]:
