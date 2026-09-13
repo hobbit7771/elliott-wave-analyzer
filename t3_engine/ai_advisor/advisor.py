@@ -349,6 +349,7 @@ def _consume_stream(lines, model: str) -> Dict[str, Any]:
     """Reassemble an SSE stream into the ordinary non-streaming response
     shape, so nothing downstream needs to know how the bytes arrived."""
     content_parts: List[str] = []
+    reasoning_parts: List[str] = []
     tool_calls: Dict[int, Dict[str, Any]] = {}
     finish_reason = ""
     saw_any_chunk = False
@@ -378,6 +379,15 @@ def _consume_stream(lines, model: str) -> Dict[str, Any]:
         delta = choice.get("delta") or {}
         if delta.get("content"):
             content_parts.append(delta["content"])
+        # A reasoning model streams its thinking separately from its answer,
+        # under a key the providers have not standardised. Capturing it is
+        # what lets the dashboard show WHY a run went the way it did rather
+        # than only what it ended up calling.
+        for key in ("reasoning_content", "reasoning"):
+            piece = delta.get(key)
+            if isinstance(piece, str) and piece:
+                reasoning_parts.append(piece)
+                break
         if delta.get("tool_calls"):
             _merge_tool_call_deltas(tool_calls, delta["tool_calls"])
         if choice.get("finish_reason"):
@@ -389,6 +399,8 @@ def _consume_stream(lines, model: str) -> Dict[str, Any]:
         )
 
     message: Dict[str, Any] = {"role": "assistant", "content": "".join(content_parts)}
+    if reasoning_parts:
+        message["reasoning_content"] = "".join(reasoning_parts)
     if tool_calls:
         message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
     return {"choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],

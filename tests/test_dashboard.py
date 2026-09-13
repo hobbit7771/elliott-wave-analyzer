@@ -592,6 +592,7 @@ class _FakeAnalystResult:
         self.accepted = accepted
         self.rejected = rejected or []
         self.error = error
+        self.transcript = []
         self.summary = "Five waves up look complete."
         self.reasoning = "Wave 3 is the longest."
         self.steps = []
@@ -837,3 +838,32 @@ def test_the_transcript_section_is_never_hidden_when_a_run_returns():
     as a rendering bug rather than as that answer."""
     resp = client.get("/")
     assert "No tool calls were made" in resp.text
+
+
+def test_the_analyst_returns_the_conversation_so_a_stall_can_be_explained():
+    """"Why did it stop at step 2" is unanswerable from a list of tool
+    names. The model's own words and its reasoning travel with the
+    result."""
+    partial = _FakeAnalystResult([], note="used all 2 steps")
+    partial.finished = False
+    partial.steps_used = 2
+    partial.transcript = [
+        {"role": "assistant", "step": 1, "text": "Looking at the skeleton.",
+         "reasoning": "Coarse first.", "tool_calls": ["list_pivots"]},
+        {"role": "tool", "step": 1, "name": "list_pivots", "args": {"deviation_pct": 3.0},
+         "result": "22 pivots at 3.0% deviation"},
+        {"role": "system", "step": 2, "text": "This is your LAST step."},
+    ]
+    with patch.object(server_module, "run_analyst", return_value=partial):
+        resp = client.post("/api/ai/analyst",
+                           json={"api_key": "nvapi-test", "source": "synthetic", "cycles": 2})
+    data = resp.json()
+    assert [e["role"] for e in data["transcript"]] == ["assistant", "tool", "system"]
+    assert data["transcript"][0]["reasoning"] == "Coarse first."
+
+
+def test_index_renders_the_conversation_including_the_models_thinking():
+    resp = client.get("/")
+    assert "renderAnalystChat" in resp.text
+    assert "analystChat" in resp.text
+    assert "entry.reasoning" in resp.text

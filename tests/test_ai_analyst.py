@@ -321,7 +321,39 @@ def test_a_model_that_loops_forever_is_stopped_by_the_step_budget():
     assert not result.finished
     assert result.steps_used == 4
     assert len(sent) == 4
-    assert "all 4 steps" in result.note
+    assert "all 4 step(s) without submitting" in result.note
+    assert "6 or more steps" in result.note      # and what to do about it
+
+
+def test_the_last_step_tells_the_model_it_is_the_last_and_forces_an_answer():
+    """A budget that just cuts the model off mid-thought produces nothing.
+    A budget the model KNOWS about produces a smaller count - which is why
+    a 2-step run can still come back with something."""
+    client, sent = scripted_client([
+        function_call_turn("list_pivots", {"deviation_pct": 1.0}),
+        function_call_turn("submit_count", {
+            "structures": [{"structure": "IMPULSE", "deviation_pct": 1.0,
+                            "direction": "UP", "waves": GOOD_IMPULSE}],
+            "summary": "s", "reasoning": "r"}, call_id="call_2"),
+    ])
+    result = run_analyst("sk-test", CANDLES, DEGREE, client=client, max_steps=2)
+
+    assert result.finished
+    assert len(result.accepted) == 1
+    last_user_turn = sent[1]["messages"][-1]
+    assert last_user_turn["role"] == "user"
+    assert "LAST step" in last_user_turn["content"]
+    # And the choice is pinned, because it HAS seen pivots by now.
+    assert sent[1]["tool_choice"] == {"type": "function", "function": {"name": "submit_count"}}
+
+
+def test_a_submission_is_not_forced_before_the_model_has_seen_any_pivots():
+    """Forcing an answer out of a model that has looked at nothing just
+    manufactures indices for the validator to throw out."""
+    client, sent = scripted_client([text_turn("I have no idea where to start.")])
+    run_analyst("sk-test", CANDLES, DEGREE, client=client, max_steps=1)
+
+    assert sent[0]["tool_choice"] == "auto"
 
 
 def test_a_truncated_turn_is_reported_as_a_token_budget_problem():
@@ -442,3 +474,55 @@ def test_the_whole_run_is_bounded_by_a_wall_clock_not_only_by_step_count():
     assert not result.finished
     assert len(sent) == 1            # one step ran, then the budget stopped it
     assert "budget" in result.note
+
+
+def test_the_transcript_records_the_conversation_not_just_the_tool_calls():
+    """"Why did it stop there" is unanswerable from a list of tool names.
+    The transcript keeps what the model SAID and what it was thinking
+    alongside what it called and what came back."""
+    thinking = httpx.Response(200, text=_sse(
+        {"choices": [{"index": 0, "delta": {"role": "assistant",
+                                            "reasoning_content": "Coarse first, "}}]},
+        {"choices": [{"index": 0, "delta": {"reasoning_content": "then subdivide.",
+                                            "content": "Let me look at the skeleton."}}]},
+        {"choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "id": "c1", "type": "function",
+             "function": {"name": "list_pivots", "arguments": '{"deviation_pct": 3.0}'}}]},
+            "finish_reason": "tool_calls"}]},
+    ))
+    client, _ = scripted_client([thinking, function_call_turn("submit_count", {
+        "structures": [{"structure": "IMPULSE", "deviation_pct": 1.0,
+                        "direction": "UP", "waves": GOOD_IMPULSE}],
+        "summary": "s", "reasoning": "r"}, call_id="c2")])
+    result = run_analyst("sk-test", CANDLES, DEGREE, client=client, max_steps=6)
+
+    assistant_turns = [e for e in result.transcript if e["role"] == "assistant"]
+    assert assistant_turns[0]["text"] == "Let me look at the skeleton."
+    assert assistant_turns[0]["reasoning"] == "Coarse first, then subdivide."
+    assert assistant_turns[0]["tool_calls"] == ["list_pivots"]
+
+    tool_turns = [e for e in result.transcript if e["role"] == "tool"]
+    assert tool_turns[0]["name"] == "list_pivots"
+    assert tool_turns[0]["args"] == {"deviation_pct": 3.0}
+    assert "pivots" in tool_turns[0]["result"]
+
+
+def test_the_final_step_instruction_appears_in_the_transcript_too():
+    """It changes what the model does, so hiding it would make the
+    transcript misleading about why the last turn looks different."""
+    client, _ = scripted_client([function_call_turn("submit_count", {
+        "structures": [{"structure": "IMPULSE", "deviation_pct": 1.0,
+                        "direction": "UP", "waves": GOOD_IMPULSE}],
+        "summary": "s", "reasoning": "r"})])
+    result = run_analyst("sk-test", CANDLES, DEGREE, client=client, max_steps=1)
+
+    system_turns = [e for e in result.transcript if e["role"] == "system"]
+    assert system_turns and "LAST step" in system_turns[0]["text"]
+
+
+def test_transcript_steps_are_numbered_so_you_can_see_where_it_ended():
+    client, _ = scripted_client([function_call_turn("list_pivots", {"deviation_pct": 1.0})])
+    result = run_analyst("sk-test", CANDLES, DEGREE, client=client, max_steps=3)
+
+    steps = sorted({e["step"] for e in result.transcript})
+    assert steps == [1, 2, 3]
