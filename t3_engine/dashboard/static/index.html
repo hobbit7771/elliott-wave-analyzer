@@ -422,6 +422,11 @@ let liveTimer = null;
 // the chart state because applyChartData draws it - a proposal that was
 // rejected leaves this empty, so nothing unvalidated can be on screen.
 let aiLabelWaves = [];
+// Markers belonging to the saved AI count currently drawn on the LIVE
+// chart. Held separately because candleSeries.setMarkers() replaces the
+// whole set: markers() merges these in rather than the AI count and the
+// engine's own labels taking turns wiping each other out.
+let liveAiMarkers = [];
 
 function clearOverlays() {
   overlayLines.forEach(s => s.removeSeries ? s.removeSeries() : chart.removeSeries(s));
@@ -507,6 +512,61 @@ function drawFibonacciLevels(levels) {
   });
 }
 
+// The saved AI count for THIS series, drawn on the live chart so a live
+// session opens with the model's reading of the history already on it and
+// then keeps streaming under it - the same markup the analyst tab
+// produced, not a second opinion computed here. The backend only hands
+// over structures that passed the same hard Elliott validation everything
+// else does (elliott_engine/external_count.py), so nothing unvalidated
+// can reach this function.
+//
+// It is deliberately the SAME colours the analyst tab uses (motive sky
+// blue, corrective amber, projection dashed pink): one count shown in two
+// places should not look like two different counts.
+function drawLiveAiAnalysis(analysis) {
+  liveAiMarkers = [];
+  if (!analysis) return;
+  (analysis.accepted || []).forEach(st => {
+    const waves = st.waves || [];
+    if (!waves.length) return;
+    const color = structureColor(st.structure);
+    const line = chart.addLineSeries({
+      color, lineWidth: 2, lastValueVisible: false, priceLineVisible: false,
+      crosshairMarkerVisible: false,
+    });
+    line.setData([{ time: waves[0].start_time, value: waves[0].start_price }]
+      .concat(waves.map(w => ({ time: w.end_time, value: w.end_price }))));
+    overlayLines.push(line);
+    waves.forEach(w => liveAiMarkers.push({
+      time: w.end_time, position: w.direction === 'UP' ? 'aboveBar' : 'belowBar',
+      color, shape: 'circle', text: w.label,
+    }));
+  });
+
+  // The projection carries forward PAST the newest candle, which is the
+  // whole point in live mode: the dashed path is where this count says the
+  // next 50 bars go, and the stream either walks into it or invalidates it
+  // in front of you.
+  const proj = analysis.projection;
+  if (!proj || !proj.targets || !proj.targets.length) return;
+  if (proj.path && proj.path.length) {
+    const path = chart.addLineSeries({
+      color: PROJECTION_COLOR, lineWidth: 2, lineStyle: 2,
+      lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false,
+    });
+    path.setData(proj.path.map(p => ({ time: p.time, value: p.price })));
+    overlayLines.push(path);
+  }
+  proj.targets.forEach(target => {
+    const level = candleSeries.createPriceLine({
+      price: target.price, color: PROJECTION_COLOR,
+      lineWidth: target.primary ? 2 : 1, lineStyle: 2,
+      title: `AI W${proj.next_label} ${target.ratio}${target.primary ? ' \u2605' : ''}`,
+    });
+    overlayLines.push({ removeSeries: () => candleSeries.removePriceLine(level) });
+  });
+}
+
 // Structure events (BOS/CHoCH) accumulate for the entire history/session
 // with no cap from the backend - drawing all of them as text markers on a
 // long series stacks dozens of labels on top of each other into unreadable
@@ -565,6 +625,8 @@ function markers(events, scenarios, confirmedChain, subwaveHistory) {
     m.push({ time: w.end_time, position: 'belowBar', color: '#5eead4', shape: 'circle', text: w.label, size: 0.6 });
   });
 
+  liveAiMarkers.forEach(mark => m.push(mark));
+
   m.sort((a, b) => a.time - b.time);
   candleSeries.setMarkers(m);
 }
@@ -603,6 +665,28 @@ function closedTradesTableHtml(positions) {
   return `<table><tr><th>Wave</th><th>Opened</th><th>Closed</th><th>Entry</th><th>PnL</th></tr>${rows}</table>`;
 }
 
+// The saved AI count's provenance and, more importantly, its AGE. A count
+// made twelve candles ago may still be right or may have been invalidated
+// by the very next bar; showing the markup without saying how far behind
+// it is would let a stale reading pass for a current one.
+function aiAnalysisRows(data) {
+  const ai = data.ai_analysis;
+  if (ai === undefined) return '';        // not a live response at all
+  if (!ai) {
+    return row('AI count', '<span class="v">none saved — run the Analyst tab on '
+      + 'Bybit ' + escapeHtml(data.symbol || '') + ' ' + escapeHtml(data.timeframe || '') + '</span>');
+  }
+  const structures = (ai.accepted || []).length;
+  const age = ai.candles_since > 0
+    ? `${ai.candles_since} candle(s) behind`
+    : 'current';
+  return row('AI count', `${structures} structure(s) · ${escapeHtml(ai.model || 'model')}`)
+    + row('AI count age', age)
+    + (ai.projection && ai.projection.next_label
+        ? row('AI expects next', 'wave ' + escapeHtml(String(ai.projection.next_label)))
+        : '');
+}
+
 function renderDebugPanel(data) {
   const primary = data.scenarios[0];
   const debugEl = document.getElementById('debug');
@@ -615,7 +699,7 @@ function renderDebugPanel(data) {
     row('Invalidation', primary && primary.invalidation ? primary.invalidation.toFixed(4) : '—'),
     row('Next expected', primary && primary.next_expected_label ? primary.next_expected_label : '—'),
     row('Equity', (data.final_equity ?? data.equity ?? 0).toFixed(2)),
-  ].join('');
+  ].join('') + aiAnalysisRows(data);
 
   const primaryEl = document.getElementById('primary');
   if (!data.scenarios.length) {
@@ -731,6 +815,9 @@ function applyChartData(data) {
   drawAiCount(aiLabelWaves);
   drawTradeLevels(data.signals);
   drawFibonacciLevels(data.fibonacci_levels);
+  // Before markers(): it merges liveAiMarkers into the single marker set
+  // the candle series can hold, so this has to have filled them first.
+  drawLiveAiAnalysis(data.ai_analysis);
   markers(data.structure_events || [], primary ? [primary] : [], data.confirmed_chain || [], data.subwave_history || []);
   if (shouldFitOnNextData) {
     chart.timeScale().fitContent();
@@ -804,9 +891,14 @@ async function fetchLiveState() {
     return;
   }
   const data = await resp.json();
+  const seeded = data.seeded_candles || 0;
+  // "which of these came from history and which arrived live" is the
+  // difference between a chart that is streaming and one that is merely
+  // showing the past, so both numbers are named rather than totalled.
+  const streamed = Math.max(0, data.candles.length - seeded);
   document.getElementById('status').textContent = data.waiting_for_first_candle
     ? `connected - waiting for the first ${timeframe} candle to close…`
-    : `${data.candles.length} candles (live)`;
+    : `${data.candles.length} candles (${seeded} history + ${streamed} live)`;
   applyChartData(data);
 }
 
@@ -866,7 +958,10 @@ function updateSourceUI() {
   const needsRealSymbol = source !== 'synthetic';
   document.getElementById('cyclesField').style.display = source === 'synthetic' ? '' : 'none';
   document.getElementById('tfField').style.display = needsRealSymbol ? '' : 'none';
-  document.getElementById('limitField').style.display = source === 'bybit' ? '' : 'none';
+  // Live uses it too now: it's how deep the REST backfill goes before the
+  // stream takes over, so the depth of a live session's history is the
+  // user's choice exactly as it is for a historical run.
+  document.getElementById('limitField').style.display = (source === 'bybit' || isLive) ? '' : 'none';
   document.getElementById('liveStart').style.display = isLive ? '' : 'none';
   document.getElementById('liveStop').style.display = isLive ? '' : 'none';
   if (!isLive) stopLivePolling();
@@ -893,18 +988,30 @@ document.getElementById('liveStart').addEventListener('click', async () => {
   if (!symbol) { showError('Enter a symbol first, e.g. BTCUSDT.'); return; }
   const threshold = Number(document.getElementById('threshold').value);
   const equity = Number(document.getElementById('equity').value);
-  document.getElementById('status').textContent = 'starting live pipeline… (can take up to a minute on a cold server)';
+  // The history the live session starts from. Without it a live chart
+  // begins genuinely empty - no past, no pivots, no count - and the first
+  // useful reading is one full bar away on 5m and days away on 4h. The
+  // backfill is fetched from Bybit REST and replayed through the exact
+  // path a live candle takes, so the chart opens looking like a chart and
+  // then continues streaming into it.
+  const backfill = Math.min(5000, Math.max(0, Number(document.getElementById('limit').value) || 1000));
+  document.getElementById('status').textContent = 'starting live pipeline — loading history… '
+    + '(can take up to a minute on a cold server)';
   let resp;
   try {
     resp = await fetchWithTimeout('/api/live/start', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbol, threshold, equity }),
-    }, 45000);
+      body: JSON.stringify({ symbol, threshold, equity, backfill }),
+    }, 120000);   // several paginated REST pages per timeframe, not one call
   } catch (e) {
     showError(e.message);
     return;
   }
   if (!resp.ok) { showError(await parseErrorDetail(resp)); return; }
+  const started = await resp.json();
+  const filled = started.backfilled || {};
+  const summary = Object.entries(filled).map(([tf, n]) => `${tf}:${n}`).join(' · ');
+  if (summary) document.getElementById('status').textContent = `history loaded (${summary}) — connecting…`;
   run();
 });
 document.getElementById('liveStop').addEventListener('click', async () => {

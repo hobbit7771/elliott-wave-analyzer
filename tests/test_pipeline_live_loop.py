@@ -92,3 +92,78 @@ async def test_live_engine_logs_signals_to_disk(tmp_path):
     assert signals_file.exists()
     lines = signals_file.read_text().splitlines()
     assert len(lines) >= 1
+
+
+# --- seeding a live session from REST history -------------------------
+# A live engine used to start with literally no past: `history` was an
+# empty list and every pivot, wave and scenario had to be rediscovered
+# from candles arriving AFTER the connection - hours on 1h, days on 4h.
+# seed_history replays stored candles through the same path a live one
+# takes, so the chart opens with its history already processed and then
+# continues streaming into it.
+
+def test_seed_history_replays_candles_through_the_live_path():
+    from t3_engine.backtest.synthetic_data import generate_synthetic_series
+    candles = generate_synthetic_series(num_cycles=1)
+
+    engine = LiveTradingEngine(symbol="TESTUSDT", trading_timeframes=(Timeframe.M5,),
+                               entry_confidence_threshold=50.0, log_dir="/tmp/t3_test_logs")
+    added = engine.seed_history(Timeframe.M5, candles)
+
+    assert added == len(candles)
+    assert len(engine.history[Timeframe.M5]) == len(candles)
+    assert engine.seeded[Timeframe.M5] == len(candles)
+    # The point of seeding: the engine has actually WORKED the history, not
+    # merely stored it - pivots exist without a single live trade arriving.
+    assert len(engine.engines[Timeframe.M5].pivot_detector.pivots) > 0
+    assert engine.trades_received == 0
+
+
+def test_seed_history_is_idempotent_across_reconnects():
+    """A reconnect re-fetches overlapping history. Counting the same candle
+    twice would duplicate bars on the chart and feed the engine a past that
+    never happened."""
+    from t3_engine.backtest.synthetic_data import generate_synthetic_series
+    candles = generate_synthetic_series(num_cycles=1)
+
+    engine = LiveTradingEngine(symbol="TESTUSDT", trading_timeframes=(Timeframe.M5,),
+                               entry_confidence_threshold=50.0, log_dir="/tmp/t3_test_logs")
+    engine.seed_history(Timeframe.M5, candles)
+    again = engine.seed_history(Timeframe.M5, candles)
+
+    assert again == 0
+    assert len(engine.history[Timeframe.M5]) == len(candles)
+    assert engine.seeded[Timeframe.M5] == len(candles)
+
+
+def test_seed_history_skips_unclosed_and_out_of_order_candles():
+    """The no-lookahead guarantee rests on candles arriving in order and
+    only once closed - a still-forming bar or a bar older than the newest
+    one already processed is dropped rather than rewritten into history."""
+    from t3_engine.backtest.synthetic_data import generate_synthetic_series
+    candles = generate_synthetic_series(num_cycles=1)
+
+    engine = LiveTradingEngine(symbol="TESTUSDT", trading_timeframes=(Timeframe.M5,),
+                               entry_confidence_threshold=50.0, log_dir="/tmp/t3_test_logs")
+    engine.seed_history(Timeframe.M5, candles[:10])
+
+    forming = candles[10]
+    forming.closed = False
+    assert engine.seed_history(Timeframe.M5, [forming]) == 0
+    # an older candle, offered after newer ones have been processed
+    assert engine.seed_history(Timeframe.M5, [candles[3]]) == 0
+    assert len(engine.history[Timeframe.M5]) == 10
+
+
+def test_seed_history_keeps_every_tracked_timeframe_separate():
+    from t3_engine.backtest.synthetic_data import generate_synthetic_series
+    candles = generate_synthetic_series(num_cycles=1)
+
+    engine = LiveTradingEngine(symbol="TESTUSDT",
+                               trading_timeframes=(Timeframe.M5, Timeframe.M15),
+                               entry_confidence_threshold=50.0, log_dir="/tmp/t3_test_logs")
+    engine.seed_history(Timeframe.M5, candles)
+
+    assert engine.seeded[Timeframe.M5] == len(candles)
+    assert engine.seeded[Timeframe.M15] == 0
+    assert engine.history[Timeframe.M15] == []

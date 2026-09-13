@@ -1176,3 +1176,141 @@ def test_index_exposes_the_multi_timeframe_tab():
     assert "/api/ai/multi" in resp.text
     assert "base rate over" in resp.text        # the sample size travels with the percentage
     assert "Conflicts" in resp.text             # disagreement is shown, not smoothed away
+
+
+# ---- live sessions start from history, not from nothing ----------------
+# A live session used to begin with an empty chart and no past at all, so
+# the model's markup (and the engine's own count) could not be shown until
+# enough NEW candles had closed - a full bar on 5m, days on 4h. Live now
+# backfills from Bybit REST and replays the saved AI analysis for the same
+# series on top, then continues streaming into it.
+
+def _seed_store(tmp_path, monkeypatch):
+    from t3_engine.ai_advisor import analysis_store
+    url = f"sqlite:///{tmp_path / 'live-cache.db'}"
+    monkeypatch.setattr(analysis_store, "DEFAULT_DATABASE_URL", url)
+    monkeypatch.setattr(analysis_store, "_factory", None)
+    return analysis_store
+
+
+def test_seed_live_history_backfills_every_tracked_timeframe(monkeypatch):
+    from t3_engine.backtest.synthetic_data import generate_synthetic_series
+    from t3_engine.pipeline.live_loop import LiveTradingEngine
+    candles = generate_synthetic_series(num_cycles=1)
+    asked = []
+
+    class FakeREST:
+        def get_klines(self, symbol, timeframe, limit=200):
+            asked.append((symbol, timeframe, limit))
+            return candles
+        def close(self):
+            pass
+
+    engine = LiveTradingEngine(symbol="BTCUSDT", trading_timeframes=(Timeframe.M5, Timeframe.M15),
+                              log_dir="/tmp/t3_test_logs")
+    with patch.object(server_module, "BybitFuturesREST", FakeREST):
+        filled = server_module.seed_live_history(engine, "BTCUSDT", 500)
+
+    assert filled == {"5m": len(candles), "15m": len(candles)}
+    assert [a[2] for a in asked] == [500, 500]
+    assert len(engine.history[Timeframe.M5]) == len(candles)
+
+
+def test_seed_live_history_degrades_rather_than_refusing_to_start(monkeypatch):
+    """A backfill that cannot be fetched must not stop the live stream:
+    trading off a chart with no history is worse than trading off one that
+    starts empty, but refusing to connect at all is worse than both."""
+    from t3_engine.pipeline.live_loop import LiveTradingEngine
+    from t3_engine.market_data.bybit_rest_client import BybitAPIError
+
+    class FailingREST:
+        def get_klines(self, symbol, timeframe, limit=200):
+            raise BybitAPIError(10001, "Bybit said no")
+        def close(self):
+            pass
+
+    engine = LiveTradingEngine(symbol="BTCUSDT", trading_timeframes=(Timeframe.M5,),
+                              log_dir="/tmp/t3_test_logs")
+    with patch.object(server_module, "BybitFuturesREST", FailingREST):
+        filled = server_module.seed_live_history(engine, "BTCUSDT", 500)
+
+    assert filled == {"5m": 0}          # named as empty, not silently absent
+
+
+def test_seed_live_history_skipped_entirely_when_backfill_is_zero():
+    from t3_engine.pipeline.live_loop import LiveTradingEngine
+
+    class ExplodingREST:
+        def __init__(self):
+            raise AssertionError("no REST call should be made for backfill=0")
+
+    engine = LiveTradingEngine(symbol="BTCUSDT", trading_timeframes=(Timeframe.M5,),
+                              log_dir="/tmp/t3_test_logs")
+    with patch.object(server_module, "BybitFuturesREST", ExplodingREST):
+        assert server_module.seed_live_history(engine, "BTCUSDT", 0) == {}
+
+
+def test_live_ai_analysis_reports_how_far_behind_the_saved_count_is(tmp_path, monkeypatch):
+    from t3_engine.backtest.synthetic_data import generate_synthetic_series
+    store = _seed_store(tmp_path, monkeypatch)
+    candles = generate_synthetic_series(num_cycles=1)
+    # analysed as of ten candles ago
+    store.save("bybit", "BTCUSDT", "5m", candles[-11].open_time, len(candles) - 10,
+               {"accepted": [{"structure": "IMPULSE", "waves": []}], "projection": {"next_label": "3"},
+                "coverage": {"covered_fraction": 0.8}, "summary": "up"}, model="test-model")
+
+    fresh = server_module.live_ai_analysis("BTCUSDT", Timeframe.M5, candles)
+    assert fresh["candles_since"] == 10
+    assert fresh["stale"] is True
+    assert fresh["model"] == "test-model"
+    assert fresh["accepted"][0]["structure"] == "IMPULSE"
+
+    # ...and current when nothing newer has closed since
+    up_to_date = server_module.live_ai_analysis("BTCUSDT", Timeframe.M5, candles[:-10])
+    assert up_to_date["candles_since"] == 0
+    assert up_to_date["stale"] is False
+
+
+def test_live_ai_analysis_is_none_when_nothing_was_ever_analysed(tmp_path, monkeypatch):
+    _seed_store(tmp_path, monkeypatch)
+    assert server_module.live_ai_analysis("NOSUCHUSDT", Timeframe.M5, []) is None
+
+
+def test_analyst_endpoint_caches_its_result_for_reuse(tmp_path, monkeypatch):
+    """The same count must not be paid for twice: what the analyst tab
+    produces is stored under the key the multi-timeframe view and the live
+    chart read."""
+    store = _seed_store(tmp_path, monkeypatch)
+    accepted = [{"structure": "IMPULSE", "waves": [
+        {"label": "1", "start_time": 1, "end_time": 2, "start_price": 1.0, "end_price": 2.0,
+         "direction": "UP"}]}]
+    fake = _FakeAnalystResult(accepted)
+    with patch.object(server_module, "run_analyst", return_value=fake):
+        resp = client.post("/api/ai/analyst",
+                           json={"api_key": "sk-or-test", "source": "synthetic",
+                                 "symbol": "SYNTHETIC", "cycles": 2})
+    assert resp.status_code == 200
+    cached = store.load("synthetic", "SYNTHETIC-DEMO", "5m")
+    assert cached is not None
+    assert cached.payload["accepted"] == accepted
+    assert cached.model == "~openai/gpt-astra-latest"
+
+
+def test_analyst_endpoint_does_not_cache_an_empty_count(tmp_path, monkeypatch):
+    """Caching a run that produced nothing would suppress the retry that
+    might have worked."""
+    store = _seed_store(tmp_path, monkeypatch)
+    with patch.object(server_module, "run_analyst", return_value=_FakeAnalystResult([])):
+        client.post("/api/ai/analyst",
+                    json={"api_key": "sk-or-test", "source": "synthetic", "cycles": 2})
+    assert store.load("synthetic", "SYNTHETIC-DEMO", "5m") is None
+
+
+def test_index_draws_the_saved_ai_count_on_the_live_chart():
+    resp = client.get("/")
+    assert "drawLiveAiAnalysis" in resp.text
+    assert "ai_analysis" in resp.text
+    # the age of the saved count travels with it - a stale reading must not
+    # be able to pass for a current one
+    assert "AI count age" in resp.text
+    assert "backfill" in resp.text
