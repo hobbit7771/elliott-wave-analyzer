@@ -155,7 +155,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-025"
+BUILD_VERSION = "BUILD-CHECK-026"
 
 
 @app.get("/api/health")
@@ -426,7 +426,7 @@ def ai_advice(context: dict = Body(..., embed=True), api_key: str = Body("", emb
               base_url: str = Body(DEFAULT_AI_API_BASE, embed=True),
               timeout: float = Body(DEFAULT_READ_TIMEOUT, embed=True, gt=0, le=MAX_READ_TIMEOUT),
               reasoning_effort: str = Body("", embed=True),
-              thinking: str = Body("off", embed=True)):
+              thinking: str = Body("on", embed=True)):
     """BYO-key OrcaRouter second opinion. The key is used for exactly one
     outbound request and never written to disk/DB/logs - see
     ai_advisor/advisor.py's docstring for why this only ever produces
@@ -450,7 +450,7 @@ def ai_label(api_key: str = Body("", embed=True), source: str = Body("synthetic"
              base_url: str = Body(DEFAULT_AI_API_BASE, embed=True),
              timeout: float = Body(DEFAULT_READ_TIMEOUT, embed=True, gt=0, le=MAX_READ_TIMEOUT),
              reasoning_effort: str = Body("", embed=True),
-             thinking: str = Body("off", embed=True)):
+             thinking: str = Body("on", embed=True)):
     """AI wave-labelling mode: the model proposes a count over the WHOLE
     loaded history - the one thing the deterministic engine deliberately
     won't do, since it only ever anchors on recent pivots.
@@ -668,7 +668,7 @@ def ai_analyst(api_key: str = Body("", embed=True), source: str = Body("syntheti
                base_url: str = Body(DEFAULT_AI_API_BASE, embed=True),
                timeout: float = Body(DEFAULT_READ_TIMEOUT, embed=True, gt=0, le=MAX_READ_TIMEOUT),
                reasoning_effort: str = Body("", embed=True),
-               thinking: str = Body("off", embed=True),
+               thinking: str = Body("on", embed=True),
                max_steps: int = Body(DEFAULT_MAX_STEPS, embed=True, ge=1, le=MAX_MAX_STEPS)):
     """The AI analyst: label a CLEAN chart from scratch, as an agent.
 

@@ -17,7 +17,7 @@
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine, live
 market data from Bybit USDT perpetuals (see "Mobile app + live Bybit"
-below for why Binance was dropped). 377 automated tests, all passing,
+below for why Binance was dropped). 379 automated tests, all passing,
 cover every module described below.
 
 ## Read this first: what "done" means here
@@ -90,7 +90,7 @@ t3_engine/
                       analyst_tools.py = the tools it may use). Never a decision-maker.
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                377 tests, one file per module above
+tests/                379 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Bybit in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -330,7 +330,7 @@ desktop web page:
   exactly what surfaced the Bybit fallback working in production (see the
   first bullet above).
 - **AI tab (OpenRouter)**: runs against `openrouter.ai/api/v1`,
-  `nvidia/nemotron-3-ultra-550b-a55b:free` by default. The key
+  `~openai/gpt-astra-latest` by default. The key
   can come from the browser (stored only in `localStorage`, forwarded
   per-request, never written to disk server-side) or from `T3_AI_API_KEY`
   on the server, with a request's own key always winning. **A server-side
@@ -481,12 +481,27 @@ desktop web page:
   off" answers and "thinking on" does not, the model's thinking mode is the
   whole problem and the fix is a toggle.
 
-  That toggle is **Model thinking** in the AI tab, sent as
-  `chat_template_kwargs: {thinking: …}` - which is exactly what NVIDIA's
-  own snippet for these models sets. It is **off by default because it was
-  measured, not preferred**. It is tri-state: "do not send the field" is a
-  distinct and necessary choice, since a model that has never heard of
-  `chat_template_kwargs` answers `400` rather than ignoring it.
+  That toggle is **Model thinking** in the AI tab, sent as OpenRouter's own
+  `reasoning: {enabled, effort}` - the field a router normalises reasoning
+  to across vendors. (It was previously `chat_template_kwargs: {thinking}`,
+  which is the right field for models served directly by NVIDIA and the
+  wrong one here.) It is **on by default** now that the model is paid: it
+  was off while the free models sat behind a shared GPU pool, where
+  thinking meant minutes before the first byte, but on a paid model
+  thinking is the reason to use it and an Elliott count is exactly the kind
+  of work it helps. Tri-state, since "do not send the field" is a distinct
+  and necessary choice - a model that has never heard of it answers `400`
+  rather than ignoring it.
+
+  **The model's reasoning is carried across steps.** OpenRouter returns
+  `reasoning_details` on the assistant message, and a reasoning model
+  resumes from those on the next turn. The agent loop is many turns long,
+  so dropping them would make every step start its thinking over - worse
+  answers and a larger bill. They are accumulated from the stream by index
+  and passed back **unmodified**: some are signed or encrypted blobs, and a
+  re-encoded blob is a broken one. The tool-history trimming deliberately
+  touches only tool result *bodies*, never an assistant turn, for the same
+  reason.
 
   Two behaviours it catches are also *handled* rather than only reported: a
   `202` says outright that the request was queued rather than answered, and
@@ -831,7 +846,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (377 tests)
+# Run the automated test suite (379 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)

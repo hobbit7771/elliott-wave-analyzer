@@ -592,3 +592,46 @@ def test_bookkeeping_keys_never_reach_the_wire():
 
     for message in sent[1]["messages"]:
         assert not any(key.startswith("_") for key in message), message
+
+
+def test_the_models_reasoning_is_carried_into_the_next_step_unmodified():
+    """The agent loop is many turns long, and the provider resumes the
+    model's own reasoning from reasoning_details. Dropping them - or
+    rebuilding them, since some are signed blobs - makes every step start
+    its thinking over: worse answers and a larger bill."""
+    first = httpx.Response(200, text=_sse(
+        {"choices": [{"index": 0, "delta": {"role": "assistant", "reasoning_details": [
+            {"index": 0, "type": "reasoning.encrypted", "data": "OPAQUE==", "id": "rs_1"}]}}]},
+        {"choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "id": "c1", "type": "function",
+             "function": {"name": "list_pivots", "arguments": '{"deviation_pct": 2.0}'}}]},
+            "finish_reason": "tool_calls"}]},
+    ))
+    client, sent = scripted_client([first, function_call_turn("submit_count", {
+        "structures": [{"structure": "IMPULSE", "deviation_pct": 1.0,
+                        "direction": "UP", "waves": GOOD_IMPULSE}],
+        "summary": "s", "reasoning": "r"}, call_id="c2")])
+    run_analyst("sk-or-test", CANDLES, DEGREE, client=client, max_steps=6)
+
+    assistant_turn = next(m for m in sent[1]["messages"] if m["role"] == "assistant")
+    assert assistant_turn["reasoning_details"] == [
+        {"index": 0, "type": "reasoning.encrypted", "data": "OPAQUE==", "id": "rs_1"}]
+
+
+def test_trimming_tool_history_never_touches_the_reasoning_chain():
+    """Only tool result BODIES are collapsed. Losing an assistant turn's
+    reasoning_details would break the chain the provider resumes from."""
+    from t3_engine.ai_advisor.analyst import trim_tool_history
+
+    messages = [{"role": "user", "content": "brief"}]
+    for i in range(6):
+        messages.append({"role": "assistant", "content": None,
+                         "reasoning_details": [{"index": 0, "data": f"blob-{i}"}],
+                         "tool_calls": [{"id": f"c{i}"}]})
+        messages.append({"role": "tool", "tool_call_id": f"c{i}", "name": "t",
+                         "content": "x" * 500, "_summary": "s"})
+
+    trim_tool_history(messages)
+
+    blobs = [m["reasoning_details"][0]["data"] for m in messages if m["role"] == "assistant"]
+    assert blobs == [f"blob-{i}" for i in range(6)]
