@@ -223,7 +223,18 @@
       </div>
 
       <h2>Check the connection</h2>
-      <button class="panel-btn" id="pingAi">Test key, URL and model</button>
+      <div class="field-row">
+        <button class="panel-btn" id="pingAi" style="flex:1;">Test key, URL and model</button>
+        <button class="panel-btn" id="diagnoseAi" style="flex:1;">Diagnose</button>
+      </div>
+      <div class="hint" style="margin-bottom:6px;">
+        <strong>Diagnose</strong> first lists the catalogue (<code>GET /models</code>) — that needs the
+        key and the same URL but runs <em>no model at all</em>. If it answers, the key, endpoint and
+        network are fine by construction and any slowness belongs to the model or its queue. Then it
+        looks at the chat endpoint raw: status, headers, whether the body is really a stream, and the
+        timing of each phase.
+      </div>
+      <div id="diagnoseOut" style="display:none;"></div>
       <div class="hint" id="pingStatus">
         One tiny request. A wrong key, a wrong URL, a dead model id and a model that just queues all
         look the same from here — this tells them apart before you wait on a long run.
@@ -1192,6 +1203,57 @@ document.getElementById('pingAi').addEventListener('click', async () => {
       + `.<br>${escapeHtml(data.advice || '')}`;
   } catch (e) {
     statusEl.textContent = e.message || 'Network error during the connection test.';
+  }
+});
+
+// Facts, not a verdict written from an assumption. Every other error path
+// here compresses a failure into one sentence, and "the model did not
+// answer in 180s" is the same sentence whether the cause is a slow model,
+// a queued request, a buffering gateway or a typo in a URL.
+document.getElementById('diagnoseAi').addEventListener('click', async () => {
+  const out = document.getElementById('diagnoseOut');
+  const statusEl = document.getElementById('pingStatus');
+  statusEl.textContent = 'Running both checks…';
+  out.style.display = 'none';
+  try {
+    const resp = await fetchWithTimeout('/api/ai/diagnose', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: aiKey(), model: aiModel(), base_url: aiBaseUrl(), timeout: 45 }),
+    }, 120000);
+    const data = await resp.json();
+    if (!resp.ok) { statusEl.textContent = data.detail || 'Request failed.'; return; }
+    statusEl.textContent = '';
+    out.style.display = '';
+
+    const a = data.access || {};
+    const c = data.chat || {};
+    const row = (k, v) => `<div class="row"><span class="k">${escapeHtml(k)}</span>`
+      + `<span class="v" style="text-align:right;max-width:190px;word-break:break-word;">${escapeHtml(v)}</span></div>`;
+
+    let html = `<div class="signal ${a.ok ? 'accepted' : 'rejected'}">`
+      + `<div class="row"><span class="k">1 · Catalogue (no model)</span>`
+      + `<span class="v">${a.ok ? 'OK in ' + a.seconds + 's' : 'FAILED'}</span></div>`;
+    html += a.ok ? row('Models visible', a.model_count) : `<div class="hint">${escapeHtml(a.error || '')}</div>`;
+    html += `</div>`;
+
+    html += `<div class="signal ${c.status === 200 ? 'accepted' : 'rejected'}">`
+      + `<div class="row"><span class="k">2 · Chat endpoint</span>`
+      + `<span class="v">${c.status !== undefined ? 'HTTP ' + c.status : 'no response'}</span></div>`;
+    if (c.seconds_to_headers !== undefined) html += row('Headers after', c.seconds_to_headers + 's');
+    if (c.seconds_to_first_byte !== undefined) html += row('First body byte', c.seconds_to_first_byte + 's');
+    if (c.failed_after_seconds !== undefined) html += row('Gave up after', c.failed_after_seconds + 's');
+    if (c.looks_like_sse !== undefined) html += row('Real event stream', c.looks_like_sse ? 'yes' : 'no');
+    if (c.bytes_received !== undefined) html += row('Bytes received', c.bytes_received);
+    Object.entries(c.headers || {}).forEach(([k, v]) => html += row(k, v));
+    html += `<div class="hint" style="margin-top:6px;">${escapeHtml(c.verdict || c.error || '')}</div>`;
+    if (c.first_bytes) {
+      html += `<div class="hint" style="white-space:pre-wrap;word-break:break-all;margin-top:6px;`
+        + `border-top:1px solid #232733;padding-top:6px;">${escapeHtml(c.first_bytes)}</div>`;
+    }
+    html += `</div>`;
+    out.innerHTML = html;
+  } catch (e) {
+    statusEl.textContent = e.message || 'Network error during diagnosis.';
   }
 });
 

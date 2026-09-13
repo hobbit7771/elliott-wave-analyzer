@@ -884,3 +884,45 @@ def test_the_connection_check_surfaces_time_to_first_token():
     resp = client.get("/")
     assert "seconds_to_first_token" in resp.text
     assert "data.advice" in resp.text
+
+
+def test_diagnose_runs_the_model_free_check_first():
+    """The catalogue listing is what splits "our side" from "the model's
+    side", so it has to run even when the chat probe is the interesting
+    part."""
+    calls = []
+
+    def fake_access(key, base_url=None, timeout=None):
+        calls.append("access")
+        return {"ok": True, "url": base_url, "seconds": 0.4, "model_count": 3, "models": []}
+
+    def fake_diagnose(key, model=None, base_url=None, timeout=None):
+        calls.append("chat")
+        return {"status": 200, "verdict": "Healthy"}
+
+    with patch.object(server_module, "ai_check_access", side_effect=fake_access), \
+         patch.object(server_module, "ai_diagnose", side_effect=fake_diagnose):
+        resp = client.post("/api/ai/diagnose", json={"api_key": "nvapi-test"})
+    assert calls == ["access", "chat"]
+    body = resp.json()
+    assert body["access"]["model_count"] == 3
+    assert body["chat"]["verdict"] == "Healthy"
+
+
+def test_a_failing_access_check_does_not_stop_the_chat_probe():
+    """When access is broken, the chat probe's raw status corroborates
+    why - dropping it would lose the corroboration."""
+    with patch.object(server_module, "ai_check_access",
+                      side_effect=server_module.AIAdvisorError("401 invalid key")), \
+         patch.object(server_module, "ai_diagnose",
+                      return_value={"status": 401, "verdict": "rejected outright"}):
+        resp = client.post("/api/ai/diagnose", json={"api_key": "nvapi-bad"})
+    body = resp.json()
+    assert body["access"]["ok"] is False
+    assert body["chat"]["status"] == 401
+
+
+def test_index_exposes_the_diagnose_button():
+    resp = client.get("/")
+    assert "diagnoseAi" in resp.text
+    assert "/api/ai/diagnose" in resp.text

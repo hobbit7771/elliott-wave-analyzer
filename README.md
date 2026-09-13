@@ -17,7 +17,7 @@
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine, live
 market data from Bybit USDT perpetuals (see "Mobile app + live Bybit"
-below for why Binance was dropped). 316 automated tests, all passing,
+below for why Binance was dropped). 328 automated tests, all passing,
 cover every module described below.
 
 ## Read this first: what "done" means here
@@ -90,7 +90,7 @@ t3_engine/
                       analyst_tools.py = the tools it may use). Never a decision-maker.
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                316 tests, one file per module above
+tests/                328 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Bybit in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -402,7 +402,37 @@ desktop web page:
   generation before any visible token exists - indistinguishable from a
   hang.
 
-  What it returns is a diagnosis rather than a yes/no: the **time to the
+  **Diagnose** (`/api/ai/diagnose`) is the one that ends the guessing, and
+  it runs two checks in the order that narrows the problem:
+
+  1. `GET {base}/models` - a catalogue listing. It needs the key and hits
+     the same base URL, and it runs **no inference at all**. If it answers
+     fast, the key, the endpoint and the network are correct *by
+     construction*, and everything slow afterwards belongs to the model or
+     the queue in front of it. If it fails, the problem is the key, the
+     endpoint or the path, and no amount of waiting on a chat call would
+     have shown that.
+  2. A raw look at the chat endpoint: status line, response headers
+     (allowlisted - a diagnostic that echoes arbitrary upstream headers is
+     one change away from leaking something), whether the body is really
+     server-sent events, the first bytes as they arrived, and the timing of
+     each phase.
+
+  Neither half raises on a timeout: a timeout *is* the observation and the
+  partial result is the evidence. Every other error message in this module
+  is a sentence written from an assumption about the cause, and "the model
+  did not answer in 180s" is the same sentence whether the cause is a slow
+  model, a request the gateway queued with `202`, a gateway that buffered
+  the whole answer despite `stream: true`, or a typo in a URL. The verdict
+  is reported separately from the observations, so a wrong reading of the
+  evidence never hides the evidence.
+
+  Two behaviours it catches are also *handled* rather than only reported: a
+  `202` says outright that the request was queued rather than answered, and
+  a non-SSE body that is nonetheless a valid completion is parsed and used
+  instead of being waited out and then reported as an empty stream.
+
+  What the plain check returns is a diagnosis rather than a yes/no: the **time to the
   first token**, because the analyst pays that once per step, so it is the
   number that decides whether a multi-step run is feasible at all. Under 5s
   means any step budget works; 40s means a 10-step run cannot finish and
@@ -656,7 +686,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (316 tests)
+# Run the automated test suite (328 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)
