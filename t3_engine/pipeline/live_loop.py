@@ -92,6 +92,41 @@ class LiveTradingEngine:
         # live_source field keeps working - Bybit is the only live source
         # now, see the module docstring for why.
         self.live_source: str = "bybit"
+        # How many candles per timeframe came from REST history rather than
+        # from the live stream. Everything at or below this index existed
+        # before the connection did - useful for saying "the analysis is 12
+        # candles old" rather than leaving a saved count to look current.
+        self.seeded: Dict[Timeframe, int] = {tf: 0 for tf in trading_timeframes}
+
+    def seed_history(self, timeframe: Timeframe, candles: List[Candle]) -> int:
+        """Replay past candles through the engine before the stream starts.
+
+        Without this a live session begins with an empty chart and no past:
+        pivots, the confirmed chain and every scenario have to be
+        rediscovered from candles that arrive after connecting, so the
+        first useful count is hours away on 1h and days away on 4h. The
+        candles are fed through the SAME path a live one takes, so nothing
+        downstream can tell the difference and the no-lookahead guarantee
+        holds exactly as before - each candle is processed knowing only the
+        ones before it.
+
+        Idempotent by timestamp: re-seeding after a reconnect skips
+        anything already present rather than counting it twice."""
+        history = self.history[timeframe]
+        known = {candle.open_time for candle in history}
+        added = 0
+        for candle in candles:
+            if not candle.closed or candle.open_time in known:
+                continue
+            if history and candle.open_time <= history[-1].open_time:
+                continue        # out of order: a gap is better than a lie
+            self._on_candle_closed(timeframe, candle)
+            added += 1
+        self.seeded[timeframe] += added
+        if added:
+            logger.info("[live %s] seeded %d %s candles from history", self.symbol, added,
+                        timeframe.value)
+        return added
 
     def on_trade(self, trade: Trade) -> None:
         self.trades_received += 1

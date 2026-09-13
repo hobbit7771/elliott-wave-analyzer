@@ -139,6 +139,42 @@ desktop web page:
   arrive, well before the first candle closes, so you can tell "connected
   and receiving data" apart from a dead connection without waiting 5
   minutes to find out.
+- **Live starts from history, not from nothing.** A live session used to
+  begin with a genuinely empty chart: `LiveTradingEngine.history` was an
+  empty list per timeframe, so pivots, the confirmed chain and every
+  scenario had to be rediscovered from candles arriving *after* the
+  connection - one full bar away on 5m, days away on 4h. `POST
+  /api/live/start` now takes a `backfill` count (the frontend sends
+  whatever the "Candles" field says, default 1000, max 5000) and
+  `seed_live_history()` fetches that many candles per tracked timeframe
+  from Bybit REST and replays them through `LiveTradingEngine.seed_history
+  ()`. Those candles go through the **same** `_on_candle_closed` path a
+  live one takes, so the no-lookahead guarantee is untouched - each is
+  processed knowing only the ones before it - and `seed_history` is
+  idempotent by `open_time`, so a reconnect that re-fetches overlapping
+  history adds nothing twice. A backfill that can't be fetched degrades
+  the session rather than refusing to start it, and the response says how
+  many candles each timeframe actually got (`{"5m": 1000, "4h": 0}`), so
+  an empty one is visible rather than assumed. `/api/live/state` reports
+  `seeded_candles`, and the status line reads `1200 candles (1000 history
+  + 200 live)` - which of those bars came from the past and which arrived
+  on the socket is not something you should have to guess.
+- **The model's markup stays on the live chart.** `/api/live/state`
+  returns `ai_analysis`: the saved analyst count for that exact
+  `(bybit, symbol, timeframe)` series, drawn on the live chart in the same
+  colours the analyst tab uses (motive sky blue, corrective amber,
+  projection dashed pink - one count shown in two places should not look
+  like two different counts), with its 50-bar dashed projection carried
+  forward past the newest candle. The stream then either walks into that
+  projection or invalidates it in front of you. It travels with
+  `candles_since` and `stale`, shown as "AI count age: 3 candle(s)
+  behind": a count made twelve candles ago may still be right or may have
+  been killed by the very next bar, and markup shown without its age reads
+  as current when it is not. Both the analyst tab and the multi-timeframe
+  view write to this same cache (`ai_advisor/analysis_store.py`), so a
+  count is paid for once and then reused by whichever view asks for it;
+  when nothing has ever been analysed for the series, the panel says so
+  and names the tab to run, rather than leaving a blank.
 - **Symbol picker**: the symbol field is backed by a custom JS dropdown
   (not the native HTML `<datalist>` element - see below for why) fed by
   `GET /api/symbols` (cached in-process for an hour) - type any letter and

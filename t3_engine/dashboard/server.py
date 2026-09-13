@@ -38,6 +38,7 @@ import httpx
 from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.exc import SQLAlchemyError
 
 from t3_engine.ai_advisor.advisor import (
     DEFAULT_API_BASE as DEFAULT_AI_API_BASE,
@@ -110,6 +111,8 @@ _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 # logger actually reach stdout, which Render captures as app logs.
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="T3 Elliott Wave Trading Engine Dashboard")
 
 # --- live engine registry (spec section 20: one running pipeline per
@@ -158,7 +161,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-029"
+BUILD_VERSION = "BUILD-CHECK-031"
 
 
 @app.get("/api/health")
@@ -325,12 +328,47 @@ def run_backtest(source: str = Query("synthetic"), symbol: str = Query("SYNTHETI
     }
 
 
+def seed_live_history(engine: LiveTradingEngine, symbol: str, bars: int) -> Dict[str, int]:
+    """Backfill every timeframe the live engine tracks, from Bybit REST.
+
+    Failures here are not fatal and are not hidden: the stream still works
+    without a past, so a backfill that cannot be fetched degrades the
+    session rather than refusing to start it. What comes back says how many
+    candles each timeframe actually got, so an empty one is visible rather
+    than assumed."""
+    if bars <= 0:
+        return {}
+    filled: Dict[str, int] = {}
+    bybit = BybitFuturesREST()
+    try:
+        for timeframe in engine.trading_timeframes:
+            try:
+                candles = bybit.get_klines(symbol, timeframe, limit=bars)
+            except (httpx.HTTPStatusError, httpx.RequestError, BybitAPIError, ValueError) as exc:
+                logger.warning("[live %s] could not backfill %s: %s", symbol, timeframe.value, exc)
+                filled[timeframe.value] = 0
+                continue
+            filled[timeframe.value] = engine.seed_history(timeframe, candles)
+    finally:
+        bybit.close()
+    return filled
+
+
 @app.post("/api/live/start")
 async def start_live(symbol: str = Body(..., embed=True), equity: float = Body(10_000.0, embed=True),
-                      threshold: float = Body(75.0, embed=True)):
+                      threshold: float = Body(75.0, embed=True),
+                      backfill: int = Body(1000, embed=True, ge=0, le=5000)):
     """Starts a live pipeline against Bybit's PUBLIC WebSocket stream
     (publicTrade) for `symbol` - no API key required, this is public
-    market data, not account access. Runs in PAPER mode only."""
+    market data, not account access. Runs in PAPER mode only.
+
+    The session is SEEDED from REST history first. Without that a live
+    chart begins empty and with no past: pivots, the confirmed chain and
+    every scenario would have to be rediscovered from candles arriving
+    after the connection, which on 1h is hours away and on 4h is days. The
+    seeded candles go through the same path a live one takes, so the
+    no-lookahead guarantee is unchanged - each is processed knowing only
+    the ones before it."""
     symbol = normalize_symbol(symbol)
     if not symbol:
         raise HTTPException(400, "Symbol is empty after normalization - expected something like BTCUSDT")
@@ -338,11 +376,12 @@ async def start_live(symbol: str = Body(..., embed=True), equity: float = Body(1
         return {"status": "already_running", "symbol": symbol}
 
     engine = LiveTradingEngine(symbol=symbol, initial_equity=equity, entry_confidence_threshold=threshold)
+    backfilled = seed_live_history(engine, symbol, backfill)
     _live_engines[symbol] = engine
     _live_errors.pop(symbol, None)
     _live_tasks[symbol] = asyncio.create_task(_run_live_guarded(symbol, engine))
     _live_started_at[symbol] = int(time.time() * 1000)
-    return {"status": "started", "symbol": symbol}
+    return {"status": "started", "symbol": symbol, "backfilled": backfilled}
 
 
 @app.post("/api/live/stop")
@@ -373,6 +412,31 @@ def live_status():
             "live_source": engine.live_source,  # always "bybit" - see pipeline/live_loop.py
         }
         for symbol, engine in _live_engines.items()
+    }
+
+
+def live_ai_analysis(symbol: str, timeframe: Timeframe, candles: List) -> Optional[Dict]:
+    """The stored analysis for a live series, with its age in candles.
+
+    Age matters more than the analysis: a count made twelve 5m candles ago
+    may be perfectly good or may have been invalidated by the very next
+    bar, and only showing how stale it is lets anyone tell which question
+    to ask. The cache is keyed on the same (source, symbol, timeframe) the
+    history tab writes, so an analysis run there shows up here."""
+    cached = analysis_store.load("bybit", symbol, timeframe.value)
+    if cached is None:
+        return None
+    newer = sum(1 for candle in candles if candle.open_time > cached.last_candle_time)
+    payload = cached.payload
+    return {
+        "accepted": payload.get("accepted", []),
+        "projection": payload.get("projection"),
+        "coverage": payload.get("coverage", {}),
+        "summary": payload.get("summary", ""),
+        "model": cached.model,
+        "analysed_at": cached.created_at,
+        "candles_since": newer,
+        "stale": newer > 0,
     }
 
 
@@ -414,6 +478,12 @@ def live_state(symbol: str = Query(...), timeframe: str = Query("5m")):
         "fibonacci_levels": fibonacci_levels_for_scenario(
             tf_engine.scenario_engine.scenarios[0] if tf_engine.scenario_engine.scenarios else None
         ),
+        "seeded_candles": engine.seeded.get(tf, 0),
+        # The saved AI analysis for this exact series, so a live chart opens
+        # with the model's markup already on it instead of a bare stream.
+        # `candles_since` is how far behind it has fallen - a saved count
+        # shown without that would read as current when it is not.
+        "ai_analysis": live_ai_analysis(symbol, tf, candles),
         "tradeable": tf in TRADEABLE_TIMEFRAMES,
         "signals": [signal_to_dict(s) for s in tf_engine.signals[-50:]],
         "open_positions": [position_to_dict(p) for p in tf_engine.position_manager.positions.values() if not p.closed],
@@ -768,6 +838,25 @@ def ai_analyst(api_key: str = Body("", embed=True), source: str = Body("syntheti
     except AIAdvisorError as exc:
         raise HTTPException(502, str(exc))
 
+    projection = annotate_projection(result.projection, candles)
+    # Save it under the SAME key the multi-timeframe view and the live
+    # chart read, so a count made here is not lost when the tab is closed
+    # and is not paid for twice. Only a run that produced something is
+    # worth keeping - caching an empty result would suppress the retry
+    # that might have worked.
+    if result.accepted and candles:
+        try:
+            analysis_store.save(source, symbol, tf.value, candles[-1].open_time, len(candles), {
+                "timeframe": tf.value, "accepted": result.accepted, "rejected": result.rejected,
+                "projection": projection, "coverage": result.coverage,
+                "summary": result.summary, "reasoning": result.reasoning,
+                "steps_used": result.steps_used, "error": result.error,
+            }, model=result.model)
+        except SQLAlchemyError as exc:
+            # A cache that cannot be written is a lost saving, not a lost
+            # analysis: the answer below is already complete.
+            logger.warning("could not cache analyst result for %s %s: %s", symbol, tf.value, exc)
+
     return {
         "symbol": symbol,
         "timeframe": tf.value,
@@ -789,7 +878,7 @@ def ai_analyst(api_key: str = Body("", embed=True), source: str = Body("syntheti
         # a price.
         # The same measured base rates the multi-timeframe view shows: the
         # share of THIS chart's past swings that carried at least that far.
-        "projection": annotate_projection(result.projection, candles),
+        "projection": projection,
         "coverage": result.coverage,
         "accepted": result.accepted,
         "rejected": result.rejected,
