@@ -1015,23 +1015,40 @@ const PROJECTION_COLOR = '#f0abfc';
 function drawAnalystProjection(projection) {
   if (!projection || !projection.targets || !projection.targets.length) return;
   const from = { time: projection.from_time, value: projection.from_price };
-  // Space the targets out into the future so they are readable instead of
-  // stacked on one candle. The step is a fraction of the loaded span.
-  const span = Math.max(60, (analystLastTime - analystFirstTime) || 3600);
-  const step = Math.round(span * 0.04);
+
+  // The path: the expected move itself, carried 50 candles PAST the last
+  // one. Drawn to the middle ratio rather than an extreme, because a path
+  // drawn to a tail of the distribution gets read as a forecast of the
+  // tail. Thicker than the target lines so it reads as the main claim.
+  if (projection.path && projection.path.length) {
+    const path = analystChart.addLineSeries({
+      color: PROJECTION_COLOR, lineWidth: 2, lineStyle: 2,
+      lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false,
+    });
+    path.setData(projection.path.map(p => ({ time: p.time, value: p.price })));
+    analystOverlays.push(path);
+  }
+
+  // Each target as a short dashed reach from the anchor, fanned out in
+  // time so several are readable instead of stacked on one candle.
+  const step = Math.max(1, Math.round((projection.bars_ahead || 50) / (projection.targets.length + 1)));
+  const bar = projection.path && projection.path.length > 1
+    ? projection.path[1].time - projection.path[0].time : 300;
   projection.targets.forEach((target, i) => {
+    if (target.primary) return;        // the path already draws that one
     const line = analystChart.addLineSeries({
       color: PROJECTION_COLOR, lineWidth: 1, lineStyle: 2,
       lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false,
     });
-    line.setData([from, { time: projection.from_time + step * (i + 1), value: target.price }]);
+    line.setData([from, { time: projection.from_time + bar * step * (i + 1), value: target.price }]);
     analystOverlays.push(line);
   });
-  // And the levels themselves, so a target is readable as a price too.
+
   projection.targets.forEach(target => {
     const level = analystSeries.createPriceLine({
-      price: target.price, color: PROJECTION_COLOR, lineWidth: 1, lineStyle: 2,
-      title: `W${projection.next_label} ${target.ratio}`,
+      price: target.price, color: PROJECTION_COLOR,
+      lineWidth: target.primary ? 2 : 1, lineStyle: 2,
+      title: `W${projection.next_label} ${target.ratio}${target.primary ? ' ★' : ''}`,
     });
     analystOverlays.push({ __priceLine: level });
   });
@@ -1188,7 +1205,10 @@ document.getElementById('runAnalyst').addEventListener('click', async () => {
       + (data.projection ? `<div class="row"><span class="k">Next: wave ${escapeHtml(data.projection.next_label)}</span>`
           + `<span class="v" style="color:#f0abfc;">`
           + `${(data.projection.targets || []).map(t => t.price).join(' · ')}</span></div>`
-          + `<div class="hint">${escapeHtml(data.projection.basis)} — drawn dashed on the chart. `
+          + `<div class="hint">${escapeHtml(data.projection.basis)} — drawn dashed `
+          + `${data.projection.bars_ahead || 50} candles ahead`
+          + `${data.projection.expected_bars ? ', reaching the target in about '
+               + data.projection.expected_bars + ' of them' : ''}. `
           + `Computed by the server from the waves already counted, not supplied by the model.</div>` : '')
       + (data.error ? `<div class="note error" style="margin-top:8px;">${escapeHtml(data.error)}</div>` : '')
       + (data.note ? `<div class="hint">${escapeHtml(data.note)}</div>` : '');
