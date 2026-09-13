@@ -28,7 +28,7 @@ class _FakeProposal:
     def __init__(self, waves, reasoning="recorded"):
         self.waves = waves
         self.reasoning = reasoning
-        self.model = "deepseek/deepseek-v4-flash-free"
+        self.model = "moonshotai/kimi-k3"
         self.raw = {}
 
 
