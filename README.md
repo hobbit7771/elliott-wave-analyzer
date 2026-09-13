@@ -213,6 +213,54 @@ desktop web page:
     /api/ai/analyst` are unchanged and still there for scripts and tests -
     they call the same `run_multi_work` / `run_analyst_work` functions the
     jobs do, so the two paths cannot drift apart.
+- **A live session is the agent's chart, and only the agent's.** Live
+  defaults to `ai_only` (`pipeline/live_loop.py`, `backtest/engine.py`):
+  - **Nothing but the AI's markup is drawn.** `/api/live/state` sends
+    empty `pivots`, `confirmed_chain`, `subwave_history`,
+    `structure_events` and `fibonacci_levels` in this mode. They are still
+    COMPUTED - the entry score needs the structure - but a second count
+    drawn underneath the agent's is exactly the superimposed mess the
+    analyst tab exists to avoid. `scenarios[0]` carries the AI's own count
+    instead, so the panel under the chart reads the thing actually being
+    traded.
+  - **The paper trading is the agent's too.** `ai_advisor/ai_trading.py`
+    rebuilds a tradeable `Scenario` from the agent's saved, server-
+    validated structures and appends the wave now DEVELOPING (a saved
+    count is a list of finished waves plus a projection naming what comes
+    next; nothing is tradeable about a finished wave). That scenario then
+    goes through the rules that already work: the wave-3/4/5/C entry
+    plans, `evaluate_entry`'s scoring and confidence threshold, risk
+    sizing, the stop and the targets. The trust boundary does not move -
+    the model names waves, and **every price is still computed
+    server-side**. Scoring deliberately reuses the engine's own formulas
+    (same `score_fibonacci`, same validity, same invalidation level) so an
+    AI count and an engine count sit on one scale.
+  - **Nothing is retroactive.** A count takes effect for candles that
+    close AFTER it arrives. Trading it back over the history it was
+    derived from would be lookahead of the plainest kind: the agent saw
+    that whole history before naming the waves. So a fresh live session
+    with no saved count makes no trades at all, which is correct rather
+    than a gap.
+  - A structure no entry plan covers (a triangle, a flat) is drawn and
+    never traded. Offering an entry there would mean inventing a rule this
+    project does not have.
+- **The live chart no longer ticks, flickers or drifts.** Every four-second
+  poll used to call `setData()` with the whole series - a thousand candles
+  re-sent and repainted - and then remove and re-add every overlay line.
+  Now the poll sends only the tail (`candleSeries.update()` for the
+  forming bar and any that closed since), and the overlays are rebuilt
+  only when a signature of their content actually changes. Measured in a
+  headless browser over five consecutive polls: **0 extra `setData` calls,
+  0 series added, 0 removed, 6 `update()` calls** - one per bar.
+- **The analyst tab accumulates every count that has been paid for.**
+  `GET /api/ai/saved` lists every timeframe ever analysed for an
+  instrument (newest work included, shortest timeframe first), and the tab
+  shows them under "Saved counts" with when each was computed, how much of
+  its chart it labelled and what it expects next. Click one to draw it -
+  nothing is recomputed. A multi-timeframe pass computes four counts and
+  saves all four; before this they vanished from that tab the moment it
+  was reopened. A new run now **adds** to the list rather than replacing
+  it.
 - **Symbol picker**: the symbol field is backed by a custom JS dropdown
   (not the native HTML `<datalist>` element - see below for why) fed by
   `GET /api/symbols` (cached in-process for an hour) - type any letter and

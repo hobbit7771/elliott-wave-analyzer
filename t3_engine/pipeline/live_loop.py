@@ -45,6 +45,7 @@ from __future__ import annotations
 import logging
 from typing import AsyncIterator, Dict, List
 
+from t3_engine.ai_advisor.ai_trading import analysis_fingerprint, scenario_from_analysis
 from t3_engine.backtest.engine import BacktestConfig, BacktestEngine
 from t3_engine.candle_builder.aggregator import MultiTimeframeCandleBuilder, Trade
 from t3_engine.common.models import Candle
@@ -69,10 +70,15 @@ DISPLAY_TIMEFRAMES = (Timeframe.M1, Timeframe.M5, Timeframe.M15, Timeframe.H1, T
 class LiveTradingEngine:
     def __init__(self, symbol: str, trading_timeframes: tuple = DISPLAY_TIMEFRAMES,
                  initial_equity: float = 10_000.0, entry_confidence_threshold: float = 75.0,
-                 log_dir: str = "./logs"):
+                 log_dir: str = "./logs", ai_only: bool = True):
         self.symbol = symbol
         self.trading_timeframes = trading_timeframes
         self.logger = DecisionLogger(log_dir=log_dir)
+        # A live session is the AI's chart: it shows the agent's count and
+        # nothing else, so it trades the agent's count and nothing else
+        # (backtest/engine.py's ai_only). Default on for live; a replay or
+        # a test can turn it off to exercise the engine's own path.
+        self.ai_only = ai_only
 
         self.engines: Dict[Timeframe, BacktestEngine] = {
             tf: BacktestEngine(BacktestConfig(symbol=symbol, initial_equity=initial_equity,
@@ -97,6 +103,39 @@ class LiveTradingEngine:
         # before the connection did - useful for saying "the analysis is 12
         # candles old" rather than leaving a saved count to look current.
         self.seeded: Dict[Timeframe, int] = {tf: 0 for tf in trading_timeframes}
+        for engine in self.engines.values():
+            engine.ai_only = ai_only
+        # The saved AI count each timeframe is currently trading, by the
+        # fingerprint that identifies it - so "has the agent changed its
+        # mind" is answerable without re-deriving the count every poll.
+        self.ai_counts: Dict[Timeframe, str] = {}
+
+    def apply_ai_analysis(self, timeframe: Timeframe, analysis) -> bool:
+        """Hand this timeframe's engine the agent's current count.
+
+        Idempotent by fingerprint: the live chart is polled every few
+        seconds and re-installing an unchanged count on every poll would
+        re-evaluate the same entry over and over. Returns whether anything
+        actually changed.
+
+        Nothing here is retroactive. The count takes effect for candles
+        that close AFTER it arrives - trading it back over the history it
+        was derived from would be lookahead of the plainest kind, since the
+        agent saw that whole history before naming the waves."""
+        engine = self.engines.get(timeframe)
+        if engine is None:
+            return False
+        fingerprint = analysis_fingerprint(analysis)
+        if fingerprint == self.ai_counts.get(timeframe, ""):
+            return False
+        scenario = scenario_from_analysis(analysis, timeframe) if analysis else None
+        changed = engine.set_ai_scenario(scenario, fingerprint)
+        if changed:
+            self.ai_counts[timeframe] = fingerprint
+            logger.info("[live %s] %s now trading the agent's count: %s", self.symbol,
+                        timeframe.value,
+                        " ".join(w.label.value for w in scenario.waves) if scenario else "none")
+        return changed
 
     def seed_history(self, timeframe: Timeframe, candles: List[Candle]) -> int:
         """Replay past candles through the engine before the stream starts.

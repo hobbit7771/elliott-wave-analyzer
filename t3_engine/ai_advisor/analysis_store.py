@@ -128,6 +128,35 @@ def load(source: str, symbol: str, timeframe: str,
         )
 
 
+def list_for(source: str, symbol: str,
+             database_url: Optional[str] = None) -> List[CachedAnalysis]:
+    """Every saved analysis for one instrument, newest first.
+
+    This is what makes the analyst tab accumulate rather than replace: a
+    run on 4h does not erase the 1h count that was paid for yesterday, and
+    the tab can show every timeframe that has ever been analysed instead
+    of only the one just requested."""
+    factory = _sessions(database_url)
+    out: List[CachedAnalysis] = []
+    with session_scope(factory) as session:
+        rows: List[AnalysisCacheRow] = session.execute(
+            select(AnalysisCacheRow).where(AnalysisCacheRow.source == source,
+                                           AnalysisCacheRow.symbol == symbol)
+            .order_by(AnalysisCacheRow.created_at.desc())
+        ).scalars().all()
+        for row in rows:
+            try:
+                payload = json.loads(row.payload)
+            except json.JSONDecodeError:
+                continue        # a corrupt entry is worth less than no entry
+            out.append(CachedAnalysis(
+                source=row.source, symbol=row.symbol, timeframe=row.timeframe,
+                last_candle_time=row.last_candle_time, candle_count=row.candle_count,
+                model=row.model or "", created_at=row.created_at, payload=payload,
+            ))
+    return out
+
+
 def clear(source: str, symbol: str, database_url: Optional[str] = None) -> int:
     """Drop every saved analysis for one series. The escape hatch for "I
     want this recomputed regardless"."""
