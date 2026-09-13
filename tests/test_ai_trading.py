@@ -138,3 +138,62 @@ def test_the_fingerprint_changes_only_when_the_count_does():
     changed["analysed_at"] = 1_700_009_999
     assert a != analysis_fingerprint(changed)
     assert analysis_fingerprint(None) == ""
+
+
+# ---- live derives EVERYTHING from the agent's count ---------------------
+
+def test_the_fibonacci_grid_is_projected_for_the_wave_now_forming():
+    """Two conventions meet here. A tradeable scenario carries the
+    DEVELOPING wave in `waves`; the Fibonacci helper expects completed
+    waves plus the projected one named separately. Handing it the trading
+    shape asked for the grid of the wave AFTER the one forming - wave A
+    after a developing 5 - which has no formula and came back empty."""
+    from t3_engine.ai_advisor.ai_trading import grid_scenario
+    from t3_engine.dashboard.server import fibonacci_levels_for_scenario
+
+    scenario = scenario_from_analysis(_impulse_1234(), Timeframe.M5)
+    grid = grid_scenario(scenario)
+    assert [w.label.value for w in grid.waves] == ["1", "2", "3", "4"]
+    assert grid.next_expected_label == WaveLabel.W5
+    levels = fibonacci_levels_for_scenario(grid)
+    assert levels and all(lvl["for_wave"] == "5" for lvl in levels)
+
+
+def test_no_grid_scenario_without_both_a_past_and_a_present():
+    from t3_engine.ai_advisor.ai_trading import grid_scenario
+    assert grid_scenario(None) is None
+
+
+def test_subwaves_are_built_under_the_agents_own_motive_waves():
+    """The finer degree has to come from the same reading as the labels
+    above it, or the two contradict each other on the same candles."""
+    from t3_engine.ai_advisor.ai_trading import subwaves_for
+    from t3_engine.backtest.synthetic_data import generate_synthetic_series
+    candles = generate_synthetic_series(num_cycles=2)
+
+    def leg(label, a, b):
+        return _wave(label, candles[a].open_time // 1000, candles[b].open_time // 1000,
+                     candles[a].close, candles[b].close)
+
+    analysis = {"accepted": [{"structure": "IMPULSE", "waves": [
+        leg("1", 0, 25), leg("2", 25, 35), leg("3", 35, 70), leg("4", 70, 80)]}],
+        "projection": {"next_label": "5"}}
+    scenario = scenario_from_analysis(analysis, Timeframe.M5)
+    subs = subwaves_for(scenario, candles)
+
+    assert subs, "a motive wave spanning 25 candles should subdivide"
+    motive = [w for w in scenario.waves if w.label.value in ("1", "3", "5")]
+    for sub in subs:
+        assert any(w.start_timestamp <= sub.start_timestamp <= w.end_timestamp for w in motive)
+    # The developing wave has no end yet, so there is nothing inside it to
+    # count - it must never be subdivided.
+    developing = scenario.current_wave
+    assert not any(sub.start_timestamp >= developing.start_timestamp
+                   and sub.end_timestamp > developing.start_timestamp for sub in subs)
+
+
+def test_no_candles_means_no_subwaves_rather_than_an_error():
+    from t3_engine.ai_advisor.ai_trading import subwaves_for
+    scenario = scenario_from_analysis(_impulse_1234(), Timeframe.M5)
+    assert subwaves_for(scenario, []) == []
+    assert subwaves_for(None, [1, 2, 3]) == []
