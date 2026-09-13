@@ -796,3 +796,85 @@ def test_diagnose_only_echoes_an_allowlist_of_response_headers():
     assert "set-cookie" not in report["headers"]
     assert "x-internal-token" not in report["headers"]
     assert "content-type" in report["headers"]
+
+
+# ---- configuration probe ----
+# The endpoint diagnostic proved the catalogue answers in 0.08s while the
+# chat endpoint sends no headers for 45s. That settles "is it our side"
+# (no) but not "which request setting makes the generation long". Each
+# variant differs by exactly one thing, so the first that answers names the
+# cause outright.
+
+def _variant_handler(works):
+    """`works` decides, from the parsed body, whether this variant answers."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if not works(body):
+            raise httpx.ReadTimeout("timed out", request=request)
+        if body.get("stream"):
+            return httpx.Response(200, text=sse({"choices": [{"index": 0,
+                                                              "delta": {"content": "ok"}}]}))
+        return plain_response("ok")
+    return handler
+
+
+def test_the_probe_pins_thinking_mode_as_the_cause_when_it_is():
+    from t3_engine.ai_advisor.advisor import probe_variants
+
+    thinking_off_only = _variant_handler(
+        lambda b: (b.get("chat_template_kwargs") or {}).get("thinking") is False)
+    report = probe_variants("sk-test", client=make_client(thinking_off_only))
+
+    by_label = {v["variant"]: v for v in report["variants"]}
+    assert by_label["thinking off, streamed"]["ok"] is True
+    assert by_label["thinking on, streamed"]["ok"] is False
+    assert "Thinking mode is the cause" in report["verdict"]
+    assert "Leave 'Model thinking' off" in report["verdict"]
+
+
+def test_the_probe_notices_a_gateway_that_will_not_stream():
+    from t3_engine.ai_advisor.advisor import probe_variants
+
+    report = probe_variants("sk-test",
+                            client=make_client(_variant_handler(lambda b: not b.get("stream"))))
+    assert "does not serve SSE" in report["verdict"]
+
+
+def test_the_probe_says_so_when_nothing_works_at_all():
+    from t3_engine.ai_advisor.advisor import probe_variants
+
+    report = probe_variants("sk-test", client=make_client(_variant_handler(lambda b: False)))
+    assert "No configuration answered" in report["verdict"]
+    assert "another model id" in report["verdict"]
+    assert all(v["ok"] is False for v in report["variants"])
+    assert all("gave_up_after" in v for v in report["variants"])
+
+
+def test_the_probe_reports_both_modes_working_rather_than_inventing_a_cause():
+    from t3_engine.ai_advisor.advisor import probe_variants
+
+    report = probe_variants("sk-test", client=make_client(_variant_handler(lambda b: True)))
+    assert "Both thinking modes work" in report["verdict"]
+    assert "Thinking mode is the cause" not in report["verdict"]
+
+
+def test_thinking_is_off_by_default_and_sent_as_chat_template_kwargs():
+    """NVIDIA's own snippet for deepseek-v4-pro sets exactly this, and the
+    diagnostic showed why: with thinking on, the buffering gateway sends no
+    headers at all until the whole generation finishes."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return chat_response("ok")
+
+    request_commentary("sk-test", {"wave": "3"}, client=make_client(handler))
+    assert seen["chat_template_kwargs"] == {"thinking": False}
+
+    seen.clear()
+    request_commentary("sk-test", {"wave": "3"}, thinking=True, client=make_client(handler))
+    assert seen["chat_template_kwargs"] == {"thinking": True}
+
+    seen.clear()
+    request_commentary("sk-test", {"wave": "3"}, thinking=None, client=make_client(handler))
+    assert "chat_template_kwargs" not in seen      # a model that never heard of it answers 400
