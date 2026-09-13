@@ -386,3 +386,55 @@ def test_a_model_with_no_tool_support_answers_in_prose_and_is_reported_as_such()
     assert not result.finished
     assert result.accepted == []
     assert "cannot call functions" in result.note
+
+
+def test_a_run_that_stalls_part_way_keeps_the_work_it_already_did():
+    """The production failure this fixes: a read timeout mid-run threw away
+    the whole run, so a user who waited three minutes got an error and no
+    trace of what the agent had done. The transcript up to the stall is
+    real work and real information."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if len(sent) == 1:
+            return _first
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    sent = []
+    _first = function_call_turn("list_pivots", {"deviation_pct": 3.0})
+
+    def counting_handler(request: httpx.Request) -> httpx.Response:
+        sent.append(1)
+        return handler(request)
+
+    client = httpx.Client(transport=httpx.MockTransport(counting_handler))
+    result = run_analyst("sk-test", CANDLES, DEGREE, client=client, max_steps=6)
+
+    assert not result.finished
+    assert result.steps                              # the completed step survived
+    assert result.steps[0].name == "list_pivots"
+    assert "did not answer" in result.error
+    assert "Stopped at step" in result.note
+    assert result.steps_used == 1                    # the failed step did no work
+
+
+def test_a_failure_on_the_very_first_call_is_raised_not_swallowed():
+    """With nothing done, an empty result would look like a finished
+    analysis that found no structure. The caller needs the failure."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(AIAdvisorError, match="did not answer"):
+        run_analyst("sk-test", CANDLES, DEGREE, client=client)
+
+
+def test_the_whole_run_is_bounded_by_a_wall_clock_not_only_by_step_count():
+    """max_steps x per-request timeout is the worst case, which is long
+    enough for a proxy in front of this app to give up first - and that
+    loses the transcript along with the answer."""
+    client, sent = scripted_client([function_call_turn("list_pivots", {"deviation_pct": 1.0})])
+    result = run_analyst("sk-test", CANDLES, DEGREE, client=client, max_steps=20,
+                         run_budget_seconds=0.0)
+
+    assert not result.finished
+    assert len(sent) == 1            # one step ran, then the budget stopped it
+    assert "budget" in result.note

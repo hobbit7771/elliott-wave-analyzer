@@ -37,12 +37,20 @@ six read-only functions in analyst_tools.py over one candle series.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import httpx
 
-from t3_engine.ai_advisor.advisor import DEFAULT_MODEL, AIAdvisorError, _finish_reason, _message_of, _post
+from t3_engine.ai_advisor.advisor import (
+    DEFAULT_MODEL,
+    DEFAULT_READ_TIMEOUT,
+    AIAdvisorError,
+    _finish_reason,
+    _message_of,
+    _post,
+)
 from t3_engine.ai_advisor.analyst_tools import (
     AnalystToolbox,
     ToolCallRecord,
@@ -54,6 +62,12 @@ from t3_engine.common.types import Timeframe
 
 DEFAULT_MAX_STEPS = 14
 MAX_MAX_STEPS = 30
+# A whole-run wall clock, separate from the per-request read timeout. The
+# loop makes up to max_steps sequential calls, so without this the worst
+# case is steps x timeout - long enough for a proxy in front of this app to
+# give up first, which loses the transcript along with the answer. Hitting
+# this returns what the agent HAS done rather than nothing.
+DEFAULT_RUN_BUDGET_SECONDS = 480.0
 # Generous on purpose. The failure this replaces was a count truncated
 # mid-JSON because 2048 tokens covered the model's thinking but not its
 # answer; a labelling run that reasons across a whole history needs room.
@@ -71,6 +85,7 @@ class AnalystResult:
     steps_used: int = 0
     finished: bool = False
     note: str = ""
+    error: str = ""
 
     @property
     def waves(self) -> List[Dict[str, Any]]:
@@ -153,12 +168,21 @@ def _parse_tool_arguments(call: Dict[str, Any]) -> Dict[str, Any]:
 
 def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: str = "",
                 model: str = DEFAULT_MODEL, max_steps: int = DEFAULT_MAX_STEPS,
-                client: Optional[httpx.Client] = None, timeout: float = 120.0,
-                base_url: Optional[str] = None) -> AnalystResult:
+                client: Optional[httpx.Client] = None, timeout: float = DEFAULT_READ_TIMEOUT,
+                base_url: Optional[str] = None,
+                run_budget_seconds: float = DEFAULT_RUN_BUDGET_SECONDS) -> AnalystResult:
     """Run the label-from-scratch loop and return whatever survived
-    validation. Raises AIAdvisorError only for transport/API failures - a
-    model that produces a bad count is a RESULT (with the broken rules
-    attached), not an exception."""
+    validation.
+
+    A model that produces a bad count is a RESULT (with the broken rules
+    attached), not an exception. So is a run that times out PART WAY
+    through: the tool transcript up to that point is real work and real
+    information ("it listed the swings, measured wave 3, and stalled"), so
+    it comes back with the error attached rather than being thrown away.
+
+    AIAdvisorError is raised only when the FIRST call fails - at that point
+    there is nothing to show, and the caller needs the failure loudly
+    rather than an empty result that looks like a finished analysis."""
     max_steps = max(1, min(int(max_steps), MAX_MAX_STEPS))
     toolbox = AnalystToolbox(candles, degree, symbol)
     messages: List[Dict[str, Any]] = [
@@ -166,11 +190,27 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
     ]
 
     note = ""
+    error = ""
     steps_used = 0
+    started = time.monotonic()
     for step in range(max_steps):
+        if step > 0 and time.monotonic() - started > run_budget_seconds:
+            note = (f"Stopped after {step} step(s): the run passed its {run_budget_seconds:.0f}s "
+                    "budget. Everything the analyst did up to that point is below.")
+            break
         steps_used = step + 1
-        data = _post(api_key, model, _tool_payload(ELLIOTT_PLAYBOOK, messages), client, timeout, base_url)
-        message = _assistant_turn(data)
+        try:
+            data = _post(api_key, model, _tool_payload(ELLIOTT_PLAYBOOK, messages),
+                         client, timeout, base_url)
+            message = _assistant_turn(data)
+        except AIAdvisorError as exc:
+            if step == 0:
+                raise          # nothing done yet - fail loudly
+            error = str(exc)
+            note = (f"Stopped at step {steps_used}: {error} "
+                    "The steps completed before that are below.")
+            steps_used = step   # the failed step did no work
+            break
         calls = message.get("tool_calls") or []
 
         if not calls:
@@ -217,4 +257,5 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
         steps_used=steps_used,
         finished=toolbox.submitted is not None,
         note=note,
+        error=error,
     )

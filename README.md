@@ -17,7 +17,7 @@
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine, live
 market data from Bybit USDT perpetuals (see "Mobile app + live Bybit"
-below for why Binance was dropped). 268 automated tests, all passing,
+below for why Binance was dropped). 280 automated tests, all passing,
 cover every module described below.
 
 ## Read this first: what "done" means here
@@ -90,7 +90,7 @@ t3_engine/
                       analyst_tools.py = the tools it may use). Never a decision-maker.
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                268 tests, one file per module above
+tests/                280 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Bybit in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -367,6 +367,21 @@ desktop web page:
   answer OK while the upstream vendor refused, and printing that as an
   empty second opinion would read as "the model had no concerns".
 
+  **Timeouts are split by phase**, because one number for everything gives
+  the wrong diagnosis. Connecting is either fast or broken (15s); *reading*
+  is the slow part - a free router model queues behind other traffic and a
+  reasoning model thinks before its first token, so a read can legitimately
+  take minutes. A read timeout therefore means the connection worked and
+  the model was still busy, which has a completely different fix from a
+  wrong URL, and the error now says so instead of "could not reach the
+  API". The read budget is a field in the AI tab (default 180s).
+
+  **Test key, URL and model** (`/api/ai/ping`) sends one tiny request. A
+  wrong key, a wrong base URL, a dead model id and a model that merely
+  queues all look identical from the dashboard - "nothing happened, then an
+  error" - and this separates a broken setup from a slow job in a few
+  seconds rather than after a multi-minute run.
+
   Provider history, since this keeps moving: OpenAI → Google Gemini →
   OrcaRouter. Nothing downstream of `ai_advisor/` cares which model
   answered, which is why each swap has been a rewrite of one module plus
@@ -467,6 +482,18 @@ OrcaRouter does, and one that doesn't will answer in prose instead - which
 comes back as `finished: false` with the model's own last message attached,
 rather than as an empty result presented as a finished analysis.
 
+A run that **stalls part way keeps the work it already did**. The agent
+makes up to `max_steps` sequential calls, so a slow model can exhaust the
+per-request timeout mid-run; when that happens the tool transcript up to
+that point comes back with the error attached, because "it listed the
+swings, measured wave 3, then the model stopped answering" is information,
+and throwing it away leaves the user with a blank panel after a three-
+minute wait. Only a failure on the *first* call raises - there is nothing
+to show then, and an empty result would read as a finished analysis that
+found no structure. A whole-run wall clock (480s) bounds the loop
+independently of the step count, so a proxy in front of the app never gives
+up before the app does.
+
 It is given the rulebook explicitly (`ai_advisor/playbook.py`), written out
 the way the literature separates it: the **hard rules** that make a count
 wrong (wave 2 never passes the start of wave 1; wave 3 is never the
@@ -558,7 +585,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (268 tests)
+# Run the automated test suite (280 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)
