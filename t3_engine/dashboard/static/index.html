@@ -141,6 +141,7 @@
   <button data-tab="analysis" class="active">Analysis</button>
   <button data-tab="ai">AI Advisor</button>
   <button data-tab="analyst">AI Analyst</button>
+  <button data-tab="mtf">Multi-TF</button>
 </div>
 <div id="layout">
   <div id="chart"></div>
@@ -345,6 +346,34 @@
           has an answer instead of a guess. Thinking is shown where the model streams it separately.
         </div>
         <div id="analystChat"></div>
+      </div>
+    </div>
+    <div id="tab-mtf" style="display:none;">
+      <div class="note">
+        Counts <strong>5m, 15m, 1h and 4h</strong> and reconciles them into one opinion. A count from
+        a single timeframe answers a question nobody asked: a five-wave advance on 5m inside a 4h
+        correction is a bounce, and only looking at both says so.
+      </div>
+      <div class="note">
+        <strong>Timeframes whose data has not moved are read from cache</strong>, not recounted — a
+        4h chart produces one new candle every four hours, and a full run is a dozen model calls.
+        Freshness is decided by the newest candle the saved analysis saw, never by a clock. The result
+        names what was reused and what was recomputed, so the saving is visible rather than claimed.
+      </div>
+      <div class="field-row">
+        <button class="panel-btn" id="runMtf" style="flex:2;">Analyse all timeframes</button>
+        <button class="panel-btn" id="clearMtf" style="flex:1;" title="Forget every saved analysis for this instrument and recompute from scratch">Forget cache</button>
+      </div>
+      <div class="hint" id="mtfStatus">Uses the Source / Symbol / Candles pickers in the header.</div>
+      <div id="mtfVerdict" style="display:none;"></div>
+      <div id="mtfFramesWrap" style="display:none;">
+        <h2>Per timeframe</h2>
+        <div class="hint" style="margin-bottom:6px;">Click one to draw it on the chart.</div>
+        <div id="mtfFrames"></div>
+      </div>
+      <div id="mtfAnalysisWrap" style="display:none;">
+        <h2>Technical analysis</h2>
+        <div class="signal" id="mtfAnalysis" style="white-space:pre-wrap; line-height:1.45;"></div>
       </div>
     </div>
   </div>
@@ -893,7 +922,8 @@ document.getElementById('liveStop').addEventListener('click', async () => {
 // the main one. Two reasons, both deliberate: the analyst's chart must
 // stay clean (no engine overlay ever reaches it), and swapping elements
 // means switching tabs can't disturb the zoom/pan state of either chart.
-const TAB_PANELS = { analysis: 'tab-analysis', ai: 'tab-ai', analyst: 'tab-analyst' };
+const TAB_PANELS = { analysis: 'tab-analysis', ai: 'tab-ai', analyst: 'tab-analyst',
+                     mtf: 'tab-mtf' };
 document.querySelectorAll('#tabs button').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('#tabs button').forEach(b => b.classList.remove('active'));
@@ -902,7 +932,7 @@ document.querySelectorAll('#tabs button').forEach(btn => {
     Object.entries(TAB_PANELS).forEach(([tab, id]) => {
       document.getElementById(id).style.display = tab === active ? '' : 'none';
     });
-    const onAnalyst = active === 'analyst';
+    const onAnalyst = active === 'analyst' || active === 'mtf';
     // 'block', not '': #analystChart is display:none in the stylesheet, and
     // clearing the inline style just falls back to that rule - which left
     // the tab showing an empty gap where the chart should be.
@@ -1134,6 +1164,147 @@ function renderAnalystChat(transcript) {
       + `</div>`;
   }).join('');
 }
+
+// ---- multi-timeframe ----
+let mtfData = null;
+
+function trendPill(trend) {
+  const cls = trend === 'UP' ? 'up' : trend === 'DOWN' ? 'down' : '';
+  return `<span class="pill ${cls}" style="${cls ? '' : 'background:#2c3140;color:#c7cbd3;'}">`
+    + `${escapeHtml(trend || '—')}</span>`;
+}
+
+function renderMtf(data) {
+  mtfData = data;
+  const verdict = data.verdict || {};
+  document.getElementById('mtfVerdict').style.display = '';
+  document.getElementById('mtfVerdict').innerHTML =
+    `<div class="signal ${verdict.trend === 'UP' ? 'accepted' : verdict.trend === 'DOWN' ? 'rejected' : ''}">`
+    + `<div class="row"><span class="k">Trend</span><span class="v">${trendPill(verdict.trend)}`
+    + ` <span style="color:#8891a3;">${escapeHtml(verdict.conviction || '')}</span></span></div>`
+    + (verdict.headline ? `<div class="body" style="margin:6px 0;">${escapeHtml(verdict.headline)}</div>` : '')
+    + (verdict.expected_move ? `<div class="row"><span class="k">Expected move</span>`
+        + `<span class="v" style="text-align:left;max-width:210px;">${escapeHtml(verdict.expected_move)}</span></div>` : '')
+    + (verdict.invalidation ? `<div class="row"><span class="k">Invalidated at</span>`
+        + `<span class="v" style="color:#f87171;">${escapeHtml(verdict.invalidation)}</span></div>` : '')
+    + ((verdict.agreement || []).length ? `<div class="hint" style="color:#4ade80;">Agrees: `
+        + `${verdict.agreement.map(escapeHtml).join('; ')}</div>` : '')
+    // Conflicts are shown, never smoothed away: a tidy verdict that hid a
+    // disagreeing timeframe would be the most expensive kind of tidy.
+    + ((verdict.conflicts || []).length ? `<div class="hint" style="color:#fbbf24;">Conflicts: `
+        + `${verdict.conflicts.map(escapeHtml).join('; ')}</div>` : '')
+    + `</div>`;
+
+  const frames = data.timeframes || [];
+  document.getElementById('mtfFramesWrap').style.display = frames.length ? '' : 'none';
+  document.getElementById('mtfFrames').innerHTML = frames.map((f, i) => {
+    const targets = ((f.projection || {}).targets) || [];
+    // The percentage next to a target is a MEASURED base rate from that
+    // chart's own swings, so the sample size travels with it.
+    const odds = targets.map(t => `${t.price}${t.probability !== null && t.probability !== undefined
+      ? ` <span style="color:#8891a3;">${Math.round(t.probability * 100)}%</span>` : ''}`).join(' · ');
+    const sample = (f.projection || {}).odds ? (f.projection.odds.sample_size + ' swings') : '';
+    return `<div class="signal ${f.error ? 'rejected' : 'accepted'}" data-frame="${i}"
+              style="cursor:pointer;">`
+      + `<div class="row"><span class="k">${escapeHtml(f.timeframe)}`
+      + `${f.reused ? ' <span style="color:#60a5fa;">cached</span>' : ''}</span>`
+      + `<span class="v">${f.error ? 'failed' : f.structures + ' structure(s), '
+          + Math.round(((f.coverage || {}).covered_fraction || 0) * 100) + '%'}</span></div>`
+      + (f.error ? `<div class="hint">${escapeHtml(f.error)}</div>` : '')
+      + (f.summary ? `<div class="hint">${escapeHtml(f.summary)}</div>` : '')
+      + (targets.length ? `<div class="hint">Next ${escapeHtml((f.projection || {}).next_label || '')}: `
+          + `${odds}${sample ? ` <span style="color:#6b7383;">(base rate over ${sample})</span>` : ''}</div>` : '')
+      + `</div>`;
+  }).join('');
+
+  document.querySelectorAll('#mtfFrames [data-frame]').forEach(el => {
+    el.addEventListener('click', () => drawMtfFrame(Number(el.dataset.frame)));
+  });
+
+  const analysis = verdict.technical_analysis || '';
+  document.getElementById('mtfAnalysisWrap').style.display = analysis ? '' : 'none';
+  document.getElementById('mtfAnalysis').textContent = analysis;
+}
+
+// The chart is shared with the analyst tab, so drawing a timeframe here
+// reuses exactly the same renderer - one count looks the same wherever it
+// came from.
+async function drawMtfFrame(index) {
+  const frame = (mtfData && mtfData.timeframes || [])[index];
+  if (!frame) return;
+  ensureAnalystChart();
+  const statusEl = document.getElementById('mtfStatus');
+  statusEl.textContent = `Loading ${frame.timeframe} candles…`;
+  try {
+    const params = new URLSearchParams({
+      source: document.getElementById('source').value,
+      symbol: normalizeSymbol(document.getElementById('symbol').value),
+      timeframe: frame.timeframe,
+      limit: document.getElementById('limit').value,
+      cycles: document.getElementById('cycles').value,
+    });
+    const resp = await fetchWithTimeout('/api/run?' + params.toString(), {}, 120000);
+    const data = await resp.json();
+    if (!resp.ok) { statusEl.textContent = data.detail || 'Could not load candles.'; return; }
+    analystSeries.setData(data.candles);
+    if (data.candles.length) {
+      analystFirstTime = data.candles[0].time;
+      analystLastTime = data.candles[data.candles.length - 1].time;
+    }
+    drawAnalystCount(frame.accepted);
+    drawAnalystProjection(frame.projection);
+    analystChart.timeScale().fitContent();
+    statusEl.textContent = `Showing ${frame.timeframe}.`;
+  } catch (e) {
+    statusEl.textContent = e.message || 'Network error loading candles.';
+  }
+}
+
+document.getElementById('runMtf').addEventListener('click', async () => {
+  const statusEl = document.getElementById('mtfStatus');
+  const source = document.getElementById('source').value;
+  if (source === 'live') {
+    statusEl.textContent = 'Switch to Synthetic or Bybit (history) — this counts loaded histories.';
+    return;
+  }
+  ensureAnalystChart();
+  statusEl.textContent = 'Counting 5m, 15m, 1h and 4h… cached timeframes are skipped.';
+  try {
+    const resp = await fetchWithTimeout('/api/ai/multi', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_key: aiKey(), model: aiModel(), base_url: aiBaseUrl(), timeout: aiTimeout(),
+        reasoning_effort: aiEffort(), thinking: aiThinking(), source,
+        symbol: normalizeSymbol(document.getElementById('symbol').value),
+        limit: Number(document.getElementById('limit').value),
+        cycles: Number(document.getElementById('cycles').value),
+        max_steps: Number(document.getElementById('analystSteps').value),
+      }),
+    }, 1800000);
+    const data = await resp.json();
+    if (!resp.ok) { statusEl.textContent = data.detail || 'Request failed.'; return; }
+    renderMtf(data);
+    statusEl.textContent = data.note
+      || `Recomputed ${(data.recomputed || []).join(', ') || 'nothing'}.`;
+  } catch (e) {
+    statusEl.textContent = e.message || 'Network error running the multi-timeframe analysis.';
+  }
+});
+
+document.getElementById('clearMtf').addEventListener('click', async () => {
+  const statusEl = document.getElementById('mtfStatus');
+  try {
+    const resp = await fetchWithTimeout('/api/ai/multi/clear', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: document.getElementById('source').value,
+                             symbol: normalizeSymbol(document.getElementById('symbol').value) }),
+    }, 30000);
+    const data = await resp.json();
+    statusEl.textContent = `Forgot ${data.cleared} saved analysis/analyses. The next run recomputes everything.`;
+  } catch (e) {
+    statusEl.textContent = e.message || 'Network error clearing the cache.';
+  }
+});
 
 document.getElementById('runAnalyst').addEventListener('click', async () => {
   const apiKey = aiKey();

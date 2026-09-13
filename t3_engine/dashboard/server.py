@@ -56,6 +56,9 @@ from t3_engine.ai_advisor.advisor import (
     resolve_api_key,
 )
 from t3_engine.ai_advisor.analyst import DEFAULT_MAX_STEPS, MAX_MAX_STEPS, run_analyst
+from t3_engine.ai_advisor import analysis_store
+from t3_engine.ai_advisor.multi_timeframe import run_multi_timeframe
+from t3_engine.ai_advisor.target_odds import annotate_projection
 from t3_engine.ai_advisor.relational import (
     DEFAULT_RELATIONAL_MODEL,
     DEFAULT_RELATIONAL_URL,
@@ -155,7 +158,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-028"
+BUILD_VERSION = "BUILD-CHECK-029"
 
 
 @app.get("/api/health")
@@ -617,6 +620,69 @@ def ai_signal_quality(api_key: str = Body("", embed=True), source: str = Body("s
     }
 
 
+@app.post("/api/ai/multi")
+def ai_multi_timeframe(api_key: str = Body("", embed=True),
+                       source: str = Body("synthetic", embed=True),
+                       symbol: str = Body("SYNTHETIC", embed=True),
+                       limit: int = Body(1500, embed=True, ge=100, le=10000),
+                       cycles: int = Body(2, embed=True, ge=1, le=10),
+                       model: str = Body(DEFAULT_AI_MODEL, embed=True),
+                       base_url: str = Body(DEFAULT_AI_API_BASE, embed=True),
+                       timeout: float = Body(DEFAULT_READ_TIMEOUT, embed=True, gt=0, le=MAX_READ_TIMEOUT),
+                       thinking: str = Body("on", embed=True),
+                       max_steps: int = Body(DEFAULT_MAX_STEPS, embed=True, ge=1, le=MAX_MAX_STEPS),
+                       force: bool = Body(False, embed=True)):
+    """Count 5m, 15m, 1h and 4h, then reconcile them into one opinion.
+
+    A count from a single timeframe answers a question nobody asked: a
+    five-wave advance on 5m inside a 4h correction is a bounce, and only
+    looking at both says so.
+
+    Timeframes whose data has not moved are READ FROM CACHE rather than
+    recounted. A full analyst run is a dozen model calls over a whole
+    history, and a 4h chart produces one new candle every four hours - so
+    the saving is large and the risk is nil, because freshness is decided
+    by the newest candle the saved analysis saw, not by a clock. The
+    response names which timeframes were reused and which were recomputed,
+    so the saving is visible rather than claimed.
+
+    The percentages attached to targets are MEASURED, not asked for: they
+    are the share of this chart's own past swings that carried at least
+    that far, with the sample size alongside. A model asked for a
+    percentage returns a confident number with nothing behind it, and a
+    percentage reads as measurement even when it is invention."""
+    result = run_multi_timeframe(
+        resolve_api_key(api_key), load_candles, source, symbol,
+        limit=limit, cycles=cycles, model=model, force=force,
+        max_steps=max_steps, base_url=base_url, timeout=timeout,
+        thinking=parse_thinking(thinking),
+    )
+    return {
+        "symbol": result.symbol,
+        "model": result.model,
+        "note": result.note,
+        "reused": result.reused_timeframes,
+        "recomputed": result.recomputed_timeframes,
+        "verdict": result.verdict,
+        "timeframes": [
+            {"timeframe": a.timeframe, "reused": a.reused, "candles": a.candles,
+             "coverage": a.coverage, "summary": a.summary, "error": a.error,
+             "steps_used": a.steps_used, "structures": len(a.accepted),
+             "accepted": a.accepted, "projection": a.projection}
+            for a in result.per_timeframe
+        ],
+    }
+
+
+@app.post("/api/ai/multi/clear")
+def ai_multi_clear(source: str = Body("synthetic", embed=True),
+                   symbol: str = Body("SYNTHETIC", embed=True)):
+    """Forget every saved analysis for one instrument - the escape hatch
+    for "recompute regardless of what the cache thinks"."""
+    removed = analysis_store.clear(source, normalize_symbol(symbol) if source == "bybit" else symbol)
+    return {"cleared": removed}
+
+
 @app.post("/api/ai/diagnose")
 def ai_diagnose_endpoint(api_key: str = Body("", embed=True),
                          model: str = Body(DEFAULT_AI_MODEL, embed=True),
@@ -721,7 +787,9 @@ def ai_analyst(api_key: str = Body("", embed=True), source: str = Body("syntheti
         # Where the count says price should go next, computed server-side
         # from waves already on the chart - the model names the wave, never
         # a price.
-        "projection": result.projection,
+        # The same measured base rates the multi-timeframe view shows: the
+        # share of THIS chart's past swings that carried at least that far.
+        "projection": annotate_projection(result.projection, candles),
         "coverage": result.coverage,
         "accepted": result.accepted,
         "rejected": result.rejected,

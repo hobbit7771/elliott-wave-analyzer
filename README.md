@@ -17,7 +17,7 @@
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine, live
 market data from Bybit USDT perpetuals (see "Mobile app + live Bybit"
-below for why Binance was dropped). 399 automated tests, all passing,
+below for why Binance was dropped). 420 automated tests, all passing,
 cover every module described below.
 
 ## Read this first: what "done" means here
@@ -90,7 +90,7 @@ t3_engine/
                       analyst_tools.py = the tools it may use). Never a decision-maker.
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                399 tests, one file per module above
+tests/                420 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Bybit in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -694,6 +694,47 @@ Note the host: this lives on `ai.api.nvidia.com`, **not** the
 key. Crossing the two produces a 404 that reads like a broken model id, so
 the error message names which URL it means.
 
+## Multi-timeframe: four charts, one opinion, nothing counted twice
+
+A count from a single timeframe answers a question nobody asked. A
+five-wave advance on 5m sitting inside a 4h correction is a bounce, and
+only looking at both says so. The **Multi-TF** tab counts 5m, 15m, 1h and
+4h, then makes **one** synthesis call that has to reconcile them - naming
+where they agree, where they conflict, what it expects, and the price that
+would end the read. Conflicts are reported rather than smoothed away: a
+tidy verdict that hid a disagreeing timeframe is the most expensive kind of
+tidy.
+
+**Analyses are cached on DATA, not on a clock.** A full analyst run is a
+dozen model calls over a whole history; four of them per request would buy
+the same conclusions again every time. A saved analysis stays valid until a
+candle arrives that it never saw - `last_candle_time` records the newest
+one it did - so a 4h chart, which produces one new candle every four hours,
+is usually read straight from the cache. The check is exact rather than
+tolerant: one new 4h candle can end a wave, and "close enough" is how a
+stale count survives the bar that invalidated it. An empty result is never
+cached, since that would suppress the retry that might have worked. The
+response names which timeframes were reused and which were recomputed, so
+the saving is visible rather than claimed, and **Forget cache** is the
+escape hatch.
+
+**The synthesis sees conclusions, not histories.** Each timeframe's
+structures, projection and coverage go into that one call - a few hundred
+tokens - never the candles or pivots again. The per-timeframe work already
+happened; asking the model to re-derive it would be paying twice inside one
+request.
+
+**The percentages are measured, not asked for.** Every target carries the
+share of *this chart's own* completed swings that carried at least that far
+relative to the swing before them, with the sample size alongside. Asking a
+model for a percentage returns a confident number with nothing behind it,
+and a percentage reads as measurement even when it is invention. Under
+twelve swings no number is printed at all and the response says why - a
+figure from nine swings is believed exactly as much as one from nine
+hundred, which is the whole problem. The number is a base rate, not a
+forecast: it knows nothing about where the count says price is now, which
+is precisely why it is worth showing beside a forecast.
+
 ## The AI Analyst: a clean chart, an agent, and the same trust boundary
 
 The AI labelling above is one shot: the model is handed a pre-computed
@@ -888,7 +929,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (399 tests)
+# Run the automated test suite (420 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)

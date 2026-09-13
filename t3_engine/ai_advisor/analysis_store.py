@@ -1,0 +1,142 @@
+"""Saved analyses, so the same conclusions are not paid for twice.
+
+A full analyst run is a dozen model calls over a whole history. Running
+four timeframes from scratch on every request buys the same answers again
+at full price, and most of the time nothing has changed: a 4h chart
+produces one new candle every four hours, so an analysis of it is good for
+hours.
+
+What decides freshness is the DATA, not a clock. An analysis is stale when
+candles have arrived that it never saw - `last_candle_time` records the
+newest one it did. A chart that has not moved has nothing new to say, and a
+timer would throw the work away anyway.
+
+The store is deliberately dumb: it holds the analyst's own result verbatim
+as JSON and never interprets it. Anything that needs to understand a saved
+analysis reads it through the same code that produced it.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+
+from sqlalchemy import delete, select
+
+from t3_engine.database.models import AnalysisCacheRow
+from t3_engine.database.session import init_db, make_session_factory, session_scope
+
+DEFAULT_DATABASE_URL = os.getenv("T3_DATABASE_URL", "sqlite:///./t3_engine.db")
+
+# How many entries to keep per (source, symbol). Enough for every timeframe
+# the dashboard offers, several times over, without letting a long-running
+# instance accumulate forever.
+MAX_ENTRIES_PER_SERIES = 40
+
+_factory = None
+
+
+def _sessions(database_url: Optional[str] = None):
+    global _factory
+    if _factory is None or database_url:
+        engine = init_db(database_url or DEFAULT_DATABASE_URL)
+        factory = make_session_factory(engine)
+        if database_url:
+            return factory          # an explicit URL is not cached globally
+        _factory = factory
+    return _factory
+
+
+@dataclass
+class CachedAnalysis:
+    source: str
+    symbol: str
+    timeframe: str
+    last_candle_time: int
+    candle_count: int
+    model: str
+    created_at: int
+    payload: Dict[str, Any]
+
+    def is_fresh_for(self, newest_candle_time: int) -> bool:
+        """Fresh while no candle newer than the one it analysed exists.
+
+        Deliberately exact rather than a tolerance: one new 4h candle can
+        end a wave, and "close enough" is how a stale count survives the
+        bar that invalidated it."""
+        return self.last_candle_time >= newest_candle_time
+
+
+def save(source: str, symbol: str, timeframe: str, last_candle_time: int,
+         candle_count: int, payload: Dict[str, Any], model: str = "",
+         database_url: Optional[str] = None) -> None:
+    """Replace whatever was stored for this series. One analysis per
+    (source, symbol, timeframe): keeping older ones would only invite
+    reading a superseded count."""
+    factory = _sessions(database_url)
+    with session_scope(factory) as session:
+        session.execute(delete(AnalysisCacheRow).where(
+            AnalysisCacheRow.source == source,
+            AnalysisCacheRow.symbol == symbol,
+            AnalysisCacheRow.timeframe == timeframe,
+        ))
+        session.add(AnalysisCacheRow(
+            source=source, symbol=symbol, timeframe=timeframe,
+            last_candle_time=int(last_candle_time), candle_count=int(candle_count),
+            model=model or "", created_at=int(time.time()),
+            payload=json.dumps(payload, default=str),
+        ))
+        _prune(session, source, symbol)
+
+
+def _prune(session, source: str, symbol: str) -> None:
+    rows = session.execute(
+        select(AnalysisCacheRow)
+        .where(AnalysisCacheRow.source == source, AnalysisCacheRow.symbol == symbol)
+        .order_by(AnalysisCacheRow.created_at.desc())
+    ).scalars().all()
+    for row in rows[MAX_ENTRIES_PER_SERIES:]:
+        session.delete(row)
+
+
+def load(source: str, symbol: str, timeframe: str,
+         database_url: Optional[str] = None) -> Optional[CachedAnalysis]:
+    factory = _sessions(database_url)
+    with session_scope(factory) as session:
+        row = session.execute(
+            select(AnalysisCacheRow).where(
+                AnalysisCacheRow.source == source,
+                AnalysisCacheRow.symbol == symbol,
+                AnalysisCacheRow.timeframe == timeframe,
+            ).order_by(AnalysisCacheRow.created_at.desc())
+        ).scalars().first()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row.payload)
+        except json.JSONDecodeError:
+            # A corrupt entry is worth less than no entry: it would be
+            # rendered as a real analysis.
+            return None
+        return CachedAnalysis(
+            source=row.source, symbol=row.symbol, timeframe=row.timeframe,
+            last_candle_time=row.last_candle_time, candle_count=row.candle_count,
+            model=row.model or "", created_at=row.created_at, payload=payload,
+        )
+
+
+def clear(source: str, symbol: str, database_url: Optional[str] = None) -> int:
+    """Drop every saved analysis for one series. The escape hatch for "I
+    want this recomputed regardless"."""
+    factory = _sessions(database_url)
+    with session_scope(factory) as session:
+        rows: List[AnalysisCacheRow] = session.execute(
+            select(AnalysisCacheRow).where(AnalysisCacheRow.source == source,
+                                           AnalysisCacheRow.symbol == symbol)
+        ).scalars().all()
+        for row in rows:
+            session.delete(row)
+        return len(rows)
