@@ -144,7 +144,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-018"
+BUILD_VERSION = "BUILD-CHECK-019"
 
 
 @app.get("/api/health")
@@ -520,7 +520,7 @@ def ai_label(api_key: str = Body("", embed=True), source: str = Body("synthetic"
 def ai_ping_endpoint(api_key: str = Body("", embed=True),
                      model: str = Body(DEFAULT_AI_MODEL, embed=True),
                      base_url: str = Body(DEFAULT_AI_API_BASE, embed=True),
-                     timeout: float = Body(60.0, embed=True, gt=0, le=MAX_READ_TIMEOUT)):
+                     timeout: float = Body(DEFAULT_READ_TIMEOUT, embed=True, gt=0, le=MAX_READ_TIMEOUT)):
     """One tiny round trip to the model, to tell a broken SETUP apart from
     a slow JOB.
 

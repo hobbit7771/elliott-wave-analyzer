@@ -246,24 +246,92 @@ def test_the_read_timeout_is_bounded_at_both_ends():
     assert build_timeout(99999).read == MAX_READ_TIMEOUT
 
 
-def test_ping_confirms_the_key_url_and_model_in_one_tiny_request():
+def test_ping_confirms_the_key_url_and_model_from_the_first_token():
     """A wrong key, a wrong URL, a dead model id and a model that merely
-    queues all look identical from the dashboard. This separates them."""
+    thinks for four minutes all look identical from the dashboard. This
+    separates them - and it STREAMS, because a non-streaming check against
+    a reasoning model waits out the whole thinking phase, making the one
+    call meant to diagnose slowness the likeliest to time out."""
     from t3_engine.ai_advisor.advisor import ping
 
     seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.update(json.loads(request.content))
-        assert seen["stream"] is False        # a config check must not also test the stream path
-        return plain_response("ok")
+        return chat_response("ok")
 
     result = ping("sk-test", model="moonshotai/kimi-k3", client=make_client(handler))
     assert result["ok"] is True
-    assert result["answer"] == "ok"
+    assert result["answer"].startswith("o")
     assert result["endpoint"].endswith("/chat/completions")
-    # Tiny on purpose: this must not itself be slow enough to time out.
-    assert seen["max_tokens"] <= 16
+    assert seen["stream"] is True
+    # No max_tokens cap: on most APIs a reasoning model's thinking counts
+    # against it, so a small cap can end the generation before any visible
+    # token exists - indistinguishable from a hang.
+    assert "max_tokens" not in seen
+
+
+def test_ping_returns_on_the_first_token_without_waiting_for_the_rest():
+    """The question is "does this setup produce tokens". Waiting for the
+    whole answer only risks the timeout the check exists to diagnose."""
+    from t3_engine.ai_advisor.advisor import ping
+
+    frames = sse(
+        {"choices": [{"index": 0, "delta": {"content": "ok"}}]},
+        {"choices": [{"index": 0, "delta": {"content": " and here is a very long tail"}}]},
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=frames)
+
+    result = ping("sk-test", client=make_client(handler))
+    assert result["answer"] == "ok"        # stopped at the first token, not the last
+
+
+def test_ping_counts_thinking_as_a_sign_of_life():
+    """A reasoning model emits its thinking first. That is still proof the
+    key, URL and model all work - refusing to count it would report a
+    working setup as broken."""
+    from t3_engine.ai_advisor.advisor import ping
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=sse(
+            {"choices": [{"index": 0, "delta": {"reasoning_content": "Let me think..."}}]}))
+
+    result = ping("sk-test", client=make_client(handler))
+    assert result["ok"] is True
+    assert result["reasoning_first"] is True
+
+
+def test_ping_reports_the_number_that_decides_whether_an_agent_run_is_feasible():
+    """The analyst pays the time-to-first-token once per step, so "it
+    works" is not the useful answer - "it works, 40s per step" is."""
+    from t3_engine.ai_advisor.advisor import _speed_advice, ping
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return chat_response("ok")
+
+    result = ping("sk-test", client=make_client(handler))
+    assert "seconds_to_first_token" in result
+    assert "advice" in result
+
+    assert "any step budget" in _speed_advice(1.0)
+    assert "keep the step budget modest" in _speed_advice(12.0)
+    assert "cut the step budget" in _speed_advice(45.0)
+
+
+def test_a_stream_that_closes_without_a_single_token_says_the_setup_is_fine():
+    """Distinguishing "your key is wrong" from "this model produced
+    nothing" is the whole job of this check."""
+    from t3_engine.ai_advisor.advisor import ping
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="data: [DONE]\n\n")
+
+    with pytest.raises(AIAdvisorError) as excinfo:
+        ping("sk-test", client=make_client(handler))
+    assert "are therefore fine" in str(excinfo.value)
+    assert "Try another model id" in str(excinfo.value)
 
 
 # ---- wave-count proposals ----

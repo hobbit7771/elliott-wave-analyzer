@@ -867,3 +867,20 @@ def test_index_renders_the_conversation_including_the_models_thinking():
     assert "renderAnalystChat" in resp.text
     assert "analystChat" in resp.text
     assert "entry.reasoning" in resp.text
+
+
+def test_the_connection_check_uses_the_configured_timeout_not_a_hardcoded_one():
+    """A check that gives up sooner than the real calls do reports a
+    working setup as broken - which is exactly how a slow reasoning model
+    looked."""
+    resp = client.get("/")
+    assert "timeout: aiTimeout()" in resp.text
+    assert "timeout: 60 }" not in resp.text
+
+
+def test_the_connection_check_surfaces_time_to_first_token():
+    """"It works" is not the useful answer. The analyst pays that number
+    once per step."""
+    resp = client.get("/")
+    assert "seconds_to_first_token" in resp.text
+    assert "data.advice" in resp.text

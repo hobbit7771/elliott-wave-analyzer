@@ -17,7 +17,7 @@
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine, live
 market data from Bybit USDT perpetuals (see "Mobile app + live Bybit"
-below for why Binance was dropped). 310 automated tests, all passing,
+below for why Binance was dropped). 316 automated tests, all passing,
 cover every module described below.
 
 ## Read this first: what "done" means here
@@ -90,7 +90,7 @@ t3_engine/
                       analyst_tools.py = the tools it may use). Never a decision-maker.
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                310 tests, one file per module above
+tests/                316 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Bybit in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -390,11 +390,26 @@ desktop web page:
   wrong URL, and the error now says so instead of "could not reach the
   API". The read budget is a field in the AI tab (default 180s).
 
-  **Test key, URL and model** (`/api/ai/ping`) sends one tiny request. A
-  wrong key, a wrong base URL, a dead model id and a model that merely
-  queues all look identical from the dashboard - "nothing happened, then an
-  error" - and this separates a broken setup from a slow job in a few
-  seconds rather than after a multi-minute run.
+  **Test key, URL and model** (`/api/ai/ping`) sends one request and
+  returns the moment the first token arrives, without waiting for the rest.
+  That distinction is the whole point: this check was originally
+  non-streaming, which meant it waited out a reasoning model's entire
+  thinking phase - so the one call meant to diagnose slowness was the one
+  most likely to time out, which is precisely what happened with
+  `deepseek-v4-pro` (60s timeout on a one-token request whose connection
+  was fine). It also sends no `max_tokens` cap, since on most APIs a
+  reasoning model's thinking counts against it and a small cap can end the
+  generation before any visible token exists - indistinguishable from a
+  hang.
+
+  What it returns is a diagnosis rather than a yes/no: the **time to the
+  first token**, because the analyst pays that once per step, so it is the
+  number that decides whether a multi-step run is feasible at all. Under 5s
+  means any step budget works; 40s means a 10-step run cannot finish and
+  the advice says to use a faster model or cut the budget to 4-6. Thinking
+  counts as a sign of life - refusing to count it would report a working
+  setup as broken. And a stream that closes without a single token says so
+  explicitly: key, URL and model are fine, that model produced nothing.
 
   **Chat calls stream** (SSE), and the chunks are reassembled into the
   ordinary response shape before anything downstream sees them. This is not
@@ -641,7 +656,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (310 tests)
+# Run the automated test suite (316 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)

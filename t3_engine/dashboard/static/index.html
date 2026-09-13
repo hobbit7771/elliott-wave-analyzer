@@ -1173,13 +1173,23 @@ document.getElementById('pingAi').addEventListener('click', async () => {
   try {
     const resp = await fetchWithTimeout('/api/ai/ping', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ api_key: apiKey, model: aiModel(), base_url: aiBaseUrl(), timeout: 60 }),
-    }, 70000);
+      // The user's own timeout, not a hardcoded 60s. A check that gives up
+      // sooner than the real calls do reports a working setup as broken.
+      body: JSON.stringify({ api_key: apiKey, model: aiModel(), base_url: aiBaseUrl(),
+                             timeout: aiTimeout() }),
+    }, aiTimeout() * 1000 + 15000);
     const data = await resp.json();
     if (!resp.ok) { statusEl.textContent = data.detail || 'Request failed.'; return; }
-    statusEl.textContent = data.ok
-      ? `Works. ${data.model} answered via ${data.endpoint}: "${data.answer || '(empty)'}"`
-      : data.error;
+    if (!data.ok) { statusEl.textContent = data.error; return; }
+    // "It works" is not the useful answer. The analyst pays the
+    // time-to-first-token once per step, so that number is what decides
+    // whether a multi-step run is feasible at all.
+    const first = data.seconds_to_first_token;
+    statusEl.innerHTML =
+      `<strong style="color:#4ade80;">Works.</strong> ${escapeHtml(data.model)} started answering in `
+      + `<strong>${first}s</strong>`
+      + (data.reasoning_first ? ' (thinking first, no visible answer yet)' : '')
+      + `.<br>${escapeHtml(data.advice || '')}`;
   } catch (e) {
     statusEl.textContent = e.message || 'Network error during the connection test.';
   }
