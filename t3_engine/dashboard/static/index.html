@@ -178,7 +178,11 @@
         <input id="aiModel" type="text" placeholder="nvidia/nemotron-3-ultra-550b-a55b:free" />
       </div>
       <div class="hint">
-        A router id, <code>vendor/model</code>, optionally with a <code>:free</code> suffix. Editable because catalogues change; if a call comes
+        One id, or <strong>several separated by commas</strong> — the router walks the list and uses
+        the first that answers. Worth doing: a free model behind a shared GPU pool returns
+        <em>"service temporarily overloaded"</em> a good fraction of the time, and a list turns that
+        into a non-event instead of a failed run. Format <code>vendor/model</code>, optionally with a
+        <code>:free</code> suffix. Editable because catalogues change; if a call comes
         back <code>404</code> the id no longer resolves — paste the current one here, no redeploy
         needed. The AI Analyst needs a model that supports <em>tool calling</em>; one that doesn't will
         answer in prose and submit nothing.
@@ -243,6 +247,9 @@
       <div class="field-row">
         <button class="panel-btn" id="pingAi" style="flex:1;">Test key, URL and model</button>
         <button class="panel-btn" id="diagnoseAi" style="flex:1;">Diagnose</button>
+      </div>
+      <div class="field-row">
+        <button class="panel-btn" id="fillModels" style="flex:1;">Fill Model field with working models</button>
       </div>
       <div class="hint" style="margin-bottom:6px;">
         <strong>Diagnose</strong> first lists the catalogue (<code>GET /models</code>) — that needs the
@@ -1328,6 +1335,41 @@ document.getElementById('diagnoseAi').addEventListener('click', async () => {
     out.innerHTML = html;
   } catch (e) {
     statusEl.textContent = e.message || 'Network error during diagnosis.';
+  }
+});
+
+// Ask the catalogue which models can actually run the analyst, and put
+// them in the field as a fallback list. This replaces the loop the user
+// was stuck in: try a model, watch it be busy or lack tool calling, go
+// find another one by hand.
+document.getElementById('fillModels').addEventListener('click', async () => {
+  const statusEl = document.getElementById('pingStatus');
+  statusEl.textContent = 'Asking the catalogue which models support tool calling…';
+  try {
+    const resp = await fetchWithTimeout('/api/ai/diagnose', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: aiKey(), model: aiModel(), base_url: aiBaseUrl(),
+                             timeout: 20, probe: false }),
+    }, 60000);
+    const data = await resp.json();
+    const access = (data || {}).access || {};
+    if (!access.ok) { statusEl.textContent = access.error || 'Could not read the catalogue.'; return; }
+    const capable = access.tool_capable || [];
+    if (!capable.length) {
+      statusEl.textContent = 'This catalogue publishes no tool-calling metadata, so the list cannot '
+        + 'be filled automatically. The analyst may still work — try it.';
+      return;
+    }
+    // Free ones first: they are what the key is for, and a paid id silently
+    // first in the list is a surprise on the invoice rather than a fallback.
+    const free = capable.filter(m => m.includes(':free'));
+    const picked = free.concat(capable.filter(m => !m.includes(':free'))).slice(0, 5);
+    document.getElementById('aiModel').value = picked.join(', ');
+    localStorage.setItem(MODEL_STORAGE, picked.join(', '));
+    statusEl.textContent = `Filled with ${picked.length} tool-calling model(s), `
+      + `${free.length ? 'free ones first' : 'none of them free'}. The router uses the first that answers.`;
+  } catch (e) {
+    statusEl.textContent = e.message || 'Network error reading the catalogue.';
   }
 });
 

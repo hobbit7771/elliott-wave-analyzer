@@ -1042,3 +1042,29 @@ def test_index_shows_the_tool_calling_verdict_where_the_model_is_chosen():
     resp = client.get("/")
     assert "model_supports_tools" in resp.text
     assert "the AI Analyst can run" in resp.text
+
+
+def test_the_catalogue_only_call_skips_the_slow_probe():
+    """Filling the model list must not also spend four 25s variant probes -
+    that is a minute of waiting for a list of names."""
+    probed = []
+
+    with patch.object(server_module, "ai_check_access",
+                      return_value={"ok": True, "seconds": 0.1, "model_count": 2, "models": [],
+                                    "tool_capable": ["a/b:free"], "tool_capable_count": 1,
+                                    "model_supports_tools": True, "checked_model": "a/b:free"}), \
+         patch.object(server_module, "ai_probe_variants", side_effect=lambda *a, **k: probed.append(1)), \
+         patch.object(server_module, "ai_diagnose", side_effect=lambda *a, **k: probed.append(1)):
+        resp = client.post("/api/ai/diagnose", json={"api_key": "sk-or-test", "probe": False})
+
+    assert probed == []
+    assert resp.json()["access"]["tool_capable"] == ["a/b:free"]
+
+
+def test_index_can_fill_the_model_field_from_the_catalogue():
+    """The loop this replaces: try a model, watch it be busy or lack tool
+    calling, go find another one by hand."""
+    resp = client.get("/")
+    assert "fillModels" in resp.text
+    assert "tool_capable" in resp.text
+    assert "includes(':free')" in resp.text      # free ones first, not a surprise invoice
