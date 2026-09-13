@@ -12,7 +12,7 @@ against Postgres, see schema.sql).
 
 from __future__ import annotations
 
-from sqlalchemy import JSON, Boolean, Column, Float, Integer, String
+from sqlalchemy import JSON, Boolean, Column, Float, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase
 
 
@@ -175,3 +175,28 @@ class BacktestResultRow(Base):
     mae_avg = Column(Float, nullable=True)
     mfe_avg = Column(Float, nullable=True)
     created_at = Column(Integer, nullable=False)
+
+
+class AnalysisCacheRow(Base):
+    """One saved AI analysis, keyed by what it was computed FROM.
+
+    The point is not speed, it is money: a full analyst run is a dozen
+    model calls over a whole history, and re-running four timeframes from
+    scratch on every request pays for the same conclusions again. A cached
+    analysis stays valid until new candles arrive, and `last_candle_time`
+    is what decides that - not a clock, because a chart that has not moved
+    has nothing new to say.
+    """
+
+    __tablename__ = "analysis_cache"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(String, nullable=False, index=True)
+    symbol = Column(String, nullable=False, index=True)
+    timeframe = Column(String, nullable=False, index=True)
+    # The newest candle the analysis actually saw. Newer data than this
+    # means the analysis is behind, and only then is it worth redoing.
+    last_candle_time = Column(Integer, nullable=False)
+    candle_count = Column(Integer, nullable=False)
+    model = Column(String, nullable=True)
+    created_at = Column(Integer, nullable=False)
+    payload = Column(Text, nullable=False)      # the analyst result, as JSON

@@ -1111,3 +1111,68 @@ def test_index_draws_the_projection_dashed_and_says_who_computed_it():
 def test_index_reports_how_much_of_the_chart_got_labelled():
     resp = client.get("/")
     assert "of the chart labelled" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Multi-timeframe: one opinion from four charts, nothing counted twice
+# ---------------------------------------------------------------------------
+
+def test_multi_timeframe_returns_a_verdict_and_says_what_it_reused():
+    """The saving has to be visible rather than claimed - otherwise nobody
+    can tell whether the cache is doing anything."""
+    from t3_engine.ai_advisor.multi_timeframe import MultiTimeframeResult, TimeframeAnalysis
+
+    fake = MultiTimeframeResult(
+        symbol="INJUSDT", model="~openai/gpt-astra-latest",
+        note="Reused the saved analysis for 1h, 4h", reused_timeframes=["1h", "4h"],
+        recomputed_timeframes=["5m", "15m"],
+        verdict={"trend": "UP", "conviction": "medium", "headline": "h",
+                 "technical_analysis": "long text"},
+        per_timeframe=[TimeframeAnalysis(timeframe="5m", reused=False, candles=1000,
+                                         last_candle_time=1, accepted=[{"structure": "IMPULSE"}],
+                                         coverage={"covered_fraction": 0.9})])
+
+    with patch.object(server_module, "run_multi_timeframe", return_value=fake):
+        resp = client.post("/api/ai/multi", json={"api_key": "sk-or-test", "source": "synthetic"})
+    body = resp.json()
+    assert body["verdict"]["trend"] == "UP"
+    assert body["reused"] == ["1h", "4h"]
+    assert body["recomputed"] == ["5m", "15m"]
+    assert body["timeframes"][0]["structures"] == 1
+
+
+def test_the_multi_endpoint_covers_exactly_the_four_timeframes_asked_for():
+    from t3_engine.ai_advisor.multi_timeframe import MTF_TIMEFRAMES
+
+    assert [tf.value for tf in MTF_TIMEFRAMES] == ["5m", "15m", "1h", "4h"]
+
+
+def test_clearing_the_cache_reports_how_much_it_forgot():
+    with patch.object(server_module.analysis_store, "clear", return_value=4):
+        resp = client.post("/api/ai/multi/clear",
+                           json={"source": "bybit", "symbol": "INJUSDT"})
+    assert resp.json()["cleared"] == 4
+
+
+def test_the_single_timeframe_analyst_also_gets_measured_probabilities():
+    """A percentage shown in one view and missing in the other would look
+    like one of them is guessing."""
+    fake = _FakeAnalystResult([])
+    fake.projection = {"next_label": "5", "basis": "b", "from_time": 1, "from_price": 1.0,
+                       "targets": [{"ratio": 0.618, "price": 2.0}, {"ratio": 1.618, "price": 3.0}]}
+    with patch.object(server_module, "run_analyst", return_value=fake):
+        resp = client.post("/api/ai/analyst",
+                           json={"api_key": "sk-or-test", "source": "synthetic", "cycles": 6})
+    targets = resp.json()["projection"]["targets"]
+    # Either every target carries a measured probability, or the response
+    # says why none is shown. Never a bare number with nothing behind it.
+    body = resp.json()["projection"]
+    assert all("probability" in t for t in targets) or "odds_note" in body
+
+
+def test_index_exposes_the_multi_timeframe_tab():
+    resp = client.get("/")
+    assert 'data-tab="mtf"' in resp.text
+    assert "/api/ai/multi" in resp.text
+    assert "base rate over" in resp.text        # the sample size travels with the percentage
+    assert "Conflicts" in resp.text             # disagreement is shown, not smoothed away
