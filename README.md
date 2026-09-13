@@ -17,7 +17,7 @@
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine, live
 market data from Bybit USDT perpetuals (see "Mobile app + live Bybit"
-below for why Binance was dropped). 332 automated tests, all passing,
+below for why Binance was dropped). 341 automated tests, all passing,
 cover every module described below.
 
 ## Read this first: what "done" means here
@@ -90,7 +90,7 @@ t3_engine/
                       analyst_tools.py = the tools it may use). Never a decision-maker.
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                332 tests, one file per module above
+tests/                341 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Bybit in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -427,6 +427,26 @@ desktop web page:
   is reported separately from the observations, so a wrong reading of the
   evidence never hides the evidence.
 
+  Third, a **configuration probe**: the same trivial prompt sent under
+  several settings, each differing from the previous one by exactly one
+  thing, so the first that answers names the cause rather than hinting at
+  it. This exists because the first two checks answered the wrong half of
+  the question. Against `deepseek-v4-pro` they proved the catalogue listing
+  returns in **0.08s** while the chat endpoint sends **no response headers
+  at all for 45s** - conclusive that the key, URL and network are fine, and
+  that the gateway buffers the entire response before sending any of it, so
+  the wait is the full generation. What they could not say is *which*
+  request setting makes that generation long. The probe can: if "thinking
+  off" answers and "thinking on" does not, the model's thinking mode is the
+  whole problem and the fix is a toggle.
+
+  That toggle is **Model thinking** in the AI tab, sent as
+  `chat_template_kwargs: {thinking: …}` - which is exactly what NVIDIA's
+  own snippet for these models sets. It is **off by default because it was
+  measured, not preferred**. It is tri-state: "do not send the field" is a
+  distinct and necessary choice, since a model that has never heard of
+  `chat_template_kwargs` answers `400` rather than ignoring it.
+
   Two behaviours it catches are also *handled* rather than only reported: a
   `202` says outright that the request was queued rather than answered, and
   a non-SSE body that is nonetheless a valid completion is parsed and used
@@ -723,7 +743,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (332 tests)
+# Run the automated test suite (341 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)

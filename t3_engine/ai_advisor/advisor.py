@@ -103,6 +103,24 @@ def resolve_api_key(supplied: Optional[str]) -> str:
 # 400 on a provider that does not know it - the UI offers it explicitly.
 VALID_REASONING_EFFORTS = ("low", "medium", "high", "max")
 
+# NIM-hosted models expose their chat template's switches through
+# `chat_template_kwargs`, and for the reasoning models in this catalogue
+# the one that matters is `thinking`.
+#
+# Default OFF, for a reason found by measurement rather than preference:
+# the diagnostic showed the chat endpoint returning no response HEADERS at
+# all for 45s while the catalogue listing answered in 0.08s. Headers that
+# late mean the gateway buffers the whole response before sending any of
+# it - so the wait is the full generation, and with thinking on that is
+# minutes per step. NVIDIA's own snippet for deepseek-v4-pro sets exactly
+# this flag to False.
+#
+# It is a switch, not a constant: thinking genuinely helps a wave count,
+# and someone on a faster tier should be able to turn it back on. Sent only
+# when set, because a model that has never heard of the field answers 400
+# rather than ignoring it.
+DEFAULT_THINKING: Optional[bool] = False
+
 # Sampling temperatures, chosen per job rather than one number everywhere.
 #
 # A wave count is not a creative task: the chart either does or does not
@@ -320,7 +338,9 @@ def _headers(api_key: str, stream: bool) -> Dict[str, str]:
 
 
 def apply_model_options(payload: Dict[str, Any], seed: Optional[int] = DEFAULT_SEED,
-                        reasoning_effort: Optional[str] = None) -> Dict[str, Any]:
+                        reasoning_effort: Optional[str] = None,
+                        thinking: Optional[bool] = DEFAULT_THINKING,
+                        top_p: Optional[float] = None) -> Dict[str, Any]:
     """Add the optional knobs, and ONLY when they are set.
 
     Both are provider-specific: sending `reasoning_effort` to a model that
@@ -337,6 +357,10 @@ def apply_model_options(payload: Dict[str, Any], seed: Optional[int] = DEFAULT_S
                 f"reasoning_effort must be one of {', '.join(VALID_REASONING_EFFORTS)}, got {reasoning_effort!r}"
             )
         out["reasoning_effort"] = effort
+    if thinking is not None:
+        out["chat_template_kwargs"] = {"thinking": bool(thinking)}
+    if top_p is not None:
+        out["top_p"] = float(top_p)
     return out
 
 
@@ -569,7 +593,8 @@ def _extract_text(data: Dict[str, Any]) -> str:
 def request_commentary(api_key: str, context: Dict[str, Any], model: str = DEFAULT_MODEL,
                         client: Optional[httpx.Client] = None, timeout: float = DEFAULT_READ_TIMEOUT,
                         base_url: Optional[str] = None, seed: Optional[int] = DEFAULT_SEED,
-                        reasoning_effort: Optional[str] = None) -> AdvisorResponse:
+                        reasoning_effort: Optional[str] = None,
+                        thinking: Optional[bool] = DEFAULT_THINKING) -> AdvisorResponse:
     user_content = (
         "Here is the current Elliott Wave engine state as JSON. Give your second opinion.\n\n"
         + json.dumps(context, indent=2, default=str)
@@ -578,7 +603,7 @@ def request_commentary(api_key: str, context: Dict[str, Any], model: str = DEFAU
         "messages": build_messages(ADVISOR_SYSTEM_PROMPT, user_content),
         "temperature": COMMENTARY_TEMPERATURE,
         "max_tokens": COMMENTARY_MAX_OUTPUT_TOKENS,
-    }, seed=seed, reasoning_effort=reasoning_effort)
+    }, seed=seed, reasoning_effort=reasoning_effort, thinking=thinking)
     data = _post(api_key, model, payload, client, timeout, base_url)
     return AdvisorResponse(text=_extract_text(data), model=model, raw=data)
 
@@ -605,7 +630,8 @@ def request_wave_count(api_key: str, pivots: List[Dict[str, Any]], direction: st
                         model: str = DEFAULT_MODEL, client: Optional[httpx.Client] = None,
                         timeout: float = DEFAULT_READ_TIMEOUT, base_url: Optional[str] = None,
                         seed: Optional[int] = DEFAULT_SEED,
-                        reasoning_effort: Optional[str] = None) -> WaveCountProposal:
+                        reasoning_effort: Optional[str] = None,
+                        thinking: Optional[bool] = DEFAULT_THINKING) -> WaveCountProposal:
     """Ask for a count over the whole pivot history. The returned `waves`
     are RAW model output - structurally unvalidated on purpose. Pass them
     straight to elliott_engine.external_count.validate_external_count;
@@ -620,7 +646,7 @@ def request_wave_count(api_key: str, pivots: List[Dict[str, Any]], direction: st
         "temperature": ANALYSIS_TEMPERATURE,   # a count is an analysis, not a creative task
         "max_tokens": COUNT_MAX_OUTPUT_TOKENS,
         "response_format": {"type": "json_object"},
-    }, seed=seed, reasoning_effort=reasoning_effort)
+    }, seed=seed, reasoning_effort=reasoning_effort, thinking=thinking)
     data = _post(api_key, model, payload, client, timeout, base_url)
     parsed = _parse_count_json(_extract_text(data))
     waves = parsed.get("waves")
@@ -697,7 +723,8 @@ def check_access(api_key: str, base_url: Optional[str] = None,
 
 def ping(api_key: str, model: str = DEFAULT_MODEL, base_url: Optional[str] = None,
          client: Optional[httpx.Client] = None,
-         timeout: float = DEFAULT_READ_TIMEOUT) -> Dict[str, Any]:
+         timeout: float = DEFAULT_READ_TIMEOUT,
+         thinking: Optional[bool] = DEFAULT_THINKING) -> Dict[str, Any]:
     """One round trip, to separate "the setup is wrong" from "this model is
     slow". Those look identical from the dashboard - a wrong key, a wrong
     URL, a retired model id and a model that thinks for four minutes all
@@ -714,13 +741,13 @@ def ping(api_key: str, model: str = DEFAULT_MODEL, base_url: Optional[str] = Non
     What comes back is a diagnosis rather than a yes/no: the time to the
     first token is the number that decides whether an agent run is feasible
     at all, since the analyst pays it once per step."""
-    payload = {
+    payload = apply_model_options({
         # No max_tokens cap: on most APIs a reasoning model's thinking
         # counts against it, so a small cap can end the generation before
         # any visible token exists - indistinguishable from a hang.
         "messages": [{"role": "user", "content": "Reply with the single word: ok"}],
         "temperature": 0,
-    }
+    }, seed=None, thinking=thinking)
     if not api_key:
         raise AIAdvisorError(f"No {PROVIDER_NAME} API key provided "
                              "(get one at https://build.nvidia.com)")
@@ -902,3 +929,104 @@ def _diagnostic_verdict(report: Dict[str, Any]) -> str:
                 "- which is exactly the slowness being investigated.")
     return (f"Healthy: headers in {report.get('seconds_to_headers', '?')}s, first body bytes in "
             f"{report.get('seconds_to_first_byte', '?')}s, and the body is a real event stream.")
+
+
+# The configurations worth telling apart, in the order that isolates the
+# variable. Each differs from the one before it by exactly one thing, so
+# whichever is the first to answer names the cause outright.
+PROBE_VARIANTS = (
+    ("thinking off, streamed", {"thinking": False, "stream": True}),
+    ("thinking off, not streamed", {"thinking": False, "stream": False}),
+    ("thinking on, streamed", {"thinking": True, "stream": True}),
+    ("no chat_template_kwargs", {"thinking": None, "stream": True}),
+)
+
+
+def probe_variants(api_key: str, model: str = DEFAULT_MODEL, base_url: Optional[str] = None,
+                   client: Optional[httpx.Client] = None,
+                   per_variant_timeout: float = 25.0) -> Dict[str, Any]:
+    """Send the same trivial prompt under several configurations and report
+    which ones answer, and how fast.
+
+    This exists because the endpoint diagnostic answered the wrong half of
+    the question. It proved the catalogue listing returns in 0.08s while
+    the chat endpoint sends no response headers at all for 45s - conclusive
+    that the key, URL and network are fine, and that the gateway buffers
+    the entire response before sending any of it, so the wait is the full
+    generation. What it could not say is WHICH request setting makes that
+    generation long.
+
+    So each variant here differs from the previous one by exactly one
+    thing, and the first that answers names the cause rather than hinting
+    at it: if "thinking off" answers and "thinking on" does not, the
+    model's thinking mode is the whole problem, and the fix is a toggle
+    rather than a guess about rate limits or model speed."""
+    results: List[Dict[str, Any]] = []
+    http_client = client or httpx.Client(timeout=build_timeout(per_variant_timeout))
+    owns_client = client is None
+    url = chat_url(base_url)
+    try:
+        for label, options in PROBE_VARIANTS:
+            body = apply_model_options({
+                "model": model,
+                "messages": [{"role": "user", "content": "Reply with the single word: ok"}],
+                "temperature": 0,
+                "max_tokens": 32,
+            }, seed=None, thinking=options["thinking"])
+            body["stream"] = options["stream"]
+            entry: Dict[str, Any] = {"variant": label, "stream": options["stream"],
+                                     "thinking": options["thinking"]}
+            started = time.monotonic()
+            try:
+                if options["stream"]:
+                    with http_client.stream("POST", url, headers=_headers(api_key, True),
+                                            json=body) as resp:
+                        entry["status"] = resp.status_code
+                        entry["seconds_to_headers"] = round(time.monotonic() - started, 2)
+                        for raw in resp.iter_bytes():
+                            if raw:
+                                entry["seconds_to_first_byte"] = round(time.monotonic() - started, 2)
+                                break
+                else:
+                    resp = http_client.post(url, headers=_headers(api_key, False), json=body)
+                    entry["status"] = resp.status_code
+                    entry["seconds_to_headers"] = round(time.monotonic() - started, 2)
+                    entry["seconds_to_first_byte"] = entry["seconds_to_headers"]
+                entry["ok"] = entry.get("status") == 200 and "seconds_to_first_byte" in entry
+            except httpx.RequestError as exc:
+                entry["ok"] = False
+                entry["error"] = _transport_error_message(exc, url, per_variant_timeout)
+                entry["gave_up_after"] = round(time.monotonic() - started, 2)
+            results.append(entry)
+    finally:
+        if owns_client:
+            http_client.close()
+
+    return {"variants": results, "verdict": _variant_verdict(results)}
+
+
+def _variant_verdict(results: List[Dict[str, Any]]) -> str:
+    working = [r for r in results if r.get("ok")]
+    if not working:
+        return ("No configuration answered. Since the catalogue listing works, the key and endpoint "
+                "are fine - this model is not serving requests right now. Try another model id.")
+
+    fastest = min(working, key=lambda r: r.get("seconds_to_first_byte", 1e9))
+    thinking_on = next((r for r in results if r.get("thinking") is True), None)
+    thinking_off = next((r for r in results if r.get("thinking") is False and r.get("stream")), None)
+
+    lines = [f"Fastest working setup: {fastest['variant']} "
+             f"({fastest.get('seconds_to_first_byte')}s to first byte)."]
+    if thinking_off and thinking_on and thinking_off.get("ok") and not thinking_on.get("ok"):
+        lines.append("Thinking mode is the cause: with it off the model answers, with it on the "
+                     "request never returns. Leave 'Model thinking' off in the AI tab.")
+    elif thinking_on and thinking_off and thinking_on.get("ok") and thinking_off.get("ok"):
+        lines.append(f"Both thinking modes work "
+                     f"(on: {thinking_on.get('seconds_to_first_byte')}s, "
+                     f"off: {thinking_off.get('seconds_to_first_byte')}s).")
+    streamed = next((r for r in results if r.get("stream") and r.get("ok")), None)
+    buffered = next((r for r in results if not r.get("stream") and r.get("ok")), None)
+    if buffered and not streamed:
+        lines.append("Only the non-streamed request works - this gateway does not serve SSE for "
+                     "this model.")
+    return " ".join(lines)

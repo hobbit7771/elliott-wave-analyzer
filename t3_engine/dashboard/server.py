@@ -48,6 +48,7 @@ from t3_engine.ai_advisor.advisor import (
     AIAdvisorError,
     check_access as ai_check_access,
     diagnose as ai_diagnose,
+    probe_variants as ai_probe_variants,
     ping as ai_ping,
     request_commentary,
     request_wave_count,
@@ -146,7 +147,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-021"
+BUILD_VERSION = "BUILD-CHECK-022"
 
 
 @app.get("/api/health")
@@ -416,7 +417,8 @@ def ai_advice(context: dict = Body(..., embed=True), api_key: str = Body("", emb
               model: str = Body(DEFAULT_AI_MODEL, embed=True),
               base_url: str = Body(DEFAULT_AI_API_BASE, embed=True),
               timeout: float = Body(DEFAULT_READ_TIMEOUT, embed=True, gt=0, le=MAX_READ_TIMEOUT),
-              reasoning_effort: str = Body("", embed=True)):
+              reasoning_effort: str = Body("", embed=True),
+              thinking: str = Body("off", embed=True)):
     """BYO-key OrcaRouter second opinion. The key is used for exactly one
     outbound request and never written to disk/DB/logs - see
     ai_advisor/advisor.py's docstring for why this only ever produces
@@ -424,7 +426,8 @@ def ai_advice(context: dict = Body(..., embed=True), api_key: str = Body("", emb
     try:
         result = request_commentary(resolve_api_key(api_key), context, model=model,
                                     base_url=base_url, timeout=timeout,
-                                    reasoning_effort=reasoning_effort)
+                                    reasoning_effort=reasoning_effort,
+                                    thinking=parse_thinking(thinking))
     except AIAdvisorError as exc:
         raise HTTPException(502, str(exc))
     return {"commentary": result.text, "model": result.model}
@@ -438,7 +441,8 @@ def ai_label(api_key: str = Body("", embed=True), source: str = Body("synthetic"
              model: str = Body(DEFAULT_AI_MODEL, embed=True),
              base_url: str = Body(DEFAULT_AI_API_BASE, embed=True),
              timeout: float = Body(DEFAULT_READ_TIMEOUT, embed=True, gt=0, le=MAX_READ_TIMEOUT),
-             reasoning_effort: str = Body("", embed=True)):
+             reasoning_effort: str = Body("", embed=True),
+             thinking: str = Body("off", embed=True)):
     """AI wave-labelling mode: the model proposes a count over the WHOLE
     loaded history - the one thing the deterministic engine deliberately
     won't do, since it only ever anchors on recent pivots.
@@ -485,6 +489,7 @@ def ai_label(api_key: str = Body("", embed=True), source: str = Body("synthetic"
             base_url=base_url,
             timeout=timeout,
             reasoning_effort=reasoning_effort,
+            thinking=parse_thinking(thinking),
         )
     except AIAdvisorError as exc:
         raise HTTPException(502, str(exc))
@@ -541,6 +546,18 @@ def ai_ping_endpoint(api_key: str = Body("", embed=True),
         return {"ok": False, "error": str(exc), "model": model}
 
 
+def parse_thinking(raw: str):
+    """Tri-state, because "do not send this field at all" is a distinct and
+    necessary choice: a model that has never heard of chat_template_kwargs
+    answers 400 rather than ignoring it."""
+    value = (raw or "").strip().lower()
+    if value in ("on", "true", "1", "yes"):
+        return True
+    if value in ("off", "false", "0", "no"):
+        return False
+    return None
+
+
 @app.post("/api/ai/diagnose")
 def ai_diagnose_endpoint(api_key: str = Body("", embed=True),
                          model: str = Body(DEFAULT_AI_MODEL, embed=True),
@@ -571,6 +588,12 @@ def ai_diagnose_endpoint(api_key: str = Body("", embed=True),
     # The chat probe runs either way: when access is fine it measures the
     # model, and when access is broken its raw status corroborates why.
     report["chat"] = ai_diagnose(key, model=model, base_url=base_url, timeout=timeout)
+    # And the part that names the cause rather than describing the symptom:
+    # the same trivial prompt under several configurations, each differing
+    # from the last by exactly one thing.
+    if key:
+        report["probe"] = ai_probe_variants(key, model=model, base_url=base_url,
+                                            per_variant_timeout=min(timeout, 25.0))
     return report
 
 
@@ -583,6 +606,7 @@ def ai_analyst(api_key: str = Body("", embed=True), source: str = Body("syntheti
                base_url: str = Body(DEFAULT_AI_API_BASE, embed=True),
                timeout: float = Body(DEFAULT_READ_TIMEOUT, embed=True, gt=0, le=MAX_READ_TIMEOUT),
                reasoning_effort: str = Body("", embed=True),
+               thinking: str = Body("off", embed=True),
                max_steps: int = Body(DEFAULT_MAX_STEPS, embed=True, ge=1, le=MAX_MAX_STEPS)):
     """The AI analyst: label a CLEAN chart from scratch, as an agent.
 
@@ -609,7 +633,8 @@ def ai_analyst(api_key: str = Body("", embed=True), source: str = Body("syntheti
     try:
         result = run_analyst(resolve_api_key(api_key), candles, tf, symbol=symbol, model=model,
                              max_steps=max_steps, base_url=base_url, timeout=timeout,
-                             reasoning_effort=reasoning_effort)
+                             reasoning_effort=reasoning_effort,
+                             thinking=parse_thinking(thinking))
     except ToolError as exc:
         raise HTTPException(422, str(exc))
     except AIAdvisorError as exc:

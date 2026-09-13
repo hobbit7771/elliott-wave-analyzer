@@ -505,7 +505,8 @@ def test_ai_label_rejects_a_count_that_breaks_a_hard_elliott_rule():
     wave 2 retraces straight past the start of wave 1. The server rebuilds
     it from its OWN pivots, the hard rules fire, and the answer is a
     labelled failure rather than a drawn wave."""
-    def label_five_consecutive(api_key, pivots, direction, model=None, base_url=None, timeout=None, reasoning_effort=None):
+    def label_five_consecutive(api_key, pivots, direction, model=None, base_url=None, timeout=None,
+                             reasoning_effort=None, thinking=None):
         start = _first_index_of_kind(pivots, "HIGH" if direction == "DOWN" else "LOW")
         return _FakeProposal([
             {"label": label, "start_pivot_index": start + i, "end_pivot_index": start + i + 1}
@@ -529,7 +530,8 @@ def test_ai_label_accepts_and_returns_server_built_waves_for_a_legal_count():
     server's pivots - the model supplied indices, never prices."""
     captured = {}
 
-    def label_from_real_pivots(api_key, pivots, direction, model=None, base_url=None, timeout=None, reasoning_effort=None):
+    def label_from_real_pivots(api_key, pivots, direction, model=None, base_url=None, timeout=None,
+                             reasoning_effort=None, thinking=None):
         captured["pivots"] = pivots
         captured["direction"] = direction
         start = _first_index_of_kind(pivots, "HIGH" if direction == "DOWN" else "LOW")
@@ -554,7 +556,8 @@ def test_ai_label_never_takes_pivots_from_the_caller():
     """If the client could supply pivots, "the server validated the
     indices" would be a claim about the caller's data, not the chart.
     Client-sent pivots must be ignored outright."""
-    def echo_pivot_count(api_key, pivots, direction, model=None, base_url=None, timeout=None, reasoning_effort=None):
+    def echo_pivot_count(api_key, pivots, direction, model=None, base_url=None, timeout=None,
+                             reasoning_effort=None, thinking=None):
         return _FakeProposal([{"label": "1", "start_pivot_index": 0, "end_pivot_index": 1}],
                              reasoning=f"saw {len(pivots)} pivots")
 
@@ -689,7 +692,8 @@ def test_the_api_base_url_reaches_every_ai_endpoint():
             "base_url": "https://integrate.api.nvidia.com/v2"})
     assert seen["analyst"] == "https://integrate.api.nvidia.com/v2"
 
-    def fake_commentary(api_key, context, model=None, base_url=None, timeout=None, reasoning_effort=None):
+    def fake_commentary(api_key, context, model=None, base_url=None, timeout=None,
+                        reasoning_effort=None, thinking=None):
         seen["advice"] = base_url
         return SimpleNamespace(text="ok", model=model)
 
@@ -926,3 +930,51 @@ def test_index_exposes_the_diagnose_button():
     resp = client.get("/")
     assert "diagnoseAi" in resp.text
     assert "/api/ai/diagnose" in resp.text
+
+
+def test_thinking_is_a_tri_state_because_not_sending_the_field_is_a_real_choice():
+    """A model that has never heard of chat_template_kwargs answers 400
+    rather than ignoring it, so "omit it" cannot be conflated with "off"."""
+    from t3_engine.dashboard.server import parse_thinking
+
+    assert parse_thinking("off") is False
+    assert parse_thinking("on") is True
+    assert parse_thinking("") is None
+    assert parse_thinking("nonsense") is None
+
+
+def test_thinking_defaults_to_off_on_the_analyst_endpoint():
+    """Measured, not preferred: with thinking on the gateway sent no
+    response headers at all for 45s."""
+    seen = {}
+
+    def fake_run(api_key, candles, degree, **kwargs):
+        seen.update(kwargs)
+        return _FakeAnalystResult([])
+
+    with patch.object(server_module, "run_analyst", side_effect=fake_run):
+        client.post("/api/ai/analyst", json={"api_key": "nvapi-test", "source": "synthetic",
+                                             "cycles": 2})
+    assert seen["thinking"] is False
+
+    with patch.object(server_module, "run_analyst", side_effect=fake_run):
+        client.post("/api/ai/analyst", json={"api_key": "nvapi-test", "source": "synthetic",
+                                             "cycles": 2, "thinking": "on"})
+    assert seen["thinking"] is True
+
+
+def test_diagnose_runs_the_variant_probe_that_names_the_cause():
+    with patch.object(server_module, "ai_check_access",
+                      return_value={"ok": True, "seconds": 0.08, "model_count": 82, "models": []}), \
+         patch.object(server_module, "ai_diagnose", return_value={"status": 200}), \
+         patch.object(server_module, "ai_probe_variants",
+                      return_value={"variants": [{"variant": "thinking off, streamed", "ok": True}],
+                                    "verdict": "Thinking mode is the cause"}):
+        resp = client.post("/api/ai/diagnose", json={"api_key": "nvapi-test"})
+    assert "Thinking mode is the cause" in resp.json()["probe"]["verdict"]
+
+
+def test_index_exposes_the_thinking_switch():
+    resp = client.get("/")
+    assert "aiThinking" in resp.text
+    assert "chat_template_kwargs" in resp.text

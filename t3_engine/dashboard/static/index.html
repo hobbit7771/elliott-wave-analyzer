@@ -222,6 +222,24 @@
         parameter answers <code>400</code> rather than ignoring it.
       </div>
 
+      <h2>Model thinking</h2>
+      <div class="field-row">
+        <select id="aiThinking" style="flex:1;">
+          <option value="off" selected>Off — fast (recommended)</option>
+          <option value="on">On — better counts, much slower</option>
+          <option value="">Do not send the field</option>
+        </select>
+      </div>
+      <div class="hint">
+        Sent as <code>chat_template_kwargs: {thinking: …}</code>, which is what NVIDIA's own snippet
+        for these models sets. <strong>Off by default because it was measured, not preferred:</strong>
+        the catalogue listing answers in 0.08s while the chat endpoint sent no response headers at all
+        for 45s — the gateway buffers the whole response, so the wait is the entire generation, and
+        with thinking on that is minutes per step. Turn it on only if Diagnose shows both modes
+        answering. "Do not send" is for a model that has never heard of the field and answers
+        <code>400</code> rather than ignoring it.
+      </div>
+
       <h2>Check the connection</h2>
       <div class="field-row">
         <button class="panel-btn" id="pingAi" style="flex:1;">Test key, URL and model</button>
@@ -1065,6 +1083,7 @@ document.getElementById('runAnalyst').addEventListener('click', async () => {
         base_url: aiBaseUrl(),
         timeout: aiTimeout(),
         reasoning_effort: aiEffort(),
+        thinking: aiThinking(),
         source,
         symbol: normalizeSymbol(document.getElementById('symbol').value),
         timeframe: document.getElementById('timeframe').value,
@@ -1120,6 +1139,7 @@ const BASE_URL_STORAGE = 't3_nvidia_base_url';
 const DEFAULT_AI_MODEL = 'moonshotai/kimi-k3';
 const TIMEOUT_STORAGE = 't3_nvidia_timeout';
 const EFFORT_STORAGE = 't3_nvidia_effort';
+const THINKING_STORAGE = 't3_nvidia_thinking';
 const DEFAULT_AI_BASE_URL = 'https://integrate.api.nvidia.com/v1';
 const DEFAULT_AI_TIMEOUT = 180;
 
@@ -1153,6 +1173,11 @@ function aiTimeout() {
 document.getElementById('aiTimeout').value =
   Number(localStorage.getItem(TIMEOUT_STORAGE)) || DEFAULT_AI_TIMEOUT;
 function aiEffort() { return document.getElementById('aiEffort').value; }
+function aiThinking() { return document.getElementById('aiThinking').value; }
+{
+  const saved = localStorage.getItem(THINKING_STORAGE);
+  if (saved !== null) document.getElementById('aiThinking').value = saved;
+}
 document.getElementById('aiEffort').value = localStorage.getItem(EFFORT_STORAGE) || '';
 
 // Whether the SERVER holds a key. Never the key itself - the endpoint
@@ -1171,6 +1196,7 @@ document.getElementById('saveKey').addEventListener('click', () => {
   localStorage.setItem(BASE_URL_STORAGE, aiBaseUrl());
   localStorage.setItem(TIMEOUT_STORAGE, String(aiTimeout()));
   localStorage.setItem(EFFORT_STORAGE, aiEffort());
+  localStorage.setItem(THINKING_STORAGE, aiThinking());
   document.getElementById('aiStatus').textContent = 'Settings saved in this browser.';
 });
 
@@ -1251,6 +1277,22 @@ document.getElementById('diagnoseAi').addEventListener('click', async () => {
         + `border-top:1px solid #232733;padding-top:6px;">${escapeHtml(c.first_bytes)}</div>`;
     }
     html += `</div>`;
+
+    // The part that names a cause instead of describing a symptom.
+    const probe = data.probe;
+    if (probe && probe.variants) {
+      html += `<div class="signal"><div class="row"><span class="k">3 · Which settings work</span>`
+        + `<span class="v"></span></div>`;
+      probe.variants.forEach(v => {
+        const when = v.ok ? `${v.seconds_to_first_byte}s`
+          : (v.gave_up_after !== undefined ? `gave up at ${v.gave_up_after}s`
+             : 'HTTP ' + (v.status !== undefined ? v.status : '?'));
+        html += `<div class="row"><span class="k" style="color:${v.ok ? '#4ade80' : '#fca5a5'};">`
+          + `${v.ok ? '✓' : '✗'} ${escapeHtml(v.variant)}</span>`
+          + `<span class="v">${escapeHtml(when)}</span></div>`;
+      });
+      html += `<div class="hint" style="margin-top:6px;">${escapeHtml(probe.verdict || '')}</div></div>`;
+    }
     out.innerHTML = html;
   } catch (e) {
     statusEl.textContent = e.message || 'Network error during diagnosis.';
@@ -1287,7 +1329,7 @@ document.getElementById('askAi').addEventListener('click', async () => {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ api_key: apiKey, context, model: aiModel(),
                              base_url: aiBaseUrl(), timeout: aiTimeout(),
-                             reasoning_effort: aiEffort() }),
+                             reasoning_effort: aiEffort(), thinking: aiThinking() }),
     }, 90000);
     const data = await resp.json();
     if (!resp.ok) { statusEl.textContent = data.detail || 'Request failed.'; return; }
@@ -1324,6 +1366,7 @@ document.getElementById('askAiLabel').addEventListener('click', async () => {
         base_url: aiBaseUrl(),
         timeout: aiTimeout(),
         reasoning_effort: aiEffort(),
+        thinking: aiThinking(),
         source,
         symbol: normalizeSymbol(document.getElementById('symbol').value),
         timeframe: document.getElementById('timeframe').value,

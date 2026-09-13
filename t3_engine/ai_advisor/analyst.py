@@ -46,6 +46,7 @@ import httpx
 from t3_engine.ai_advisor.advisor import (
     ANALYSIS_TEMPERATURE,
     DEFAULT_MODEL,
+    DEFAULT_THINKING,
     DEFAULT_READ_TIMEOUT,
     DEFAULT_SEED,
     AIAdvisorError,
@@ -157,7 +158,8 @@ def opening_brief(candles: List[Candle], symbol: str, degree: Timeframe) -> str:
 def _tool_payload(system_prompt: str, messages: List[Dict[str, Any]],
                   seed: Optional[int] = DEFAULT_SEED,
                   reasoning_effort: Optional[str] = None,
-                  force_submit: bool = False) -> Dict[str, Any]:
+                  force_submit: bool = False,
+                  thinking: Optional[bool] = DEFAULT_THINKING) -> Dict[str, Any]:
     """`force_submit` pins tool_choice to submit_count, which is what turns
     "ran out of steps" into "answered with what it had". Only ever used on
     the last step, and only once the model has actually looked at some
@@ -171,7 +173,7 @@ def _tool_payload(system_prompt: str, messages: List[Dict[str, Any]],
         "tool_choice": choice,
         "temperature": ANALYSIS_TEMPERATURE,   # labelling is analysis, not invention
         "max_tokens": ANALYST_MAX_OUTPUT_TOKENS,
-    }, seed=seed, reasoning_effort=reasoning_effort)
+    }, seed=seed, reasoning_effort=reasoning_effort, thinking=thinking)
 
 
 def _assistant_turn(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -245,7 +247,8 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
                 base_url: Optional[str] = None,
                 run_budget_seconds: float = DEFAULT_RUN_BUDGET_SECONDS,
                 seed: Optional[int] = DEFAULT_SEED,
-                reasoning_effort: Optional[str] = None) -> AnalystResult:
+                reasoning_effort: Optional[str] = None,
+                thinking: Optional[bool] = DEFAULT_THINKING) -> AnalystResult:
     """Run the label-from-scratch loop and return whatever survived
     validation.
 
@@ -290,7 +293,8 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
             data = _post(api_key, model,
                          _tool_payload(ELLIOTT_PLAYBOOK, _wire_messages(messages), seed,
                                        reasoning_effort,
-                                       force_submit=final_step and seen_pivots),
+                                       force_submit=final_step and seen_pivots,
+                                       thinking=thinking),
                          client, timeout, base_url)
             message = _assistant_turn(data)
         except AIAdvisorError as exc:
