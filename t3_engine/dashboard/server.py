@@ -57,7 +57,7 @@ from t3_engine.ai_advisor.advisor import (
     resolve_api_key,
 )
 from t3_engine.ai_advisor.analyst import DEFAULT_MAX_STEPS, MAX_MAX_STEPS, run_analyst
-from t3_engine.ai_advisor import analysis_store
+from t3_engine.ai_advisor import analysis_store, jobs
 from t3_engine.ai_advisor.multi_timeframe import run_multi_timeframe
 from t3_engine.ai_advisor.target_odds import annotate_projection
 from t3_engine.ai_advisor.relational import (
@@ -161,7 +161,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-031"
+BUILD_VERSION = "BUILD-CHECK-032"
 
 
 @app.get("/api/health")
@@ -690,6 +690,119 @@ def ai_signal_quality(api_key: str = Body("", embed=True), source: str = Body("s
     }
 
 
+# The saved multi-timeframe verdict is stored in the SAME cache the
+# per-timeframe counts use, under this timeframe key. It is not a
+# timeframe, it is the reconciliation OF the timeframes - kept there
+# because that cache is what survives a restart, a closed tab and a
+# dropped connection, which is exactly what a twelve-minute run must not
+# be allowed to lose.
+MTF_CACHE_KEY = "mtf-verdict"
+
+
+def run_multi_work(api_key: str, source: str, symbol: str, limit: int, cycles: int, model: str,
+                   base_url: str, timeout: float, thinking: str, max_steps: int, force: bool,
+                   on_progress=None) -> Dict:
+    """One multi-timeframe run, as a plain function.
+
+    Shared by the synchronous endpoint and the background job so the two
+    cannot drift: the job is the same work with somewhere to report
+    progress and somewhere to survive."""
+    result = run_multi_timeframe(
+        resolve_api_key(api_key), load_candles, source, symbol,
+        limit=limit, cycles=cycles, model=model, force=force,
+        max_steps=max_steps, base_url=base_url, timeout=timeout,
+        thinking=parse_thinking(thinking), on_progress=on_progress,
+    )
+    body = {
+        "symbol": result.symbol,
+        "model": result.model,
+        "note": result.note,
+        "reused": result.reused_timeframes,
+        "recomputed": result.recomputed_timeframes,
+        "verdict": result.verdict,
+        "timeframes": [
+            {"timeframe": a.timeframe, "reused": a.reused, "candles": a.candles,
+             "coverage": a.coverage, "summary": a.summary, "error": a.error,
+             "steps_used": a.steps_used, "structures": len(a.accepted),
+             "accepted": a.accepted, "projection": a.projection}
+            for a in result.per_timeframe
+        ],
+    }
+    newest = max((a.last_candle_time for a in result.per_timeframe), default=0)
+    if any(a.accepted for a in result.per_timeframe):
+        try:
+            analysis_store.save(source, result.symbol, MTF_CACHE_KEY, newest,
+                                sum(a.candles for a in result.per_timeframe), body,
+                                model=result.model)
+        except SQLAlchemyError as exc:
+            logger.warning("could not cache the multi-timeframe verdict for %s: %s", symbol, exc)
+    return body
+
+
+def run_analyst_work(api_key: str, source: str, symbol: str, timeframe: str, limit: int,
+                     cycles: int, model: str, base_url: str, timeout: float,
+                     reasoning_effort: str, thinking: str, max_steps: int,
+                     on_progress=None) -> Dict:
+    """One analyst run, as a plain function - see run_multi_work."""
+    candles, symbol, tf = load_candles(source, symbol, timeframe, limit, cycles)
+
+    result = run_analyst(resolve_api_key(api_key), candles, tf, symbol=symbol, model=model,
+                         max_steps=max_steps, base_url=base_url, timeout=timeout,
+                         reasoning_effort=reasoning_effort,
+                         thinking=parse_thinking(thinking), on_progress=on_progress)
+
+    projection = annotate_projection(result.projection, candles)
+    # Save it under the SAME key the multi-timeframe view and the live
+    # chart read, so a count made here is not lost when the tab is closed
+    # and is not paid for twice. Only a run that produced something is
+    # worth keeping - caching an empty result would suppress the retry
+    # that might have worked.
+    if result.accepted and candles:
+        try:
+            analysis_store.save(source, symbol, tf.value, candles[-1].open_time, len(candles), {
+                "timeframe": tf.value, "accepted": result.accepted, "rejected": result.rejected,
+                "projection": projection, "coverage": result.coverage,
+                "summary": result.summary, "reasoning": result.reasoning,
+                "steps_used": result.steps_used, "error": result.error,
+            }, model=result.model)
+        except SQLAlchemyError as exc:
+            # A cache that cannot be written is a lost saving, not a lost
+            # analysis: the answer below is already complete.
+            logger.warning("could not cache analyst result for %s %s: %s", symbol, tf.value, exc)
+
+    return {
+        "symbol": symbol,
+        "timeframe": tf.value,
+        "model": result.model,
+        "finished": result.finished,
+        "note": result.note,
+        "error": result.error,
+        "summary": result.summary,
+        "reasoning": result.reasoning,
+        "steps_used": result.steps_used,
+        "steps": [{"tool": call.name, "args": call.args, "result": call.result_summary}
+                  for call in result.steps],
+        # The conversation itself. "Why did it stop there" is unanswerable
+        # from a list of tool names, so the model's own words and its
+        # reasoning travel with the result.
+        "transcript": result.transcript,
+        # Where the count says price should go next, computed server-side
+        # from waves already on the chart - the model names the wave, never
+        # a price.
+        # The same measured base rates the multi-timeframe view shows: the
+        # share of THIS chart's past swings that carried at least that far.
+        "projection": projection,
+        "coverage": result.coverage,
+        "accepted": result.accepted,
+        "rejected": result.rejected,
+        "waves": result.waves,
+        # The clean chart this count belongs to. Returned with the answer so
+        # the analyst tab draws the EXACT series the agent analysed - not a
+        # separately-fetched one that could differ by a candle.
+        "candles": [candle_to_dict(c) for c in candles],
+    }
+
+
 @app.post("/api/ai/multi")
 def ai_multi_timeframe(api_key: str = Body("", embed=True),
                        source: str = Body("synthetic", embed=True),
@@ -721,27 +834,109 @@ def ai_multi_timeframe(api_key: str = Body("", embed=True),
     that far, with the sample size alongside. A model asked for a
     percentage returns a confident number with nothing behind it, and a
     percentage reads as measurement even when it is invention."""
-    result = run_multi_timeframe(
-        resolve_api_key(api_key), load_candles, source, symbol,
-        limit=limit, cycles=cycles, model=model, force=force,
-        max_steps=max_steps, base_url=base_url, timeout=timeout,
-        thinking=parse_thinking(thinking),
-    )
-    return {
-        "symbol": result.symbol,
-        "model": result.model,
-        "note": result.note,
-        "reused": result.reused_timeframes,
-        "recomputed": result.recomputed_timeframes,
-        "verdict": result.verdict,
-        "timeframes": [
-            {"timeframe": a.timeframe, "reused": a.reused, "candles": a.candles,
-             "coverage": a.coverage, "summary": a.summary, "error": a.error,
-             "steps_used": a.steps_used, "structures": len(a.accepted),
-             "accepted": a.accepted, "projection": a.projection}
-            for a in result.per_timeframe
-        ],
-    }
+    return run_multi_work(api_key, source, symbol, limit, cycles, model, base_url, timeout,
+                          thinking, max_steps, force)
+
+
+# --- background jobs -------------------------------------------------
+# A multi-timeframe run was measured at 12m13s on the real deploy (see
+# ai_advisor/jobs.py): the server finished and answered correctly, and the
+# phone had dropped that connection minutes earlier, so the page showed
+# "Load failed" AFTER the tokens were spent. These endpoints are the fix:
+# the POST returns a job id in milliseconds, the work continues on its own
+# thread, and the page collects the answer whenever it can.
+
+@app.post("/api/ai/multi/start")
+def ai_multi_start(api_key: str = Body("", embed=True),
+                   source: str = Body("synthetic", embed=True),
+                   symbol: str = Body("SYNTHETIC", embed=True),
+                   limit: int = Body(1500, embed=True, ge=100, le=10000),
+                   cycles: int = Body(2, embed=True, ge=1, le=10),
+                   model: str = Body(DEFAULT_AI_MODEL, embed=True),
+                   base_url: str = Body(DEFAULT_AI_API_BASE, embed=True),
+                   timeout: float = Body(DEFAULT_READ_TIMEOUT, embed=True, gt=0, le=MAX_READ_TIMEOUT),
+                   thinking: str = Body("on", embed=True),
+                   max_steps: int = Body(DEFAULT_MAX_STEPS, embed=True, ge=1, le=MAX_MAX_STEPS),
+                   force: bool = Body(False, embed=True)):
+    """Start a multi-timeframe run and return its job id immediately."""
+    label = f"{source}:{normalize_symbol(symbol) if source == 'bybit' else symbol}:mtf"
+    existing = jobs.find_running("multi", label)
+    if existing is not None:
+        # Two taps, two tabs, or a retry after a dropped connection. Paying
+        # for the same four analyst runs twice is the expensive mistake
+        # here, so the second request attaches to the first.
+        return {**existing.snapshot(include_result=False), "joined": True}
+
+    def work(note):
+        note(f"Starting {label}.")
+        return run_multi_work(api_key, source, symbol, limit, cycles, model, base_url,
+                              timeout, thinking, max_steps, force, on_progress=note)
+
+    return {**jobs.start("multi", label, work).snapshot(), "joined": False}
+
+
+@app.post("/api/ai/analyst/start")
+def ai_analyst_start(api_key: str = Body("", embed=True),
+                     source: str = Body("synthetic", embed=True),
+                     symbol: str = Body("SYNTHETIC", embed=True),
+                     timeframe: str = Body("5m", embed=True),
+                     limit: int = Body(1500, embed=True, ge=100, le=10000),
+                     cycles: int = Body(2, embed=True, ge=1, le=10),
+                     model: str = Body(DEFAULT_AI_MODEL, embed=True),
+                     base_url: str = Body(DEFAULT_AI_API_BASE, embed=True),
+                     timeout: float = Body(DEFAULT_READ_TIMEOUT, embed=True, gt=0, le=MAX_READ_TIMEOUT),
+                     reasoning_effort: str = Body("", embed=True),
+                     thinking: str = Body("on", embed=True),
+                     max_steps: int = Body(DEFAULT_MAX_STEPS, embed=True, ge=1, le=MAX_MAX_STEPS)):
+    """Start a single-timeframe analyst run and return its job id."""
+    label = f"{source}:{normalize_symbol(symbol) if source == 'bybit' else symbol}:{timeframe}"
+    existing = jobs.find_running("analyst", label)
+    if existing is not None:
+        return {**existing.snapshot(include_result=False), "joined": True}
+
+    def work(note):
+        note(f"Starting {label}.")
+        return run_analyst_work(api_key, source, symbol, timeframe, limit, cycles, model,
+                                base_url, timeout, reasoning_effort, thinking, max_steps,
+                                on_progress=note)
+
+    return {**jobs.start("analyst", label, work).snapshot(), "joined": False}
+
+
+@app.get("/api/ai/job")
+def ai_job(job_id: str = Query(...), since: int = Query(0, ge=0)):
+    """Where a run has got to, and its result once there is one.
+
+    `since` is how many progress lines the caller already has, so polling
+    a long run does not re-send the whole transcript every few seconds."""
+    job = jobs.get(job_id)
+    if job is None:
+        # Deliberately a 404 with an explanation: a job id that outlived a
+        # restart is a real thing that happens, and "unknown job" with the
+        # reason is more use than an empty result that reads as "finished
+        # with nothing".
+        raise HTTPException(404, "Unknown job - it finished more than an hour ago, or the "
+                                 "server restarted while it was running. Any timeframe that "
+                                 "completed is still saved and will be reused.")
+    snapshot = job.snapshot()
+    snapshot["progress"] = snapshot["progress"][since:]
+    snapshot["progress_total"] = len(job.progress)
+    return snapshot
+
+
+@app.get("/api/ai/multi/saved")
+def ai_multi_saved(source: str = Query("synthetic"), symbol: str = Query("SYNTHETIC")):
+    """The last multi-timeframe verdict for this instrument, if any.
+
+    This is what makes a dropped connection cost nothing: the run that
+    finished while the page was gone is still here to be shown, together
+    with how far behind the charts have moved since."""
+    resolved = normalize_symbol(symbol) if source == "bybit" else symbol
+    cached = analysis_store.load(source, resolved, MTF_CACHE_KEY)
+    if cached is None:
+        return {"saved": None}
+    return {"saved": cached.payload, "analysed_at": cached.created_at,
+            "last_candle_time": cached.last_candle_time, "model": cached.model}
 
 
 @app.post("/api/ai/multi/clear")
@@ -826,68 +1021,13 @@ def ai_analyst(api_key: str = Body("", embed=True), source: str = Body("syntheti
     (elliott_engine/external_count.py) before it is returned, and anything
     that breaks one comes back in `rejected` with the rule it broke rather
     than being quietly dropped or quietly drawn."""
-    candles, symbol, tf = load_candles(source, symbol, timeframe, limit, cycles)
-
     try:
-        result = run_analyst(resolve_api_key(api_key), candles, tf, symbol=symbol, model=model,
-                             max_steps=max_steps, base_url=base_url, timeout=timeout,
-                             reasoning_effort=reasoning_effort,
-                             thinking=parse_thinking(thinking))
+        return run_analyst_work(api_key, source, symbol, timeframe, limit, cycles, model,
+                                base_url, timeout, reasoning_effort, thinking, max_steps)
     except ToolError as exc:
         raise HTTPException(422, str(exc))
     except AIAdvisorError as exc:
         raise HTTPException(502, str(exc))
-
-    projection = annotate_projection(result.projection, candles)
-    # Save it under the SAME key the multi-timeframe view and the live
-    # chart read, so a count made here is not lost when the tab is closed
-    # and is not paid for twice. Only a run that produced something is
-    # worth keeping - caching an empty result would suppress the retry
-    # that might have worked.
-    if result.accepted and candles:
-        try:
-            analysis_store.save(source, symbol, tf.value, candles[-1].open_time, len(candles), {
-                "timeframe": tf.value, "accepted": result.accepted, "rejected": result.rejected,
-                "projection": projection, "coverage": result.coverage,
-                "summary": result.summary, "reasoning": result.reasoning,
-                "steps_used": result.steps_used, "error": result.error,
-            }, model=result.model)
-        except SQLAlchemyError as exc:
-            # A cache that cannot be written is a lost saving, not a lost
-            # analysis: the answer below is already complete.
-            logger.warning("could not cache analyst result for %s %s: %s", symbol, tf.value, exc)
-
-    return {
-        "symbol": symbol,
-        "timeframe": tf.value,
-        "model": result.model,
-        "finished": result.finished,
-        "note": result.note,
-        "error": result.error,
-        "summary": result.summary,
-        "reasoning": result.reasoning,
-        "steps_used": result.steps_used,
-        "steps": [{"tool": call.name, "args": call.args, "result": call.result_summary}
-                  for call in result.steps],
-        # The conversation itself. "Why did it stop there" is unanswerable
-        # from a list of tool names, so the model's own words and its
-        # reasoning travel with the result.
-        "transcript": result.transcript,
-        # Where the count says price should go next, computed server-side
-        # from waves already on the chart - the model names the wave, never
-        # a price.
-        # The same measured base rates the multi-timeframe view shows: the
-        # share of THIS chart's past swings that carried at least that far.
-        "projection": projection,
-        "coverage": result.coverage,
-        "accepted": result.accepted,
-        "rejected": result.rejected,
-        "waves": result.waves,
-        # The clean chart this count belongs to. Returned with the answer so
-        # the analyst tab draws the EXACT series the agent analysed - not a
-        # separately-fetched one that could differ by a candle.
-        "candles": [candle_to_dict(c) for c in candles],
-    }
 
 
 def dataclass_metrics_to_dict(m) -> dict:
