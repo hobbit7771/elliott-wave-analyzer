@@ -1516,10 +1516,13 @@ def test_live_state_sends_no_engine_markup_in_ai_only_mode(tmp_path, monkeypatch
     assert body["ai_only"] is True
     assert body["pivots"] == []
     assert body["confirmed_chain"] == []
-    assert body["subwave_history"] == []
     assert body["structure_events"] == []
-    assert body["fibonacci_levels"] == []
     assert body["scenarios"] == []          # no AI count saved yet either
+    # Subwaves and the Fibonacci grid come from the AGENT'S count in this
+    # mode, so with no count yet they are empty for that reason, not
+    # because the engine's were suppressed.
+    assert body["subwave_history"] == []
+    assert body["fibonacci_levels"] == []
     assert body["candles"]                  # the candles themselves are still there
 
 
@@ -1627,3 +1630,38 @@ def test_index_shows_take_profit_legs_that_filled():
     assert "Take-profit legs filled" in resp.text
     assert "fillsTableHtml" in resp.text
     assert "Realized (open trades)" in resp.text
+
+
+def test_live_fibonacci_and_subwaves_are_derived_from_the_ai_count(tmp_path, monkeypatch):
+    """A finer degree drawn from a different reading than the labels above
+    it is not extra detail, it is a contradiction on the same candles."""
+    store = _seed_store(tmp_path, monkeypatch)
+    engine, candles = _live_engine_for("DERIVEUSDT", monkeypatch)
+
+    def leg(label, a, b):
+        return {"label": label, "start_time": candles[a].open_time // 1000,
+                "end_time": candles[b].open_time // 1000,
+                "start_price": candles[a].close, "end_price": candles[b].close,
+                "direction": "UP" if candles[b].close >= candles[a].close else "DOWN"}
+
+    store.save("bybit", "DERIVEUSDT", "5m", candles[-1].open_time, len(candles), {
+        "accepted": [{"structure": "IMPULSE", "waves": [
+            leg("1", 0, 20), leg("2", 20, 30), leg("3", 30, 60), leg("4", 60, 70)]}],
+        "projection": {"next_label": "5",
+                       "targets": [{"ratio": 1.0, "price": candles[-1].close * 1.2,
+                                    "primary": True}]},
+        "coverage": {}, "summary": "impulse up",
+    }, model="m")
+
+    body = client.get("/api/live/state",
+                      params={"symbol": "DERIVEUSDT", "timeframe": "5m"}).json()
+    # The grid is projected for the wave the AGENT says comes next.
+    assert body["fibonacci_levels"], "the AI count should produce a Fibonacci projection"
+    # ...for the wave now FORMING (5), not the one after it. Asking for the
+    # grid of the wave after a developing 5 means wave A, which has no
+    # formula in this codebase and came back empty.
+    assert all(level["for_wave"] == "5" for level in body["fibonacci_levels"])
+    # ...and the subwave detail sits under the agent's own motive waves.
+    for sub in body["subwave_history"]:
+        assert any(w["start_time"] <= sub["start_time"] <= w["end_time"]
+                   for w in body["scenarios"][0]["waves"])

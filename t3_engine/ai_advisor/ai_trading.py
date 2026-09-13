@@ -37,7 +37,12 @@ from typing import Any, Dict, List, Optional
 
 from t3_engine.common.models import Scenario, Wave, next_id
 from t3_engine.common.types import Direction, Timeframe, WaveLabel, WaveStatus
-from t3_engine.elliott_engine.scenario import ScenarioEngine, _next_label, score_fibonacci
+from t3_engine.elliott_engine.scenario import (
+    ScenarioEngine,
+    _next_label,
+    build_subwaves,
+    score_fibonacci,
+)
 
 # Structures whose waves carry the labels the entry plans know how to
 # trade. A triangle or a flat is a real, validated structure and is drawn,
@@ -166,3 +171,68 @@ def analysis_fingerprint(analysis: Optional[Dict[str, Any]]) -> str:
     projection = analysis.get("projection") or {}
     return f"{analysis.get('analysed_at', '')}|{'-'.join(str(l) for l in labels)}" \
            f"|{projection.get('next_label', '')}"
+
+
+# Only motive waves subdivide into a five-wave count; the engine's own
+# subwave pass uses the same three labels for the same reason (see
+# backtest/engine.py's _MOTIVE_LABELS_FOR_SUBWAVES).
+_SUBDIVIDABLE = (WaveLabel.W1, WaveLabel.W3, WaveLabel.W5)
+_MIN_CANDLES_FOR_SUBWAVES = 6
+
+
+def subwaves_for(scenario: Optional[Scenario], candles: List[Any],
+                 deviation_pct: float = 0.5) -> List[Wave]:
+    """Subdivide the agent's motive waves, with the engine's own routine.
+
+    In live mode the chart is the agent's read of the market, which has to
+    mean ALL of it: the subwave detail under waves 1/3/5 is derived from
+    the agent's count rather than from the engine's parallel one, or the
+    finer degree on screen would be describing a different reading than the
+    labels above it.
+
+    The subdivision itself is not the agent's work and is not asked of it -
+    it is `build_subwaves`, the same ZigZag-at-a-finer-deviation pass
+    graded by the same hard rules that the engine's own counts go through.
+    Only COMPLETED waves are subdivided: the developing one has no end yet,
+    so there is nothing inside it to count."""
+    if scenario is None or not candles:
+        return []
+    out: List[Wave] = []
+    for wave in scenario.waves:
+        if wave.label not in _SUBDIVIDABLE or wave.status == WaveStatus.DEVELOPING:
+            continue
+        span = [c for c in candles
+                if wave.start_timestamp <= c.open_time <= wave.end_timestamp]
+        if len(span) < _MIN_CANDLES_FOR_SUBWAVES:
+            continue
+        built = build_subwaves(span, wave, deviation_pct)
+        out.extend(built.get("waves") or [])
+    return sorted(out, key=lambda w: w.start_timestamp)
+
+
+def grid_scenario(scenario: Optional[Scenario]) -> Optional[Scenario]:
+    """The same count, shaped the way the Fibonacci helper reads a count.
+
+    Two different conventions meet here. A tradeable scenario carries the
+    DEVELOPING wave in `waves`, because `current_wave` is what the entry
+    plans key off. `fibonacci_levels_for_scenario` reads the opposite
+    convention - completed waves in `waves`, and the wave being projected
+    in `next_expected_label`.
+
+    Handing it the trading shape asks for the grid of the wave AFTER the
+    one now forming, which for a developing wave 5 is wave A - and there
+    is deliberately no formula for A, so the answer came back empty. This
+    re-shapes rather than papering over it: drop the developing wave from
+    the list and name it as the one expected."""
+    if scenario is None or len(scenario.waves) < 2:
+        return None
+    completed = [w for w in scenario.waves if w.status != WaveStatus.DEVELOPING]
+    developing = next((w for w in scenario.waves if w.status == WaveStatus.DEVELOPING), None)
+    if not completed or developing is None:
+        return None
+    return Scenario(
+        scenario_id=scenario.scenario_id, degree=scenario.degree, waves=completed,
+        probability=scenario.probability, elliott_validity=scenario.elliott_validity,
+        fib_score=scenario.fib_score, invalidation=scenario.invalidation,
+        status=scenario.status, next_expected_label=developing.label,
+    )

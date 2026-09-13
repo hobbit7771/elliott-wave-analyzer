@@ -304,6 +304,21 @@ desktop web page:
   Postgres driver is in requirements, and both `/api/health` and the AI tab
   say plainly when storage is ephemeral. Point `T3_DATABASE_URL` at a
   Postgres database and nothing is lost on deploy.
+- **In live, the whole chart is derived from the agent's count** - not just
+  the wave labels. The Fibonacci grid is projected for the wave the agent
+  says is forming now, and the subwave detail under waves 1/3/5 is
+  subdivided from the agent's own waves (`ai_trading.subwaves_for`, using
+  the engine's `build_subwaves` - a finer ZigZag graded by the same hard
+  rules, so the subdivision is still the server's arithmetic, not the
+  model's claim). A finer degree drawn from a different reading than the
+  labels above it is not extra detail, it is a contradiction on the same
+  candles. Two conventions had to be reconciled for the grid:
+  `fibonacci_levels_for_scenario` expects completed waves plus the
+  projected one named separately, while a tradeable scenario carries the
+  developing wave inside `waves` - handing it the trading shape asked for
+  the grid of the wave AFTER the one forming (wave A after a developing 5,
+  which has no formula here) and returned nothing. `grid_scenario()`
+  re-shapes it rather than papering over the empty result.
 - **Symbol picker**: the symbol field is backed by a custom JS dropdown
   (not the native HTML `<datalist>` element - see below for why) fed by
   `GET /api/symbols` (cached in-process for an hour) - type any letter and

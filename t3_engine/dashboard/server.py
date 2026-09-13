@@ -68,6 +68,7 @@ from t3_engine.ai_advisor.relational import (
     predict_trade_quality,
     rows_from_backtest,
 )
+from t3_engine.ai_advisor.ai_trading import grid_scenario, subwaves_for
 from t3_engine.ai_advisor.analyst_tools import ToolError
 from t3_engine.backtest.engine import BacktestConfig, BacktestEngine
 from t3_engine.backtest.metrics import compute_metrics, compute_metrics_by_wave
@@ -163,7 +164,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-034"
+BUILD_VERSION = "BUILD-CHECK-035"
 
 
 @app.get("/api/health")
@@ -508,9 +509,15 @@ def live_state(symbol: str = Query(...), timeframe: str = Query("5m")):
                   [pivot_to_dict(p) for p in tf_engine.pivot_detector.pivots],
         "confirmed_chain": [] if engine.ai_only else
                            [wave_to_dict(w) for w in tf_engine.scenario_engine.confirmed_chain],
-        "subwave_history": [] if engine.ai_only else
+        # Subwaves and the Fibonacci grid are derived from the AGENT'S
+        # count in ai_only mode, not from the engine's parallel one. A
+        # finer degree drawn from a different reading than the labels above
+        # it is not extra detail, it is a contradiction on the same candles.
+        "subwave_history": [wave_to_dict(w) for w in
+                            subwaves_for(tf_engine.ai_scenario, candles)] if engine.ai_only else
                            [wave_to_dict(w) for w in tf_engine.subwave_history],
-        "fibonacci_levels": [] if engine.ai_only else fibonacci_levels_for_scenario(
+        "fibonacci_levels": fibonacci_levels_for_scenario(grid_scenario(tf_engine.ai_scenario))
+                            if engine.ai_only else fibonacci_levels_for_scenario(
             tf_engine.scenario_engine.scenarios[0] if tf_engine.scenario_engine.scenarios else None
         ),
         "ai_only": engine.ai_only,

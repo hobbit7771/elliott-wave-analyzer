@@ -12,7 +12,7 @@ against Postgres, see schema.sql).
 
 from __future__ import annotations
 
-from sqlalchemy import JSON, Boolean, Column, Float, Integer, String, Text
+from sqlalchemy import JSON, BigInteger, Boolean, Column, Float, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase
 
 
@@ -25,7 +25,7 @@ class RawTradeRow(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     symbol = Column(String, nullable=False, index=True)
     trade_id = Column(String, nullable=False)
-    timestamp = Column(Integer, nullable=False, index=True)
+    timestamp = Column(BigInteger, nullable=False, index=True)
     price = Column(Float, nullable=False)
     quantity = Column(Float, nullable=False)
     is_buyer_maker = Column(Boolean, nullable=False)
@@ -36,8 +36,8 @@ class CandleRow(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     symbol = Column(String, nullable=False, index=True)
     timeframe = Column(String, nullable=False, index=True)
-    open_time = Column(Integer, nullable=False, index=True)
-    close_time = Column(Integer, nullable=False)
+    open_time = Column(BigInteger, nullable=False, index=True)
+    close_time = Column(BigInteger, nullable=False)
     open = Column(Float, nullable=False)
     high = Column(Float, nullable=False)
     low = Column(Float, nullable=False)
@@ -56,8 +56,8 @@ class WaveStateRow(Base):
     degree = Column(String, nullable=False)
     label = Column(String, nullable=False)
     direction = Column(String, nullable=False)
-    start_timestamp = Column(Integer, nullable=False)
-    end_timestamp = Column(Integer, nullable=False)
+    start_timestamp = Column(BigInteger, nullable=False)
+    end_timestamp = Column(BigInteger, nullable=False)
     start_price = Column(Float, nullable=False)
     end_price = Column(Float, nullable=False)
     high = Column(Float, nullable=False)
@@ -88,7 +88,7 @@ class WaveScenarioRow(Base):
     expected_target = Column(Float, nullable=True)
     status = Column(String, nullable=False)
     wave_ids = Column(JSON, nullable=True)  # ordered list of wave_id referencing wave_states
-    created_at = Column(Integer, nullable=False)
+    created_at = Column(BigInteger, nullable=False)
 
 
 class SignalRow(Base):
@@ -96,8 +96,8 @@ class SignalRow(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     signal_id = Column(String, nullable=False, unique=True, index=True)
     symbol = Column(String, nullable=False, index=True)
-    created_at = Column(Integer, nullable=False, index=True)
-    data_available_at_signal = Column(Integer, nullable=False)
+    created_at = Column(BigInteger, nullable=False, index=True)
+    data_available_at_signal = Column(BigInteger, nullable=False)
     side = Column(String, nullable=False)
     wave_label = Column(String, nullable=False)
     entry_stage = Column(String, nullable=False)
@@ -130,7 +130,7 @@ class OrderRow(Base):
     filled_quantity = Column(Float, nullable=False, default=0.0)
     avg_fill_price = Column(Float, nullable=True)
     fee = Column(Float, nullable=False, default=0.0)
-    created_at = Column(Integer, nullable=False)
+    created_at = Column(BigInteger, nullable=False)
     signal_id = Column(String, nullable=True, index=True)
     tag = Column(String, nullable=True)
 
@@ -146,13 +146,13 @@ class PositionRow(Base):
     initial_quantity = Column(Float, nullable=False)
     stop_loss = Column(Float, nullable=False)
     take_profits = Column(JSON, nullable=True)
-    opened_at = Column(Integer, nullable=False)
+    opened_at = Column(BigInteger, nullable=False)
     wave_label = Column(String, nullable=False)
     signal_id = Column(String, nullable=False, index=True)
     risk_amount = Column(Float, nullable=False)
     realized_pnl = Column(Float, nullable=False, default=0.0)
     closed = Column(Boolean, nullable=False, default=False)
-    closed_at = Column(Integer, nullable=True)
+    closed_at = Column(BigInteger, nullable=True)
     mae = Column(Float, nullable=False, default=0.0)
     mfe = Column(Float, nullable=False, default=0.0)
 
@@ -174,7 +174,7 @@ class BacktestResultRow(Base):
     median_r = Column(Float, nullable=False)
     mae_avg = Column(Float, nullable=True)
     mfe_avg = Column(Float, nullable=True)
-    created_at = Column(Integer, nullable=False)
+    created_at = Column(BigInteger, nullable=False)
 
 
 class AnalysisCacheRow(Base):
@@ -195,10 +195,10 @@ class AnalysisCacheRow(Base):
     timeframe = Column(String, nullable=False, index=True)
     # The newest candle the analysis actually saw. Newer data than this
     # means the analysis is behind, and only then is it worth redoing.
-    last_candle_time = Column(Integer, nullable=False)
+    last_candle_time = Column(BigInteger, nullable=False)
     candle_count = Column(Integer, nullable=False)
     model = Column(String, nullable=True)
-    created_at = Column(Integer, nullable=False)
+    created_at = Column(BigInteger, nullable=False)
     payload = Column(Text, nullable=False)      # the analyst result, as JSON
 
 
@@ -245,4 +245,4 @@ class AiTradeEventRow(Base):
     # Which AI count planned this trade - so "how did that count do" is
     # answerable rather than inferred.
     count_fingerprint = Column(String, nullable=True, index=True)
-    at = Column(Integer, nullable=False, index=True)
+    at = Column(BigInteger, nullable=False, index=True)
