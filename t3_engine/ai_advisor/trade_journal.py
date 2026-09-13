@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import select
 
 from t3_engine.ai_advisor import analysis_store
+from t3_engine.database import supabase_rest
 from t3_engine.database.models import AiTradeEventRow
 from t3_engine.database.session import init_db, make_session_factory, session_scope
 
@@ -85,10 +86,24 @@ class TradeEvent:
         }
 
 
+def _use_rest(database_url: Optional[str]) -> bool:
+    """See analysis_store._use_rest - an explicit URL always wins, which is
+    what keeps a test on its own file even on a deployed box."""
+    return database_url is None and supabase_rest.configured()
+
+
 def record(event: TradeEvent, database_url: Optional[str] = None) -> None:
     """Write one fill down. Never raises into the trading path: a journal
     that cannot be written is a lost record, and losing the TRADE as well
     because of it would be the worse failure."""
+    if _use_rest(database_url):
+        try:
+            row = event.as_dict()
+            row["at"] = event.at or int(time.time() * 1000)
+            supabase_rest.insert("ai_trade_events", [row])
+        except Exception:               # noqa: BLE001 - see docstring
+            pass
+        return
     try:
         with session_scope(_sessions(database_url)) as session:
             session.add(AiTradeEventRow(
@@ -108,6 +123,15 @@ def events_for(source: str, symbol: str, timeframe: Optional[str] = None,
                limit: int = MAX_EVENTS_RETURNED,
                database_url: Optional[str] = None) -> List[Dict[str, Any]]:
     """Fills for one instrument, newest first."""
+    if _use_rest(database_url):
+        try:
+            filters = {"source": source, "symbol": symbol}
+            if timeframe:
+                filters["timeframe"] = timeframe
+            return supabase_rest.select("ai_trade_events", filters, order="at.desc",
+                                        limit=max(1, min(limit, MAX_EVENTS_RETURNED)))
+        except Exception:               # noqa: BLE001
+            return []
     try:
         with session_scope(_sessions(database_url)) as session:
             query = select(AiTradeEventRow).where(AiTradeEventRow.source == source,

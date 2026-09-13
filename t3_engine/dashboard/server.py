@@ -94,6 +94,7 @@ from t3_engine.fibonacci.calculator import (
     wave5_targets,
     wave_c_targets,
 )
+from t3_engine.database import supabase_rest
 from t3_engine.database.session import is_durable
 from t3_engine.market_data.bybit_rest_client import BybitAPIError, BybitFuturesREST
 from t3_engine.market_data.fallback_symbols import FALLBACK_USDT_PERPETUAL_SYMBOLS
@@ -164,12 +165,16 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-035"
+BUILD_VERSION = "BUILD-CHECK-036"
 
 
 @app.get("/api/health")
 def health():
-    durable = is_durable(analysis_store.DEFAULT_DATABASE_URL)
+    # Durable when EITHER backend is a real database: Supabase over REST
+    # (the credential that is actually obtainable - see
+    # database/supabase_rest.py) or a Postgres URL in T3_DATABASE_URL.
+    using_supabase = supabase_rest.configured()
+    durable = using_supabase or is_durable(analysis_store.DEFAULT_DATABASE_URL)
     return {
         "status": "ok", "build": BUILD_VERSION,
         # Saved counts and the trade journal live in this database. On the
@@ -177,6 +182,8 @@ def health():
         # replaced on every deploy - so every labelled chart is erased by
         # the next push. Reported rather than left to be discovered.
         "storage_durable": durable,
+        "storage_backend": "supabase-rest" if using_supabase else (
+            "postgres" if durable else "sqlite-ephemeral"),
         "storage_note": "" if durable else
             "Saved analyses and the trade journal are in a SQLite file on the container "
             "filesystem and will be erased by the next deploy. Set T3_DATABASE_URL to a "

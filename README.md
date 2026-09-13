@@ -294,16 +294,30 @@ desktop web page:
   and dollar cost, and what the same run would come to repeated hourly and
   every five minutes - the run rate is **named, not assumed**, because
   continuous monitoring is nothing but a run rate.
-- **Saved work survives a deploy - once a real database is configured.**
-  The default `T3_DATABASE_URL` is a SQLite file on the container
-  filesystem, and that filesystem is replaced on every deploy: every
-  labelled chart and every journalled fill is erased by the next push.
-  `database/session.py` gains `is_durable()` and `normalize_database_url()`
-  (providers print `postgres://`, which SQLAlchemy 2 refuses outright, so
-  the string they give you is rewritten rather than left as a trap), the
-  Postgres driver is in requirements, and both `/api/health` and the AI tab
-  say plainly when storage is ephemeral. Point `T3_DATABASE_URL` at a
-  Postgres database and nothing is lost on deploy.
+- **Saved work survives a deploy.** The default `T3_DATABASE_URL` is a
+  SQLite file on the container filesystem, and that filesystem is replaced
+  on every deploy: every labelled chart and every journalled fill was
+  erased by the next push. There are now two ways out, and `/api/health`
+  reports which one is in force (`storage_backend`):
+  - **Supabase over REST** (`T3_SUPABASE_URL` + `T3_SUPABASE_SECRET_KEY`,
+    `database/supabase_rest.py`). This is the path that actually works on
+    a free Supabase project: a Postgres URL needs the database password,
+    which Supabase shows exactly once at creation and never again, and a
+    new project's DIRECT host is IPv6-only, which Render cannot reach at
+    all. The service key is retrievable from the dashboard at any time and
+    PostgREST answers over ordinary IPv4 HTTPS. The layer is deliberately
+    thin - insert, filtered select with order and limit, filtered delete -
+    because that is all the analysis cache and the trade journal need.
+  - **Any Postgres URL** in `T3_DATABASE_URL`. `database/session.py` gains
+    `is_durable()` and `normalize_database_url()` (providers print
+    `postgres://`, which SQLAlchemy 2 refuses outright, so their string is
+    rewritten rather than left as a trap) and psycopg is in requirements.
+
+  An explicit `database_url` argument always beats both, which is what
+  keeps tests on their own SQLite file even on a deployed box. And every
+  millisecond-epoch column is `BigInteger` now: on SQLite the old `Integer`
+  was harmless, on Postgres `INTEGER` overflows at 2.1e9 while a
+  millisecond epoch is ~1.77e12.
 - **In live, the whole chart is derived from the agent's count** - not just
   the wave labels. The Fibonacci grid is projected for the wave the agent
   says is forming now, and the subwave detail under waves 1/3/5 is
