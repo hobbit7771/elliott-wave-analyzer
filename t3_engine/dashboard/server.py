@@ -46,6 +46,8 @@ from t3_engine.ai_advisor.advisor import (
     DEFAULT_READ_TIMEOUT,
     MAX_READ_TIMEOUT,
     AIAdvisorError,
+    check_access as ai_check_access,
+    diagnose as ai_diagnose,
     ping as ai_ping,
     request_commentary,
     request_wave_count,
@@ -144,7 +146,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-019"
+BUILD_VERSION = "BUILD-CHECK-020"
 
 
 @app.get("/api/health")
@@ -537,6 +539,39 @@ def ai_ping_endpoint(api_key: str = Body("", embed=True),
         # "your setup doesn't work and here is which part". A 502 here would
         # read in the UI as "the dashboard is broken".
         return {"ok": False, "error": str(exc), "model": model}
+
+
+@app.post("/api/ai/diagnose")
+def ai_diagnose_endpoint(api_key: str = Body("", embed=True),
+                         model: str = Body(DEFAULT_AI_MODEL, embed=True),
+                         base_url: str = Body(DEFAULT_AI_API_BASE, embed=True),
+                         timeout: float = Body(45.0, embed=True, gt=0, le=MAX_READ_TIMEOUT)):
+    """Two checks, in the order that actually narrows the problem.
+
+    First a catalogue listing (`GET {base}/models`): it needs the key and
+    the same base URL, and runs NO inference. If that answers, the key, the
+    endpoint and the network are all fine by construction, and everything
+    slow afterwards belongs to the model or the queue in front of it.
+
+    Then a raw look at the chat endpoint: status line, response headers,
+    whether the body is really an event stream, the first bytes, and how
+    long each phase took. Neither half raises on a timeout - a timeout is
+    the observation, and the partial result is the evidence.
+
+    This exists because every other error message in this module is a
+    sentence written from an assumption about the cause, and "the model did
+    not answer in 180s" is the same sentence whether the cause is a slow
+    model, a queued request, a gateway that buffers, or a typo in a URL."""
+    key = resolve_api_key(api_key)
+    report: Dict[str, object] = {"model": model, "base_url": base_url}
+    try:
+        report["access"] = ai_check_access(key, base_url=base_url, timeout=min(timeout, 30.0))
+    except AIAdvisorError as exc:
+        report["access"] = {"ok": False, "error": str(exc)}
+    # The chat probe runs either way: when access is fine it measures the
+    # model, and when access is broken its raw status corroborates why.
+    report["chat"] = ai_diagnose(key, model=model, base_url=base_url, timeout=timeout)
+    return report
 
 
 @app.post("/api/ai/analyst")

@@ -628,3 +628,139 @@ def test_retries_apply_to_the_streaming_path_too(monkeypatch):
     result = request_commentary("sk-test", {"wave": "3"}, client=make_client(handler))
     assert result.text == "streamed fine"
     assert attempts == [True, True]
+
+
+# ---- diagnosis ----
+# Every other error path turns a failure into a sentence written from an
+# assumption about the cause. These return observations instead.
+
+def test_access_check_verifies_key_and_url_without_running_a_model():
+    """The check that splits the problem in two. A catalogue listing needs
+    the key and hits the same base URL, but runs no inference - so if it
+    answers fast, nothing on this side is broken and the wait belongs to
+    the model."""
+    from t3_engine.ai_advisor.advisor import check_access
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["method"] = request.method
+        return httpx.Response(200, json={"data": [{"id": "moonshotai/kimi-k3"},
+                                                  {"id": "deepseek-ai/deepseek-v4-pro-0813"}]})
+
+    result = check_access("sk-test", client=make_client(handler))
+    assert seen["method"] == "GET"
+    assert seen["url"] == "https://integrate.api.nvidia.com/v1/models"
+    assert result["model_count"] == 2
+    assert "moonshotai/kimi-k3" in result["models"]
+
+
+def test_a_failing_access_check_says_it_is_not_about_model_speed():
+    from t3_engine.ai_advisor.advisor import check_access
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, text="invalid key")
+
+    with pytest.raises(AIAdvisorError) as excinfo:
+        check_access("sk-test", client=make_client(handler))
+    assert "runs no model at all" in str(excinfo.value)
+
+
+def test_the_access_check_tolerates_a_base_url_with_the_endpoint_pasted_on():
+    from t3_engine.ai_advisor.advisor import check_access
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        return httpx.Response(200, json={"data": []})
+
+    check_access("sk-test", base_url="https://integrate.api.nvidia.com/v1/chat/completions",
+                 client=make_client(handler))
+    assert seen["url"] == "https://integrate.api.nvidia.com/v1/models"
+
+
+def test_diagnose_reports_observations_and_never_raises_on_a_timeout():
+    """A timeout IS the observation, and the partial result is the
+    evidence. Raising would throw away the only data the run produced."""
+    from t3_engine.ai_advisor.advisor import diagnose
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    report = diagnose("sk-test", client=make_client(handler))
+    assert "error" in report
+    assert "did not answer" in report["error"]
+    assert "never got a response header" in report["verdict"]
+
+
+def test_diagnose_recognises_a_buffered_non_sse_answer():
+    """Some gateways ignore stream: true. The SSE reader would wait out the
+    whole generation and then blame the model for an empty stream."""
+    from t3_engine.ai_advisor.advisor import diagnose
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]},
+                              headers={"content-type": "application/json"})
+
+    report = diagnose("sk-test", client=make_client(handler))
+    assert report["status"] == 200
+    assert report["looks_like_sse"] is False
+    assert "NOT server-sent events" in report["verdict"]
+
+
+def test_a_buffered_answer_is_still_read_rather_than_thrown_away():
+    """Recognising the gateway's behaviour is not enough - the answer it
+    did send has to survive."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "buffered answer"},
+                         "finish_reason": "stop"}]},
+            headers={"content-type": "application/json"})
+
+    result = request_commentary("sk-test", {"wave": "3"}, client=make_client(handler))
+    assert result.text == "buffered answer"
+
+
+def test_diagnose_calls_out_a_202_queue_response():
+    """202 is "come back later", not an answer. A plain chat client waits
+    forever on it, which is indistinguishable from a slow model."""
+    from t3_engine.ai_advisor.advisor import diagnose
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(202, json={"reqId": "abc"}, headers={"nvcf-reqid": "abc"})
+
+    report = diagnose("sk-test", client=make_client(handler))
+    assert report["status"] == 202
+    assert "queued the request" in report["verdict"]
+    assert report["headers"].get("nvcf-reqid") == "abc"
+
+
+def test_diagnose_reports_a_healthy_stream_with_its_timings():
+    from t3_engine.ai_advisor.advisor import diagnose
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=sse({"choices": [{"index": 0, "delta": {"content": "ok"}}]}),
+                              headers={"content-type": "text/event-stream"})
+
+    report = diagnose("sk-test", client=make_client(handler))
+    assert report["verdict"].startswith("Healthy")
+    assert report["bytes_received"] > 0
+    assert "first_bytes" in report
+
+
+def test_diagnose_only_echoes_an_allowlist_of_response_headers():
+    """A diagnostic that echoes arbitrary upstream headers is one change
+    away from leaking something."""
+    from t3_engine.ai_advisor.advisor import diagnose
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="data: [DONE]\n\n", headers={
+            "content-type": "text/event-stream", "set-cookie": "session=secret",
+            "x-internal-token": "do-not-echo"})
+
+    report = diagnose("sk-test", client=make_client(handler))
+    assert "set-cookie" not in report["headers"]
+    assert "x-internal-token" not in report["headers"]
+    assert "content-type" in report["headers"]

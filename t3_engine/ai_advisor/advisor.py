@@ -236,6 +236,10 @@ def _api_error_message(resp: httpx.Response, model: str) -> str:
     elif resp.status_code in (401, 403):
         hint = (" | Check the API key itself - it may be invalid, revoked, or without access to this "
                 "model.")
+    elif resp.status_code == 202:
+        hint = (" | 202 means the request was QUEUED, not answered: this endpoint expects the client "
+                "to poll for the result rather than read a response. A plain chat client waits "
+                "forever on that, which looks exactly like a slow model.")
     elif resp.status_code == 400:
         hint = (" | A rejected parameter is the usual cause here. Reasoning effort and seed are sent "
                 "only when set, so try clearing them in the AI tab if this model does not accept "
@@ -354,10 +358,19 @@ def _consume_stream(lines, model: str) -> Dict[str, Any]:
     finish_reason = ""
     saw_any_chunk = False
 
+    # Kept so a provider that ignores `stream: true` and answers with an
+    # ordinary JSON body still works. Without this the SSE reader waits out
+    # the whole buffered generation and then reports an empty stream, which
+    # blames the model for the gateway's behaviour.
+    non_sse: List[str] = []
+
     for raw in lines:
         line = raw.decode("utf-8") if isinstance(raw, bytes) else raw
         line = line.strip()
-        if not line or not line.startswith("data:"):
+        if not line:
+            continue
+        if not line.startswith("data:"):
+            non_sse.append(line)
             continue
         data = line[len("data:"):].strip()
         if data == "[DONE]":
@@ -394,6 +407,9 @@ def _consume_stream(lines, model: str) -> Dict[str, Any]:
             finish_reason = choice["finish_reason"]
 
     if not saw_any_chunk:
+        buffered = _as_buffered_completion("".join(non_sse), model)
+        if buffered is not None:
+            return buffered
         raise AIAdvisorError(
             f"{PROVIDER_NAME} opened a stream for '{model}' but sent no completion chunks."
         )
@@ -421,6 +437,21 @@ def retry_delay_for(resp: httpx.Response, attempt: int) -> float:
             pass          # HTTP-date form; fall through to the backoff
     index = min(attempt, len(RATE_LIMIT_BACKOFF_SECONDS) - 1)
     return RATE_LIMIT_BACKOFF_SECONDS[index]
+
+
+def _as_buffered_completion(body: str, model: str) -> Optional[Dict[str, Any]]:
+    """A non-SSE body that is nonetheless a valid chat completion."""
+    body = body.strip()
+    if not body.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    _raise_for_error_body(parsed, model)
+    return parsed if parsed.get("choices") else None
 
 
 def _raise_for_error_body(data: Any, model: str) -> None:
@@ -590,6 +621,67 @@ def request_wave_count(api_key: str, pivots: List[Dict[str, Any]], direction: st
     )
 
 
+def check_access(api_key: str, base_url: Optional[str] = None,
+                 client: Optional[httpx.Client] = None, timeout: float = 30.0) -> Dict[str, Any]:
+    """Verify the key and the endpoint WITHOUT invoking a model.
+
+    This is the check that ends the guessing. `GET {base}/models` is an
+    ordinary catalogue listing: it needs the key, it hits the same host and
+    the same base path as every chat call, and it runs no inference at all.
+    So its result splits the problem cleanly in two:
+
+      it answers fast  -> the key and the URL are correct, and any slowness
+                          afterwards belongs to the model or to the queue in
+                          front of it. Nothing on this side to fix.
+      it hangs or 4xxs -> the problem is the key, the endpoint or the path,
+                          and no amount of waiting on a chat call will
+                          diagnose that.
+
+    Before this existed, both cases looked like "the model did not answer",
+    which pointed at the slowest possible explanation for what might be a
+    one-character typo in a URL."""
+    if not api_key:
+        raise AIAdvisorError(f"No {PROVIDER_NAME} API key provided "
+                             "(get one at https://build.nvidia.com)")
+
+    base = (base_url or DEFAULT_API_BASE).strip().rstrip("/")
+    if base.endswith("/chat/completions"):
+        base = base[: -len("/chat/completions")]
+    url = f"{base}/models"
+
+    http_client = client or httpx.Client(timeout=build_timeout(timeout))
+    owns_client = client is None
+    started = time.monotonic()
+    try:
+        resp = http_client.get(url, headers={"Authorization": f"Bearer {api_key}",
+                                             "Accept": "application/json"})
+    except httpx.RequestError as exc:
+        raise AIAdvisorError(_transport_error_message(exc, url, timeout))
+    finally:
+        if owns_client:
+            http_client.close()
+
+    elapsed = round(time.monotonic() - started, 2)
+    if resp.status_code != 200:
+        raise AIAdvisorError(
+            f"{PROVIDER_NAME} refused the catalogue listing at {url} "
+            f"({resp.status_code}): {resp.text[:300]} | This runs no model at all, so it is the key, "
+            "the API base URL, or the path - not model speed."
+        )
+
+    ids: List[str] = []
+    try:
+        payload = resp.json()
+        entries = payload.get("data") if isinstance(payload, dict) else None
+        for entry in entries or []:
+            name = entry.get("id") if isinstance(entry, dict) else None
+            if name:
+                ids.append(str(name))
+    except (ValueError, AttributeError):
+        pass
+    return {"ok": True, "url": url, "seconds": elapsed, "model_count": len(ids), "models": ids}
+
+
 def ping(api_key: str, model: str = DEFAULT_MODEL, base_url: Optional[str] = None,
          client: Optional[httpx.Client] = None,
          timeout: float = DEFAULT_READ_TIMEOUT) -> Dict[str, Any]:
@@ -692,3 +784,108 @@ def _speed_advice(seconds: float) -> str:
     return (f"{seconds:.0f}s before this model even starts answering. The analyst pays that once per "
             "step, so a 10-step run would take far longer than the request budget allows. Use a "
             "faster model for the analyst, lower the reasoning effort, or cut the step budget to 4-6.")
+
+
+# Headers worth reporting back. An allowlist rather than "everything minus
+# secrets", because a diagnostic that echoes arbitrary response headers is
+# one upstream change away from leaking something.
+_DIAGNOSTIC_HEADERS = ("content-type", "transfer-encoding", "content-length", "retry-after",
+                       "x-request-id", "nvcf-reqid", "nvcf-status", "server", "cache-control")
+
+
+def diagnose(api_key: str, model: str = DEFAULT_MODEL, base_url: Optional[str] = None,
+             client: Optional[httpx.Client] = None, timeout: float = 45.0) -> Dict[str, Any]:
+    """Report what the chat endpoint ACTUALLY does, rather than what it was
+    supposed to do.
+
+    Every other error path here turns a failure into a sentence. That is
+    right for users and useless for debugging, because the sentence is
+    written from an assumption about the cause. This returns observations:
+    the status line, the response headers, whether the body is really
+    server-sent events, the first bytes as they arrived, and how long each
+    phase took. It never raises on a timeout - a timeout IS the observation,
+    and the partial result is the evidence.
+
+    Two things it has caught by design:
+      * a `stream: true` request answered with ordinary JSON (some gateways
+        ignore the flag), which the SSE reader would wait out in full and
+        then report as an empty stream;
+      * a 202 with a queue id, which is a "come back later" rather than an
+        answer, and looks identical to a hang from the outside."""
+    url = chat_url(base_url)
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": "Reply with the single word: ok"}],
+        "temperature": 0,
+        "stream": True,
+    }
+    report: Dict[str, Any] = {"url": url, "model": model, "sent_bytes": len(json.dumps(body))}
+    if not api_key:
+        report["error"] = "No API key (neither the request nor the server provided one)."
+        return report
+
+    http_client = client or httpx.Client(timeout=build_timeout(timeout))
+    owns_client = client is None
+    started = time.monotonic()
+    try:
+        with http_client.stream("POST", url, headers=_headers(api_key, True), json=body) as resp:
+            report["status"] = resp.status_code
+            report["seconds_to_headers"] = round(time.monotonic() - started, 2)
+            report["headers"] = {k: v for k, v in resp.headers.items()
+                                 if k.lower() in _DIAGNOSTIC_HEADERS}
+            content_type = resp.headers.get("content-type", "")
+            report["looks_like_sse"] = "event-stream" in content_type.lower()
+
+            chunks: List[str] = []
+            received = 0
+            for raw in resp.iter_bytes():
+                if not raw:
+                    continue
+                if "seconds_to_first_byte" not in report:
+                    report["seconds_to_first_byte"] = round(time.monotonic() - started, 2)
+                received += len(raw)
+                if len("".join(chunks)) < 600:
+                    chunks.append(raw.decode("utf-8", errors="replace"))
+                # Enough to characterise the response. Reading it all would
+                # reintroduce the very wait this is meant to measure.
+                if received > 2000 or "seconds_to_first_byte" in report and received > 0 and len(chunks) >= 3:
+                    break
+            report["bytes_received"] = received
+            report["first_bytes"] = "".join(chunks)[:600]
+    except httpx.RequestError as exc:
+        report["error"] = _transport_error_message(exc, url, timeout)
+        report["failed_after_seconds"] = round(time.monotonic() - started, 2)
+        report.setdefault("phase", "headers" if "status" not in report else "body")
+    finally:
+        if owns_client:
+            http_client.close()
+
+    report["verdict"] = _diagnostic_verdict(report)
+    return report
+
+
+def _diagnostic_verdict(report: Dict[str, Any]) -> str:
+    """Say what the observations mean, separately from the observations
+    themselves - so a wrong reading here does not hide the raw evidence."""
+    if "status" not in report:
+        return ("The request never got a response header. That is the connection or the endpoint, "
+                "not the model - a model that is merely slow still sends headers immediately.")
+    status = report["status"]
+    if status == 202:
+        return ("202 Accepted: this endpoint queued the request instead of answering it, and expects "
+                "the client to poll for the result. A plain chat client waits forever on that, which "
+                "is indistinguishable from a slow model.")
+    if status != 200:
+        return (f"HTTP {status} - the API rejected the request outright. The body above is its "
+                "reason; this is a key, model-id or URL problem, not a speed problem.")
+    if report.get("bytes_received", 0) == 0:
+        return ("Headers came back in "
+                f"{report.get('seconds_to_headers', '?')}s but no body bytes followed. The request "
+                "was accepted and is sitting in a queue or generating silently - the wait is on the "
+                "provider's side, not in this app.")
+    if not report.get("looks_like_sse"):
+        return ("The response is NOT server-sent events despite stream: true, so the provider "
+                "buffered the whole answer. That makes every call wait for the complete generation "
+                "- which is exactly the slowness being investigated.")
+    return (f"Healthy: headers in {report.get('seconds_to_headers', '?')}s, first body bytes in "
+            f"{report.get('seconds_to_first_byte', '?')}s, and the body is a real event stream.")
