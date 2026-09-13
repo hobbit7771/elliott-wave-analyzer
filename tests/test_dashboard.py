@@ -821,3 +821,19 @@ def test_index_offers_the_reasoning_effort_control():
     resp = client.get("/")
     assert "aiEffort" in resp.text
     assert "/api/ai/config" in resp.text
+
+
+def test_the_step_transcript_shows_arguments_not_just_tool_names():
+    """"What it actually did" has to say WHICH swings it listed and WHICH
+    legs it measured. A bare list of verbs answers nothing."""
+    resp = client.get("/")
+    assert "formatStepArgs" in resp.text
+    assert "deviation_pct=3" in resp.text or "formatStepArgs(s.args)" in resp.text
+
+
+def test_the_transcript_section_is_never_hidden_when_a_run_returns():
+    """"It made no tool calls at all" is itself the finding - a model that
+    answers in prose instead of working the chart. An absent section reads
+    as a rendering bug rather than as that answer."""
+    resp = client.get("/")
+    assert "No tool calls were made" in resp.text

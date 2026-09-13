@@ -111,13 +111,12 @@ def test_a_missing_model_404_is_passed_through_verbatim_with_a_usable_hint():
     assert "API base URL" in message              # 404 has two causes here, both fixable in the UI
 
 
-def test_auth_credit_and_rate_limit_errors_point_at_the_right_cause():
-    """Three different failures that all look like "the AI is broken" from
-    the outside, and have three completely different fixes."""
+def test_auth_and_parameter_errors_point_at_the_right_cause():
+    """Failures that all look like "the AI is broken" from the outside, and
+    have completely different fixes."""
     cases = [
         (403, "permission denied", "Check the API key itself"),
         (400, "unknown parameter", "rejected parameter"),
-        (429, "rate limited", "Rate limited"),
     ]
     for status, body, expected in cases:
         def handler(request: httpx.Request, _status=status, _body=body) -> httpx.Response:
@@ -477,3 +476,87 @@ def test_seed_can_be_turned_off_entirely():
 
     request_commentary("sk-test", {"wave": "3"}, seed=None, client=make_client(handler))
     assert "seed" not in seen
+
+
+# ---- rate limiting ----
+# The dominant failure on a free tier, and it is a WAIT rather than a
+# defect: the run was going fine and the quota window closed. Retrying
+# turns "the analyst died at step 5" into "the analyst paused at step 5".
+
+def test_a_rate_limit_is_retried_before_it_is_reported_as_a_failure(monkeypatch):
+    slept = []
+    monkeypatch.setattr("t3_engine.ai_advisor.advisor._sleep", slept.append)
+    attempts = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        if len(attempts) < 3:
+            return httpx.Response(429, text='{"status":429,"title":"Too Many Requests"}')
+        return chat_response("recovered")
+
+    result = request_commentary("sk-test", {"wave": "3"}, client=make_client(handler))
+    assert result.text == "recovered"
+    assert len(attempts) == 3
+    assert slept == [4.0, 12.0]          # backoff grows between attempts
+
+
+def test_the_servers_own_retry_after_wins_over_the_local_backoff(monkeypatch):
+    """Guessing shorter than the quota window burns another attempt and on
+    some services extends the ban."""
+    slept = []
+    monkeypatch.setattr("t3_engine.ai_advisor.advisor._sleep", slept.append)
+    attempts = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        if len(attempts) == 1:
+            return httpx.Response(429, text="slow down", headers={"Retry-After": "7"})
+        return chat_response("ok")
+
+    request_commentary("sk-test", {"wave": "3"}, client=make_client(handler))
+    assert slept == [7.0]
+
+
+def test_an_absurd_retry_after_is_capped(monkeypatch):
+    slept = []
+    monkeypatch.setattr("t3_engine.ai_advisor.advisor._sleep", slept.append)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, text="nope", headers={"Retry-After": "3600"})
+
+    with pytest.raises(AIAdvisorError):
+        request_commentary("sk-test", {"wave": "3"}, client=make_client(handler))
+    assert all(s <= 60.0 for s in slept)
+
+
+def test_a_persistent_rate_limit_finally_fails_with_advice_that_fits(monkeypatch):
+    """After the retries, the message has to say what the user can change -
+    'rate limited' alone leaves them clicking the same button again."""
+    monkeypatch.setattr("t3_engine.ai_advisor.advisor._sleep", lambda s: None)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, text='{"status":429,"title":"Too Many Requests"}')
+
+    with pytest.raises(AIAdvisorError) as excinfo:
+        request_commentary("sk-test", {"wave": "3"}, client=make_client(handler))
+    message = str(excinfo.value)
+    assert "automatic retries" in message
+    assert "lower the step budget" in message
+    assert "Too Many Requests" in message      # the API's own words survive
+
+
+def test_retries_apply_to_the_streaming_path_too(monkeypatch):
+    """Chat calls stream, so a retry policy that only covered the plain
+    path would never fire where it is actually needed."""
+    monkeypatch.setattr("t3_engine.ai_advisor.advisor._sleep", lambda s: None)
+    attempts = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(json.loads(request.content)["stream"])
+        if len(attempts) == 1:
+            return httpx.Response(429, text="wait")
+        return chat_response("streamed fine")
+
+    result = request_commentary("sk-test", {"wave": "3"}, client=make_client(handler))
+    assert result.text == "streamed fine"
+    assert attempts == [True, True]

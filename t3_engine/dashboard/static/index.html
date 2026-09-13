@@ -34,9 +34,13 @@
   /* The analyst's own chart. Same box as the main one, but it never
      receives an engine overlay - see drawAnalystCount(). */
   #analystChart { display:none; }
-  .step { display:flex; gap:6px; font-size:11px; color:#9aa3b2; padding:2px 0; border-bottom:1px solid #1b1f29; }
-  .step .t { color:#c084fc; flex:0 0 108px; }
-  .step .r { flex:1; text-align:right; color:#7b8397; }
+  .step { display:flex; gap:6px; font-size:11px; color:#9aa3b2; padding:4px 0; border-bottom:1px solid #1b1f29;
+          align-items:baseline; flex-wrap:wrap; }
+  .step .n { color:#5b6478; flex:0 0 16px; }
+  .step .t { color:#c084fc; flex:1 1 160px; min-width:0; word-break:break-word; }
+  .step .t .a { color:#7b8397; }
+  .step .r { flex:1 1 120px; text-align:right; color:#c7cbd3; }
+  .step .r.bad { color:#fca5a5; }
   #panel { width: 340px; flex-shrink:0; border-left:1px solid #232733; padding:12px; overflow-y:auto; font-size:12.5px; }
   #panel h2 { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:#8891a3; margin:14px 0 6px; }
   #panel h2:first-child { margin-top:0; }
@@ -905,13 +909,43 @@ function drawAnalystCount(structures) {
   if (analystSeries) analystSeries.setMarkers(marks);
 }
 
+// The transcript is the answer to "what did it actually do", so it shows
+// the ARGUMENTS, not just the tool name: "list_pivots(deviation_pct=3)" and
+// "measure_move(1.0, 11, 13)" say which swings it looked at and which legs
+// it compared. A bare list of verbs does not.
+function formatStepArgs(args) {
+  if (!args || typeof args !== 'object') return '';
+  return Object.entries(args).map(([key, value]) => {
+    let shown;
+    if (Array.isArray(value)) shown = `[${value.length}]`;
+    else if (value !== null && typeof value === 'object') shown = '{…}';
+    else shown = String(value);
+    if (shown.length > 40) shown = shown.slice(0, 39) + '…';
+    return `${key}=${shown}`;
+  }).join(', ');
+}
+
 function renderAnalystSteps(steps) {
   const wrap = document.getElementById('analystStepsWrap');
   const el = document.getElementById('analystSteps');
-  if (!steps || !steps.length) { wrap.style.display = 'none'; return; }
   wrap.style.display = '';
-  el.innerHTML = steps.map(s => `<div class="step"><span class="t">${s.tool}</span>`
-    + `<span class="r">${escapeHtml(s.result)}</span></div>`).join('');
+  // Never hidden. "It made no tool calls at all" is itself the finding when
+  // a model answers in prose instead of working the chart, and an absent
+  // section reads as a rendering bug rather than as that answer.
+  if (!steps || !steps.length) {
+    el.innerHTML = '<div class="hint">No tool calls were made — the model never worked the chart. '
+      + 'That usually means it answered in prose, which this model or this endpoint may do if it '
+      + 'does not support tool calling.</div>';
+    return;
+  }
+  el.innerHTML = steps.map((s, i) => {
+    const args = formatStepArgs(s.args);
+    const failed = /^error/i.test(String(s.result || ''));
+    return `<div class="step">`
+      + `<span class="n">${i + 1}</span>`
+      + `<span class="t">${escapeHtml(s.tool)}<span class="a">(${escapeHtml(args)})</span></span>`
+      + `<span class="r${failed ? ' bad' : ''}">${escapeHtml(s.result)}</span></div>`;
+  }).join('');
 }
 
 function escapeHtml(text) {
