@@ -17,7 +17,7 @@
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine, live
 market data from Bybit USDT perpetuals (see "Mobile app + live Bybit"
-below for why Binance was dropped). 368 automated tests, all passing,
+below for why Binance was dropped). 377 automated tests, all passing,
 cover every module described below.
 
 ## Read this first: what "done" means here
@@ -90,7 +90,7 @@ t3_engine/
                       analyst_tools.py = the tools it may use). Never a decision-maker.
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                368 tests, one file per module above
+tests/                377 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Bybit in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -368,6 +368,28 @@ desktop web page:
   that arrives mid-stream, after the headers already said OK - is treated
   as an error too, since printing it as an empty second opinion would read
   as "the model had no concerns".
+
+  **A busy provider is retried, not reported.** "Service temporarily
+  overloaded" arrived from NVIDIA through OpenRouter *inside a 200*, and
+  failing a whole run over a queue that clears in seconds is what sends
+  someone swapping model ids by hand. Transient upstream messages
+  (overloaded, capacity, unavailable, try again) and any `5xx` now go
+  through the same retry-with-backoff as a rate limit. A non-transient
+  error is not retried - three attempts at a bad key only make the wrong
+  answer slower. The classification also applies to mid-stream error
+  *frames*, since chat calls stream and a check that only covered the
+  status code would never fire where it is needed.
+
+  **The Model field takes a LIST**, comma-separated, sent to OpenRouter as
+  its native `models` array: the router walks it in order and uses the
+  first that answers, inside the same request. A free model behind a shared
+  GPU pool is saturated a good fraction of the time, and that is what a
+  router is for - not a person watching a panel and pasting a new id. Every
+  entry is checked for being a chat model up front, because a wrong-kind
+  model sitting third would otherwise surface only once the first two were
+  busy, which is the worst possible moment to find out. **Fill Model field
+  with working models** populates the list from the catalogue's own
+  tool-calling metadata, free ones first.
 
   **`429` is retried, not reported.** Rate limiting is the dominant failure
   on a free tier and it is a *wait*, not a defect: the run was going fine
@@ -809,7 +831,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (368 tests)
+# Run the automated test suite (377 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)

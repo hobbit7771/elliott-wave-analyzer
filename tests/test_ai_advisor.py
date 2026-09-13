@@ -952,3 +952,113 @@ def test_a_catalogue_without_capability_metadata_says_unknown_not_no():
     result = check_access("sk-or-test", model="vendor/model", client=make_client(handler))
     assert result["model_supports_tools"] is None
     assert result["tool_capable_count"] == 0
+
+
+# ---- busy providers, and not hand-swapping models because of them ----
+
+def test_a_busy_upstream_is_retried_rather_than_reported_as_a_failure(monkeypatch):
+    """"Service temporarily overloaded" arrived from NVIDIA through
+    OpenRouter inside a 200. It is a wait, exactly like a 429 - failing the
+    whole run over a queue that clears in seconds is what sent a user
+    swapping models by hand."""
+    monkeypatch.setattr("t3_engine.ai_advisor.advisor._sleep", lambda s: None)
+    attempts = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        if len(attempts) < 3:
+            return httpx.Response(200, text=sse(
+                {"error": {"message": "Error from Nvidia: Service temporarily overloaded"}}))
+        return chat_response("recovered")
+
+    result = request_commentary("sk-or-test", {"wave": "3"}, model="a/b", client=make_client(handler))
+    assert result.text == "recovered"
+    assert len(attempts) == 3
+
+
+def test_a_persistent_overload_finally_reports_it_with_the_fix(monkeypatch):
+    monkeypatch.setattr("t3_engine.ai_advisor.advisor._sleep", lambda s: None)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=sse(
+            {"error": {"message": "Error from Nvidia: Service temporarily overloaded"}}))
+
+    with pytest.raises(AIAdvisorError) as excinfo:
+        request_commentary("sk-or-test", {"wave": "3"}, model="a/b", client=make_client(handler))
+    message = str(excinfo.value)
+    assert "temporarily overloaded" in message      # the vendor's own words
+    assert "busy rather than broken" in message
+    assert "comma-separated" in message             # and what to do about it
+
+
+def test_a_5xx_is_retried_too_since_a_saturated_vendor_usually_recovers(monkeypatch):
+    monkeypatch.setattr("t3_engine.ai_advisor.advisor._sleep", lambda s: None)
+    attempts = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        return chat_response("ok") if len(attempts) > 2 else httpx.Response(503, text="upstream down")
+
+    result = request_commentary("sk-or-test", {"wave": "3"}, model="a/b", client=make_client(handler))
+    assert result.text == "ok"
+    assert len(attempts) == 3
+
+
+def test_a_non_transient_error_is_not_retried(monkeypatch):
+    """Retrying a bad key three times just makes the wrong answer slower."""
+    monkeypatch.setattr("t3_engine.ai_advisor.advisor._sleep", lambda s: None)
+    attempts = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        return httpx.Response(200, text=sse({"error": {"message": "invalid model id"}}))
+
+    with pytest.raises(AIAdvisorError, match="invalid model id"):
+        request_commentary("sk-or-test", {"wave": "3"}, model="a/b", client=make_client(handler))
+    assert len(attempts) == 1
+
+
+# ---- fallback lists ----
+
+def test_the_model_field_accepts_a_list_and_the_router_walks_it():
+    """A single free model behind a shared GPU pool is unavailable a good
+    fraction of the time. Swapping ids by hand is the thing a router exists
+    to do instead."""
+    from t3_engine.ai_advisor.advisor import parse_model_list
+
+    assert parse_model_list("a/one, b/two,c/three") == ["a/one", "b/two", "c/three"]
+    assert parse_model_list("a/one\nb/two") == ["a/one", "b/two"]
+    assert parse_model_list(" a/one , a/one ") == ["a/one"]       # deduped
+    assert parse_model_list("  ") == []
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return chat_response("ok")
+
+    request_commentary("sk-or-test", {"wave": "3"}, model="a/one, b/two, c/three",
+                       client=make_client(handler))
+    assert seen["model"] == "a/one"                  # the preferred one
+    assert seen["models"] == ["a/one", "b/two", "c/three"]
+
+
+def test_a_single_model_does_not_get_a_fallback_array():
+    """An array of one is noise, and a parameter a stricter provider could
+    reject for no benefit."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return chat_response("ok")
+
+    request_commentary("sk-or-test", {"wave": "3"}, model="a/one", client=make_client(handler))
+    assert "models" not in seen
+
+
+def test_every_entry_in_a_fallback_list_is_checked_for_being_a_chat_model():
+    """A wrong-kind model sitting third would otherwise surface only once
+    the first two were busy - the worst possible moment to learn about it."""
+    with pytest.raises(AIAdvisorError, match="embedding"):
+        request_commentary("sk-or-test", {"wave": "3"},
+                           model="good/chat, other/chat, nvidia/llama-nemotron-embed-vl-1b-v2:free")

@@ -93,6 +93,25 @@ NON_CHAT_MODEL_MARKERS = ("embed", "embedding", "-rerank", "reranker", "moderati
                           "whisper", "tts-", "-tts", "stable-diffusion", "flux")
 
 
+def parse_model_list(raw: str) -> List[str]:
+    """The Model field accepts a LIST, comma- or newline-separated.
+
+    A single free model behind a shared GPU pool is offline or saturated a
+    good fraction of the time, and the answer to that is not for a person
+    to sit there swapping ids by hand - it is the thing a router exists to
+    do. OpenRouter takes a `models` array and walks it in order when one
+    fails, so the fallback happens inside the provider, in the same request,
+    with no second round trip."""
+    parts = [piece.strip() for chunk in (raw or "").replace("\n", ",").split(",")
+             for piece in [chunk]]
+    seen, models = set(), []
+    for name in parts:
+        if name and name not in seen:
+            seen.add(name)
+            models.append(name)
+    return models
+
+
 def non_chat_reason(model: str) -> Optional[str]:
     """Why this model id cannot answer a chat request, or None."""
     name = (model or "").lower()
@@ -190,6 +209,16 @@ COUNT_MAX_OUTPUT_TOKENS = 16384
 # Retrying it inside one call is what turns "the analyst died at step 5"
 # into "the analyst paused at step 5". Bounded, because a 429 that never
 # clears must not hold a request open forever.
+# Phrases an upstream uses to say "busy, not broken". A free tier routed to
+# a shared GPU pool hits these constantly, and they are a WAIT rather than a
+# defect - the same category as a 429, and retried the same way. Matched on
+# text because the status code does not distinguish them: OpenRouter
+# forwards "Service temporarily overloaded" from the vendor inside a 200 or
+# a 502 depending on where it failed.
+TRANSIENT_UPSTREAM_MARKERS = ("overload", "temporarily", "capacity", "try again",
+                              "unavailable", "timeout", "timed out", "busy",
+                              "no instances", "queue is full")
+
 MAX_RATE_LIMIT_RETRIES = 3
 RATE_LIMIT_BACKOFF_SECONDS = (4.0, 12.0, 30.0)
 MAX_RETRY_AFTER_SECONDS = 60.0
@@ -228,6 +257,16 @@ LABELLER_SYSTEM_PROMPT = (
 
 class AIAdvisorError(Exception):
     pass
+
+
+class TransientProviderError(AIAdvisorError):
+    """The provider is busy, not broken. Worth retrying; not worth
+    reporting as a failure until the retries are spent."""
+
+
+def is_transient(message: str) -> bool:
+    text = (message or "").lower()
+    return any(marker in text for marker in TRANSIENT_UPSTREAM_MARKERS)
 
 
 TRUNCATED_MESSAGE = (
@@ -302,6 +341,11 @@ def _api_error_message(resp: httpx.Response, model: str) -> str:
                 "them.")
     elif resp.status_code == 402:
         hint = " | Out of credits for this model."
+    elif 500 <= resp.status_code < 600:
+        hint = (f" | A 5xx from a router usually means the vendor behind this model is down or "
+                f"saturated, and it survived {MAX_RATE_LIMIT_RETRIES} automatic retries. Put several "
+                "model ids in the Model field, comma-separated: the router walks the list and uses "
+                "the first one that answers.")
     elif resp.status_code == 429:
         hint = (f" | Rate limited, and still rate limited after {MAX_RATE_LIMIT_RETRIES} automatic "
                 "retries with backoff. A free tier's quota window is usually per-minute: wait a "
@@ -443,9 +487,7 @@ def _consume_stream(lines, model: str) -> Dict[str, Any]:
             continue          # keep-alives and comment frames are not fatal
         # An error can arrive mid-stream, after a 200 on the headers.
         if isinstance(chunk, dict) and chunk.get("error"):
-            error = chunk["error"]
-            message = error.get("message") if isinstance(error, dict) else str(error)
-            raise AIAdvisorError(f"{PROVIDER_NAME} returned an error for '{model}': {message}")
+            _raise_for_error_body(chunk, model)
         choices = chunk.get("choices") or []
         if not choices:
             continue
@@ -483,6 +525,18 @@ def _consume_stream(lines, model: str) -> Dict[str, Any]:
         message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
     return {"choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
             "model": model}
+
+
+def _should_retry(resp: httpx.Response) -> bool:
+    """429 is the classic case; 5xx from a router usually means the vendor
+    behind it is down or saturated, which clears on its own far more often
+    than it stays broken."""
+    return resp.status_code == 429 or 500 <= resp.status_code < 600
+
+
+def retry_delay_for_attempt(attempt: int) -> float:
+    index = min(attempt, len(RATE_LIMIT_BACKOFF_SECONDS) - 1)
+    return RATE_LIMIT_BACKOFF_SECONDS[index]
 
 
 def retry_delay_for(resp: httpx.Response, attempt: int) -> float:
@@ -523,7 +577,15 @@ def _raise_for_error_body(data: Any, model: str) -> None:
     if isinstance(data, dict) and data.get("error"):
         error = data["error"]
         message = error.get("message") if isinstance(error, dict) else str(error)
-        raise AIAdvisorError(f"{PROVIDER_NAME} returned an error for '{model}': {message}")
+        # Some of these are the provider saying "busy", which is a wait
+        # rather than a defect and must not end the call on the first try.
+        failure = TransientProviderError if is_transient(str(message)) else AIAdvisorError
+        suffix = ""
+        if failure is TransientProviderError:
+            suffix = (" | The provider is busy rather than broken. Put several model ids in the "
+                      "Model field, comma-separated, and the router will use the first that "
+                      "answers instead of failing the whole run.")
+        raise failure(f"{PROVIDER_NAME} returned an error for '{model}': {message}{suffix}")
 
 
 def _post(api_key: str, model: str, payload: Dict[str, Any],
@@ -535,17 +597,24 @@ def _post(api_key: str, model: str, payload: Dict[str, Any],
         raise AIAdvisorError(f"No {PROVIDER_NAME} API key provided "
                              "(get one at https://build.nvidia.com)")
 
-    problem = non_chat_reason(model)
-    if problem:
-        raise AIAdvisorError(problem)
-    if not model:
+    models = parse_model_list(model)
+    if not models:
         raise AIAdvisorError(
             "No model id set. Open the AI tab, press Diagnose to list the models your key can reach, "
             "and paste one that supports tool calling into the Model field."
         )
+    # Every entry is checked, not just the first: a wrong-kind model sitting
+    # third in a fallback list would only surface once the first two were
+    # busy, which is the worst possible moment to learn about it.
+    for name in models:
+        problem = non_chat_reason(name)
+        if problem:
+            raise AIAdvisorError(problem)
 
     url = chat_url(base_url)
-    body = {**payload, "model": model, "stream": bool(stream)}
+    body = {**payload, "model": models[0], "stream": bool(stream)}
+    if len(models) > 1:
+        body["models"] = models
     http_client = client or httpx.Client(timeout=build_timeout(timeout))
     owns_client = client is None
     try:
@@ -554,7 +623,7 @@ def _post(api_key: str, model: str, payload: Dict[str, Any],
                 if stream:
                     with http_client.stream("POST", url, headers=_headers(api_key, True),
                                             json=body) as resp:
-                        if resp.status_code == 429 and attempt < MAX_RATE_LIMIT_RETRIES:
+                        if _should_retry(resp) and attempt < MAX_RATE_LIMIT_RETRIES:
                             resp.read()
                             sleep_for = retry_delay_for(resp, attempt)
                             _on_rate_limit(attempt, sleep_for)
@@ -563,10 +632,21 @@ def _post(api_key: str, model: str, payload: Dict[str, Any],
                         if resp.status_code != 200:
                             resp.read()   # the body is not loaded yet in stream mode
                             raise AIAdvisorError(_api_error_message(resp, model))
-                        return _consume_stream(resp.iter_lines(), model)
+                        try:
+                            return _consume_stream(resp.iter_lines(), model)
+                        except TransientProviderError:
+                            # "Busy" can arrive as an error FRAME after a 200,
+                            # which is how the streamed path - every chat call
+                            # - would otherwise never retry a busy provider.
+                            if attempt >= MAX_RATE_LIMIT_RETRIES:
+                                raise
+                            transient_wait = retry_delay_for_attempt(attempt)
+                        _on_rate_limit(attempt, transient_wait)
+                        _sleep(transient_wait)
+                        continue
                     # unreachable, the `with` above either returns or raises
                 resp = http_client.post(url, headers=_headers(api_key, False), json=body)
-                if resp.status_code == 429 and attempt < MAX_RATE_LIMIT_RETRIES:
+                if _should_retry(resp) and attempt < MAX_RATE_LIMIT_RETRIES:
                     sleep_for = retry_delay_for(resp, attempt)
                     _on_rate_limit(attempt, sleep_for)
                     _sleep(sleep_for)
@@ -576,7 +656,18 @@ def _post(api_key: str, model: str, payload: Dict[str, Any],
                 data = resp.json()
             except httpx.RequestError as exc:
                 raise AIAdvisorError(_transport_error_message(exc, url, timeout))
-            _raise_for_error_body(data, model)
+            try:
+                _raise_for_error_body(data, model)
+            except TransientProviderError:
+                # A 200 carrying "the vendor is busy". Same wait, same
+                # backoff - the alternative is telling the user to go and
+                # change models over a queue that clears in seconds.
+                if attempt >= MAX_RATE_LIMIT_RETRIES:
+                    raise
+                sleep_for = retry_delay_for_attempt(attempt)
+                _on_rate_limit(attempt, sleep_for)
+                _sleep(sleep_for)
+                continue
             return data
     finally:
         if owns_client:

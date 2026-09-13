@@ -155,7 +155,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-024"
+BUILD_VERSION = "BUILD-CHECK-025"
 
 
 @app.get("/api/health")
@@ -621,7 +621,8 @@ def ai_signal_quality(api_key: str = Body("", embed=True), source: str = Body("s
 def ai_diagnose_endpoint(api_key: str = Body("", embed=True),
                          model: str = Body(DEFAULT_AI_MODEL, embed=True),
                          base_url: str = Body(DEFAULT_AI_API_BASE, embed=True),
-                         timeout: float = Body(45.0, embed=True, gt=0, le=MAX_READ_TIMEOUT)):
+                         timeout: float = Body(45.0, embed=True, gt=0, le=MAX_READ_TIMEOUT),
+                         probe: bool = Body(True, embed=True)):
     """Two checks, in the order that actually narrows the problem.
 
     First a catalogue listing (`GET {base}/models`): it needs the key and
@@ -647,11 +648,12 @@ def ai_diagnose_endpoint(api_key: str = Body("", embed=True),
         report["access"] = {"ok": False, "error": str(exc)}
     # The chat probe runs either way: when access is fine it measures the
     # model, and when access is broken its raw status corroborates why.
-    report["chat"] = ai_diagnose(key, model=model, base_url=base_url, timeout=timeout)
+    if probe:
+        report["chat"] = ai_diagnose(key, model=model, base_url=base_url, timeout=timeout)
     # And the part that names the cause rather than describing the symptom:
     # the same trivial prompt under several configurations, each differing
     # from the last by exactly one thing.
-    if key:
+    if key and probe:
         report["probe"] = ai_probe_variants(key, model=model, base_url=base_url,
                                             per_variant_timeout=min(timeout, 25.0))
     return report
