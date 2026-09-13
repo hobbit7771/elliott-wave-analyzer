@@ -211,11 +211,12 @@ def test_index_ai_tab_is_wired_to_the_current_provider():
     GONE, not merely joined by the new one."""
     resp = client.get("/")
     assert "aiKey" in resp.text
-    assert "orcarouter.ai" in resp.text
+    assert "integrate.api.nvidia.com" in resp.text
     assert "geminiKey" not in resp.text
     assert "aistudio.google.com" not in resp.text
     assert "openaiKey" not in resp.text
     assert "openrouter.ai" not in resp.text
+    assert "orcarouter" not in resp.text
 
 
 def test_a_key_saved_for_an_old_provider_is_not_reused_for_the_new_one():
@@ -223,9 +224,10 @@ def test_a_key_saved_for_an_old_provider_is_not_reused_for_the_new_one():
     from the previous provider would fail as "invalid key", which reads as
     "the app is broken" rather than "that key is for the wrong service"."""
     resp = client.get("/")
-    assert "t3_orcarouter_key" in resp.text
+    assert "t3_nvidia_key" in resp.text
     assert "t3_gemini_key" not in resp.text
     assert "t3_openrouter_key" not in resp.text
+    assert "t3_orcarouter_key" not in resp.text
 
 
 def test_index_lets_the_api_base_url_be_edited():
@@ -450,7 +452,7 @@ def test_ai_advice_requires_key():
 def test_ai_advice_success_with_a_mocked_model():
     class FakeResponse:
         text = "Looks like a reasonable wave 3 setup, watch for extension risk."
-        model = "deepseek/deepseek-v4-flash-free"
+        model = "moonshotai/kimi-k3"
         raw = {}
 
     with patch.object(server_module, "request_commentary", return_value=FakeResponse()):
@@ -469,7 +471,7 @@ class _FakeProposal:
     def __init__(self, waves, reasoning="because"):
         self.waves = waves
         self.reasoning = reasoning
-        self.model = "deepseek/deepseek-v4-flash-free"
+        self.model = "moonshotai/kimi-k3"
         self.raw = {}
 
 
@@ -503,7 +505,7 @@ def test_ai_label_rejects_a_count_that_breaks_a_hard_elliott_rule():
     wave 2 retraces straight past the start of wave 1. The server rebuilds
     it from its OWN pivots, the hard rules fire, and the answer is a
     labelled failure rather than a drawn wave."""
-    def label_five_consecutive(api_key, pivots, direction, model=None, base_url=None, timeout=None):
+    def label_five_consecutive(api_key, pivots, direction, model=None, base_url=None, timeout=None, reasoning_effort=None):
         start = _first_index_of_kind(pivots, "HIGH" if direction == "DOWN" else "LOW")
         return _FakeProposal([
             {"label": label, "start_pivot_index": start + i, "end_pivot_index": start + i + 1}
@@ -527,7 +529,7 @@ def test_ai_label_accepts_and_returns_server_built_waves_for_a_legal_count():
     server's pivots - the model supplied indices, never prices."""
     captured = {}
 
-    def label_from_real_pivots(api_key, pivots, direction, model=None, base_url=None, timeout=None):
+    def label_from_real_pivots(api_key, pivots, direction, model=None, base_url=None, timeout=None, reasoning_effort=None):
         captured["pivots"] = pivots
         captured["direction"] = direction
         start = _first_index_of_kind(pivots, "HIGH" if direction == "DOWN" else "LOW")
@@ -552,7 +554,7 @@ def test_ai_label_never_takes_pivots_from_the_caller():
     """If the client could supply pivots, "the server validated the
     indices" would be a claim about the caller's data, not the chart.
     Client-sent pivots must be ignored outright."""
-    def echo_pivot_count(api_key, pivots, direction, model=None, base_url=None, timeout=None):
+    def echo_pivot_count(api_key, pivots, direction, model=None, base_url=None, timeout=None, reasoning_effort=None):
         return _FakeProposal([{"label": "1", "start_pivot_index": 0, "end_pivot_index": 1}],
                              reasoning=f"saw {len(pivots)} pivots")
 
@@ -593,7 +595,7 @@ class _FakeAnalystResult:
         self.summary = "Five waves up look complete."
         self.reasoning = "Wave 3 is the longest."
         self.steps = []
-        self.model = "deepseek/deepseek-v4-flash-free"
+        self.model = "moonshotai/kimi-k3"
         self.steps_used = 3
         self.finished = True
         self.note = note
@@ -683,17 +685,17 @@ def test_the_api_base_url_reaches_every_ai_endpoint():
     with patch.object(server_module, "run_analyst", side_effect=fake_run):
         client.post("/api/ai/analyst", json={
             "api_key": "sk-test", "source": "synthetic", "cycles": 2,
-            "base_url": "https://orcarouter.ai/v2"})
-    assert seen["analyst"] == "https://orcarouter.ai/v2"
+            "base_url": "https://integrate.api.nvidia.com/v2"})
+    assert seen["analyst"] == "https://integrate.api.nvidia.com/v2"
 
-    def fake_commentary(api_key, context, model=None, base_url=None, timeout=None):
+    def fake_commentary(api_key, context, model=None, base_url=None, timeout=None, reasoning_effort=None):
         seen["advice"] = base_url
         return SimpleNamespace(text="ok", model=model)
 
     with patch.object(server_module, "request_commentary", side_effect=fake_commentary):
         client.post("/api/ai/advice", json={
-            "api_key": "sk-test", "context": {}, "base_url": "https://orcarouter.ai/v2"})
-    assert seen["advice"] == "https://orcarouter.ai/v2"
+            "api_key": "sk-test", "context": {}, "base_url": "https://integrate.api.nvidia.com/v2"})
+    assert seen["advice"] == "https://integrate.api.nvidia.com/v2"
 
 
 def test_a_partial_run_returns_its_transcript_instead_of_nothing():
@@ -738,11 +740,11 @@ def test_ping_passes_the_whole_setup_through_so_it_tests_what_the_real_run_uses(
 
     with patch.object(server_module, "ai_ping", side_effect=fake_ping):
         client.post("/api/ai/ping", json={
-            "api_key": "sk-test", "model": "deepseek/deepseek-v4-flash",
-            "base_url": "https://api.orcarouter.ai/v1"})
+            "api_key": "sk-test", "model": "moonshotai/kimi-k3",
+            "base_url": "https://integrate.api.nvidia.com/v1"})
     assert seen["key"] == "sk-test"
-    assert seen["model"] == "deepseek/deepseek-v4-flash"
-    assert seen["base_url"] == "https://api.orcarouter.ai/v1"
+    assert seen["model"] == "moonshotai/kimi-k3"
+    assert seen["base_url"] == "https://integrate.api.nvidia.com/v1"
 
 
 def test_index_exposes_the_connection_test_and_timeout_controls():
@@ -759,3 +761,63 @@ def test_the_analyst_error_text_is_rendered_not_only_the_step_count():
     resp = client.get("/")
     assert "data.error ?" in resp.text
     assert 'class="note error"' in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Server-side API key
+# ---------------------------------------------------------------------------
+
+def test_ai_config_reports_whether_a_server_key_exists_but_never_the_key():
+    """The UI needs to know a blank field will work. It must never learn
+    what the key is - that endpoint is reachable by anyone who can open the
+    dashboard."""
+    with patch.object(server_module, "SERVER_AI_KEY", "nvapi-super-secret"):
+        resp = client.get("/api/ai/config")
+    body = resp.json()
+    assert body["server_key"] is True
+    assert "nvapi-super-secret" not in resp.text
+    assert body["provider"] == "NVIDIA API Catalog"
+
+
+def test_a_request_without_a_key_falls_back_to_the_server_key():
+    seen = {}
+
+    def fake_run(api_key, candles, degree, **kwargs):
+        seen["key"] = api_key
+        return _FakeAnalystResult([])
+
+    with patch.object(server_module, "run_analyst", side_effect=fake_run), \
+         patch.object(server_module, "resolve_api_key", side_effect=lambda k: k or "server-key"):
+        client.post("/api/ai/analyst", json={"source": "synthetic", "cycles": 2})
+    assert seen["key"] == "server-key"
+
+
+def test_a_key_in_the_request_wins_over_the_server_key():
+    """Otherwise a user pasting their own key would silently spend the
+    server owner's quota instead."""
+    from t3_engine.ai_advisor.advisor import resolve_api_key
+
+    with patch("t3_engine.ai_advisor.advisor.DEFAULT_API_KEY", "server-key"):
+        assert resolve_api_key("nvapi-mine") == "nvapi-mine"
+        assert resolve_api_key("  ") == "server-key"
+        assert resolve_api_key(None) == "server-key"
+
+
+def test_reasoning_effort_reaches_the_analyst():
+    seen = {}
+
+    def fake_run(api_key, candles, degree, **kwargs):
+        seen.update(kwargs)
+        return _FakeAnalystResult([])
+
+    with patch.object(server_module, "run_analyst", side_effect=fake_run):
+        client.post("/api/ai/analyst", json={
+            "api_key": "nvapi-test", "source": "synthetic", "cycles": 2,
+            "reasoning_effort": "max"})
+    assert seen["reasoning_effort"] == "max"
+
+
+def test_index_offers_the_reasoning_effort_control():
+    resp = client.get("/")
+    assert "aiEffort" in resp.text
+    assert "/api/ai/config" in resp.text

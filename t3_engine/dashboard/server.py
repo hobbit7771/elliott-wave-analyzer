@@ -41,6 +41,7 @@ from fastapi.staticfiles import StaticFiles
 
 from t3_engine.ai_advisor.advisor import (
     DEFAULT_API_BASE as DEFAULT_AI_API_BASE,
+    DEFAULT_API_KEY as SERVER_AI_KEY,
     DEFAULT_MODEL as DEFAULT_AI_MODEL,
     DEFAULT_READ_TIMEOUT,
     MAX_READ_TIMEOUT,
@@ -48,6 +49,7 @@ from t3_engine.ai_advisor.advisor import (
     ping as ai_ping,
     request_commentary,
     request_wave_count,
+    resolve_api_key,
 )
 from t3_engine.ai_advisor.analyst import DEFAULT_MAX_STEPS, MAX_MAX_STEPS, run_analyst
 from t3_engine.ai_advisor.analyst_tools import ToolError
@@ -142,7 +144,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-015"
+BUILD_VERSION = "BUILD-CHECK-016"
 
 
 @app.get("/api/health")
@@ -155,6 +157,21 @@ def health():
 # instead of hitting instruments-info on every dashboard page load. ---
 _symbols_cache: Dict[str, object] = {"symbols": None, "fetched_at": 0.0, "source": "live"}
 _SYMBOLS_CACHE_TTL_SECONDS = 3600.0
+
+
+@app.get("/api/ai/config")
+def ai_config():
+    """What the AI tab needs to render itself, and nothing secret.
+
+    `server_key` is a BOOLEAN, never the key. The UI uses it to say "you can
+    leave the key field empty" instead of making the user guess why a blank
+    field sometimes works."""
+    return {
+        "server_key": bool(SERVER_AI_KEY),
+        "model": DEFAULT_AI_MODEL,
+        "base_url": DEFAULT_AI_API_BASE,
+        "provider": "NVIDIA API Catalog",
+    }
 
 
 @app.get("/api/symbols")
@@ -393,29 +410,33 @@ def live_state(symbol: str = Query(...), timeframe: str = Query("5m")):
 
 
 @app.post("/api/ai/advice")
-def ai_advice(api_key: str = Body(..., embed=True), context: dict = Body(..., embed=True),
+def ai_advice(context: dict = Body(..., embed=True), api_key: str = Body("", embed=True),
               model: str = Body(DEFAULT_AI_MODEL, embed=True),
               base_url: str = Body(DEFAULT_AI_API_BASE, embed=True),
-              timeout: float = Body(DEFAULT_READ_TIMEOUT, embed=True, gt=0, le=MAX_READ_TIMEOUT)):
+              timeout: float = Body(DEFAULT_READ_TIMEOUT, embed=True, gt=0, le=MAX_READ_TIMEOUT),
+              reasoning_effort: str = Body("", embed=True)):
     """BYO-key OrcaRouter second opinion. The key is used for exactly one
     outbound request and never written to disk/DB/logs - see
     ai_advisor/advisor.py's docstring for why this only ever produces
     commentary, never a trading decision."""
     try:
-        result = request_commentary(api_key, context, model=model, base_url=base_url, timeout=timeout)
+        result = request_commentary(resolve_api_key(api_key), context, model=model,
+                                    base_url=base_url, timeout=timeout,
+                                    reasoning_effort=reasoning_effort)
     except AIAdvisorError as exc:
         raise HTTPException(502, str(exc))
     return {"commentary": result.text, "model": result.model}
 
 
 @app.post("/api/ai/label")
-def ai_label(api_key: str = Body(..., embed=True), source: str = Body("synthetic", embed=True),
+def ai_label(api_key: str = Body("", embed=True), source: str = Body("synthetic", embed=True),
              symbol: str = Body("SYNTHETIC", embed=True), timeframe: str = Body("5m", embed=True),
              limit: int = Body(1500, embed=True, ge=100, le=10000),
              cycles: int = Body(2, embed=True, ge=1, le=10),
              model: str = Body(DEFAULT_AI_MODEL, embed=True),
              base_url: str = Body(DEFAULT_AI_API_BASE, embed=True),
-             timeout: float = Body(DEFAULT_READ_TIMEOUT, embed=True, gt=0, le=MAX_READ_TIMEOUT)):
+             timeout: float = Body(DEFAULT_READ_TIMEOUT, embed=True, gt=0, le=MAX_READ_TIMEOUT),
+             reasoning_effort: str = Body("", embed=True)):
     """AI wave-labelling mode: the model proposes a count over the WHOLE
     loaded history - the one thing the deterministic engine deliberately
     won't do, since it only ever anchors on recent pivots.
@@ -454,13 +475,14 @@ def ai_label(api_key: str = Body(..., embed=True), source: str = Body("synthetic
 
     try:
         proposal = request_wave_count(
-            api_key,
+            resolve_api_key(api_key),
             [{"index": i, "time": p.timestamp // 1000, "price": p.price, "kind": p.kind}
              for i, p in enumerate(pivots)],
             direction.value,
             model=model,
             base_url=base_url,
             timeout=timeout,
+            reasoning_effort=reasoning_effort,
         )
     except AIAdvisorError as exc:
         raise HTTPException(502, str(exc))
@@ -495,7 +517,7 @@ def ai_label(api_key: str = Body(..., embed=True), source: str = Body("synthetic
 
 
 @app.post("/api/ai/ping")
-def ai_ping_endpoint(api_key: str = Body(..., embed=True),
+def ai_ping_endpoint(api_key: str = Body("", embed=True),
                      model: str = Body(DEFAULT_AI_MODEL, embed=True),
                      base_url: str = Body(DEFAULT_AI_API_BASE, embed=True),
                      timeout: float = Body(60.0, embed=True, gt=0, le=MAX_READ_TIMEOUT)):
@@ -509,7 +531,7 @@ def ai_ping_endpoint(api_key: str = Body(..., embed=True),
     all correct and any later failure is about how long the real work
     takes. If it doesn't, the error names which of the three is wrong."""
     try:
-        return ai_ping(api_key, model=model, base_url=base_url, timeout=timeout)
+        return ai_ping(resolve_api_key(api_key), model=model, base_url=base_url, timeout=timeout)
     except AIAdvisorError as exc:
         # 200 with ok:false, not a 5xx: the REQUEST was fine, the answer is
         # "your setup doesn't work and here is which part". A 502 here would
@@ -518,13 +540,14 @@ def ai_ping_endpoint(api_key: str = Body(..., embed=True),
 
 
 @app.post("/api/ai/analyst")
-def ai_analyst(api_key: str = Body(..., embed=True), source: str = Body("synthetic", embed=True),
+def ai_analyst(api_key: str = Body("", embed=True), source: str = Body("synthetic", embed=True),
                symbol: str = Body("SYNTHETIC", embed=True), timeframe: str = Body("5m", embed=True),
                limit: int = Body(1500, embed=True, ge=100, le=10000),
                cycles: int = Body(2, embed=True, ge=1, le=10),
                model: str = Body(DEFAULT_AI_MODEL, embed=True),
                base_url: str = Body(DEFAULT_AI_API_BASE, embed=True),
                timeout: float = Body(DEFAULT_READ_TIMEOUT, embed=True, gt=0, le=MAX_READ_TIMEOUT),
+               reasoning_effort: str = Body("", embed=True),
                max_steps: int = Body(DEFAULT_MAX_STEPS, embed=True, ge=1, le=MAX_MAX_STEPS)):
     """The AI analyst: label a CLEAN chart from scratch, as an agent.
 
@@ -549,8 +572,9 @@ def ai_analyst(api_key: str = Body(..., embed=True), source: str = Body("synthet
     candles, symbol, tf = load_candles(source, symbol, timeframe, limit, cycles)
 
     try:
-        result = run_analyst(api_key, candles, tf, symbol=symbol, model=model,
-                             max_steps=max_steps, base_url=base_url, timeout=timeout)
+        result = run_analyst(resolve_api_key(api_key), candles, tf, symbol=symbol, model=model,
+                             max_steps=max_steps, base_url=base_url, timeout=timeout,
+                             reasoning_effort=reasoning_effort)
     except ToolError as exc:
         raise HTTPException(422, str(exc))
     except AIAdvisorError as exc:

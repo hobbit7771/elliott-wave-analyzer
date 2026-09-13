@@ -17,7 +17,7 @@
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine, live
 market data from Bybit USDT perpetuals (see "Mobile app + live Bybit"
-below for why Binance was dropped). 280 automated tests, all passing,
+below for why Binance was dropped). 296 automated tests, all passing,
 cover every module described below.
 
 ## Read this first: what "done" means here
@@ -85,12 +85,12 @@ t3_engine/
   pipeline/           live_loop.py - the section-20 event-driven real-time orchestrator
   dashboard/           FastAPI backend + static/index.html (lightweight-charts UI),
                       PWA manifest/service worker, live-pipeline start/stop/state endpoints
-  ai_advisor/         optional BYO-key OrcaRouter layer: second opinion, one-shot wave-labelling,
+  ai_advisor/         optional NVIDIA-API-Catalog layer: second opinion, one-shot wave-labelling,
                       and the AI Analyst agent (playbook.py = the rulebook it is given,
                       analyst_tools.py = the tools it may use). Never a decision-maker.
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                280 tests, one file per module above
+tests/                296 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Bybit in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -329,12 +329,16 @@ desktop web page:
   import time so every module's logger actually reaches stdout. This is
   exactly what surfaced the Bybit fallback working in production (see the
   first bullet above).
-- **AI tab (OrcaRouter, BYO key)**: paste your own OrcaRouter key (from
-  `orcarouter.ai` - stored only in your browser's `localStorage`,
-  forwarded per-request and never written to disk server-side, see
-  `ai_advisor/advisor.py`). The wire format is OpenAI-compatible chat
-  completions, so any model the router carries can answer. Three separate
-  features, with deliberately different amounts of trust:
+- **AI tab (NVIDIA API Catalog)**: runs against
+  `integrate.api.nvidia.com/v1`, `moonshotai/kimi-k3` by default. The key
+  can come from the browser (stored only in `localStorage`, forwarded
+  per-request, never written to disk server-side) or from `T3_AI_API_KEY`
+  on the server, with a request's own key always winning. **A server-side
+  key makes the app an open proxy** to whoever owns it, because this
+  dashboard has no login - `/api/ai/config` therefore reports only
+  *whether* one exists, never its value. The wire format is
+  OpenAI-compatible chat completions. Three separate features, with
+  deliberately different amounts of trust:
   - **Second opinion** (`/api/ai/advice`): a skeptical plain-text critique
     of the current scenario/signal. Strictly advisory - it can never
     accept/reject a trade or move a stop; the rule-based engine already
@@ -349,23 +353,21 @@ desktop web page:
 
   Both the **model id and the API base URL are editable in the AI tab**
   (saved next to the key in `localStorage`) rather than pinned in the code.
-  For the model, because a router's catalogue - which models exist, are
-  free, or support tool calling - changes week to week, so the correct
-  model is a property of whose key it is, not of this deployment. For the
-  endpoint, for a blunter reason: **the build sandbox cannot reach
-  `orcarouter.ai`** (its egress proxy refuses the connection), so
-  `/api/v1/chat/completions` is the OpenAI-compatible convention every
-  router of this kind exposes, *not* a path verified against the live
-  service. If every call 404s regardless of model, that path is wrong and
-  the fix is a paste, not a redeploy. `T3_AI_API_BASE` sets it
-  server-side; a pasted full endpoint is not doubled up.
+  Catalogues change - which models exist and which support tool calling -
+  and the build sandbox cannot reach `integrate.api.nvidia.com` to confirm
+  anything, so the defaults come from NVIDIA's own API-catalog snippet
+  rather than from a verified call. If every request 404s regardless of
+  model, the endpoint is wrong and the fix is a paste, not a redeploy.
+  `T3_AI_API_BASE` sets it server-side; a pasted full endpoint is not
+  doubled up.
 
   The API's own error text is surfaced verbatim plus a hint, and the status
-  code is most of the diagnosis: `404` = the model id or the base URL,
-  `401/403` = the key, `402` = credit, `429` = the free tier's rate limit.
-  A `200` carrying an error body is treated as an error too - a router can
-  answer OK while the upstream vendor refused, and printing that as an
-  empty second opinion would read as "the model had no concerns".
+  code is most of the diagnosis: `404` = the model id or the endpoint,
+  `401/403` = the key, `400` = a parameter this model rejects (clear
+  reasoning effort or seed), `429` = rate limit. A `200` carrying an error
+  body - including one that arrives mid-stream, after the headers already
+  said OK - is treated as an error too, since printing it as an empty
+  second opinion would read as "the model had no concerns".
 
   **Timeouts are split by phase**, because one number for everything gives
   the wrong diagnosis. Connecting is either fast or broken (15s); *reading*
@@ -382,10 +384,29 @@ desktop web page:
   error" - and this separates a broken setup from a slow job in a few
   seconds rather than after a multi-minute run.
 
+  **Chat calls stream** (SSE), and the chunks are reassembled into the
+  ordinary response shape before anything downstream sees them. This is not
+  cosmetic: a heavy reasoning model can think for minutes before its first
+  visible token, and a non-streaming request spends that time on a silent
+  socket - which production hit as a read timeout that discarded a whole
+  run. Streaming keeps resetting the read clock, so the wait is bounded by
+  the whole-run budget instead of by one silent gap. The tool-call
+  reassembler keys fragments on `index`, because arguments arrive a few
+  characters at a time and two parallel calls interleave - splicing them
+  produces JSON that parses fine and describes a wave nobody proposed.
+
+  **Reasoning effort** and **seed** are sent only when set. NVIDIA's own
+  snippet for this model uses `reasoning_effort: max` - the best answer and
+  by far the slowest, and the analyst makes one call per step, so the cost
+  multiplies. An unsupported parameter is a `400` rather than a graceful
+  ignore, and the endpoint is user-editable, so an unset field is an
+  *absent* field. The seed defaults to 0 so the same chart tends to produce
+  the same count.
+
   Provider history, since this keeps moving: OpenAI → Google Gemini →
-  OrcaRouter. Nothing downstream of `ai_advisor/` cares which model
-  answered, which is why each swap has been a rewrite of one module plus
-  its tests rather than of the engine.
+  OrcaRouter → NVIDIA API Catalog. Nothing downstream of `ai_advisor/`
+  cares which model answered, which is why each swap has been a rewrite of
+  one module plus its tests rather than of the engine.
 
 ## The wave-count model: one chain, one current count
 
@@ -477,8 +498,8 @@ this server executes (`ai_advisor/analyst_tools.py`):
 | `check_count(...)` | **Runs the real rule engine** and returns the rule that broke. |
 | `submit_count(...)` | The final answer - re-validated before it is accepted. |
 
-The loop needs a model that supports **tool calling**. Not every model on
-OrcaRouter does, and one that doesn't will answer in prose instead - which
+The loop needs a model that supports **tool calling**. Not every catalogue
+model does, and one that doesn't will answer in prose instead - which
 comes back as `finished: false` with the model's own last message attached,
 rather than as an empty result presented as a finished analysis.
 
@@ -546,8 +567,9 @@ independently.
    trade history that persists, add a Render Postgres instance and set
    `T3_DATABASE_URL` to its connection string (see `.env.example`).
 4. Nothing here needs a Bybit API key (market data is public). If you
-   later want the AI tab to work, you (or your users) just paste an
-   OrcaRouter key into the browser - no server-side config needed either,
+   later want the AI tab to work, either set `T3_AI_API_KEY` on the service
+   or let each user paste their own key into the browser - no other
+   server-side config is needed,
    and the deterministic path runs fully without one.
 
 ### Troubleshooting: "Exited with status 1 while building your code" /
@@ -585,7 +607,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (280 tests)
+# Run the automated test suite (296 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)

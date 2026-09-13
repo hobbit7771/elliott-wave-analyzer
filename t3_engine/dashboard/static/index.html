@@ -143,42 +143,39 @@
     </div>
     <div id="tab-ai" style="display:none;">
       <div class="note">
-        Bring your own OrcaRouter API key (<code>orcarouter.ai</code>). It is sent to your own
-        backend for one request at a time, forwarded to OrcaRouter, and never stored server-side — see
-        <code>ai_advisor/advisor.py</code>. The model can give a second opinion and propose a wave count;
-        it can never override the rule-based engine's accept/reject decision.
+        Runs on the <strong>NVIDIA API Catalog</strong> (<code>integrate.api.nvidia.com</code>),
+        <code>moonshotai/kimi-k3</code> by default. If the server has a key configured you can leave the
+        field below empty; otherwise paste your own — it is sent to your own backend for one request at
+        a time and never stored server-side (see <code>ai_advisor/advisor.py</code>). The model can give
+        a second opinion and propose a wave count; it can never override the rule-based engine's
+        accept/reject decision.
       </div>
-      <h2>OrcaRouter API key</h2>
+      <h2>API key</h2>
       <div class="field-row">
-        <input id="aiKey" type="password" placeholder="your OrcaRouter key" />
+        <input id="aiKey" type="password" placeholder="nvapi-… (optional if the server has one)" />
         <button class="panel-btn" id="saveKey">Save</button>
       </div>
-      <div class="hint">Saved only in this browser (localStorage), never sent anywhere except your own backend.</div>
+      <div class="hint" id="serverKeyHint">Saved only in this browser (localStorage), never sent anywhere except your own backend.</div>
 
       <h2>Model</h2>
       <div class="field-row">
-        <input id="aiModel" type="text" placeholder="deepseek/deepseek-v4-flash-free" />
+        <input id="aiModel" type="text" placeholder="moonshotai/kimi-k3" />
       </div>
       <div class="hint">
-        A router id, <code>vendor/model</code> — e.g. <code>deepseek/deepseek-v4-flash</code>, or
-        <code>orcarouter/free</code> to let the router pick by complexity. Editable because a router's
-        catalogue changes constantly; if a call comes back <code>404</code>, the id no longer resolves —
-        check the Models page and paste the current one here. Saved with the key, no redeploy needed.
-        The AI Analyst needs a model that supports <em>tool calling</em>; one that doesn't will answer
-        in prose and submit nothing.
+        A catalogue id, <code>vendor/model</code>. Editable because catalogues change; if a call comes
+        back <code>404</code> the id no longer resolves — paste the current one here, no redeploy
+        needed. The AI Analyst needs a model that supports <em>tool calling</em>; one that doesn't will
+        answer in prose and submit nothing.
       </div>
 
       <h2>API base URL</h2>
       <div class="field-row">
-        <input id="aiBaseUrl" type="text" placeholder="https://api.orcarouter.ai/v1" />
+        <input id="aiBaseUrl" type="text" placeholder="https://integrate.api.nvidia.com/v1" />
       </div>
       <div class="hint">
-        The default is the URL a production run reached successfully at the transport level — it
-        failed on a <em>read</em> timeout, meaning the connection and the request went through and the
-        model was still working. Still editable, because this build cannot reach
-        <code>orcarouter.ai</code> to confirm it: if every call returns <code>404</code> no matter which
-        model you pick, the path is wrong — paste the one from OrcaRouter's docs. Pasting the full
-        endpoint works too; it won't be doubled up.
+        From NVIDIA's own API-catalog snippet. This build cannot reach the host to confirm it, so it
+        stays editable: if every call returns <code>404</code> no matter which model you pick, the path
+        is wrong. Pasting the full endpoint works too; it won't be doubled up.
       </div>
 
       <h2>Timeout</h2>
@@ -190,6 +187,23 @@
         reasoning models think before emitting a first token, so a slow reply is normal — a read
         timeout means the connection worked and the model was still busy, which is a different
         problem from a wrong URL.
+      </div>
+
+      <h2>Reasoning effort</h2>
+      <div class="field-row">
+        <select id="aiEffort" style="flex:1;">
+          <option value="">Not sent (model default)</option>
+          <option value="low">low</option>
+          <option value="medium">medium</option>
+          <option value="high">high</option>
+          <option value="max">max</option>
+        </select>
+      </div>
+      <div class="hint">
+        NVIDIA's snippet for this model uses <code>max</code> — the best answer and by far the slowest.
+        The analyst makes one call per step, so the cost multiplies: <code>max</code> with a 14-step
+        budget is a very long run. Left unsent by default, because a model that doesn't know this
+        parameter answers <code>400</code> rather than ignoring it.
       </div>
 
       <h2>Check the connection</h2>
@@ -932,7 +946,6 @@ function renderAnalystStructures(data) {
 document.getElementById('runAnalyst').addEventListener('click', async () => {
   const apiKey = aiKey();
   const statusEl = document.getElementById('analystStatus');
-  if (!apiKey) { statusEl.textContent = 'Enter and save your OrcaRouter API key in the AI Advisor tab first.'; return; }
   const source = document.getElementById('source').value;
   if (source === 'live') {
     statusEl.textContent = 'Switch to Synthetic or Bybit (history) — the analyst works a loaded history, not a live stream.';
@@ -950,6 +963,7 @@ document.getElementById('runAnalyst').addEventListener('click', async () => {
         model: aiModel(),
         base_url: aiBaseUrl(),
         timeout: aiTimeout(),
+        reasoning_effort: aiEffort(),
         source,
         symbol: normalizeSymbol(document.getElementById('symbol').value),
         timeframe: document.getElementById('timeframe').value,
@@ -990,17 +1004,18 @@ document.getElementById('runAnalyst').addEventListener('click', async () => {
   }
 });
 
-// ---- AI advisor + labelling (BYO OrcaRouter key) ----
+// ---- AI advisor + labelling (NVIDIA API Catalog) ----
 // Storage keys are provider-scoped: a key left over from a previous
 // provider would be silently forwarded to this one and rejected as
 // invalid, which reads as "the app is broken" rather than "that key is for
 // the wrong service". Bumped on every provider change for that reason.
-const KEY_STORAGE = 't3_orcarouter_key';
-const MODEL_STORAGE = 't3_orcarouter_model';
-const BASE_URL_STORAGE = 't3_orcarouter_base_url';
-const DEFAULT_AI_MODEL = 'deepseek/deepseek-v4-flash-free';
-const TIMEOUT_STORAGE = 't3_orcarouter_timeout';
-const DEFAULT_AI_BASE_URL = 'https://api.orcarouter.ai/v1';
+const KEY_STORAGE = 't3_nvidia_key';
+const MODEL_STORAGE = 't3_nvidia_model';
+const BASE_URL_STORAGE = 't3_nvidia_base_url';
+const DEFAULT_AI_MODEL = 'moonshotai/kimi-k3';
+const TIMEOUT_STORAGE = 't3_nvidia_timeout';
+const EFFORT_STORAGE = 't3_nvidia_effort';
+const DEFAULT_AI_BASE_URL = 'https://integrate.api.nvidia.com/v1';
 const DEFAULT_AI_TIMEOUT = 180;
 
 function aiKey() {
@@ -1032,12 +1047,26 @@ function aiTimeout() {
 }
 document.getElementById('aiTimeout').value =
   Number(localStorage.getItem(TIMEOUT_STORAGE)) || DEFAULT_AI_TIMEOUT;
+function aiEffort() { return document.getElementById('aiEffort').value; }
+document.getElementById('aiEffort').value = localStorage.getItem(EFFORT_STORAGE) || '';
+
+// Whether the SERVER holds a key. Never the key itself - the endpoint
+// returns a boolean. Without this, an empty field that silently works
+// looks like a bug rather than a configured deployment.
+fetch('/api/ai/config').then(r => r.json()).then(cfg => {
+  if (cfg.server_key) {
+    document.getElementById('serverKeyHint').textContent =
+      'This server already has a key configured — leave the field empty to use it. A key typed here '
+      + 'overrides it and stays in this browser only.';
+  }
+}).catch(() => {});
 document.getElementById('saveKey').addEventListener('click', () => {
   localStorage.setItem(KEY_STORAGE, document.getElementById('aiKey').value.trim());
   localStorage.setItem(MODEL_STORAGE, aiModel());
   localStorage.setItem(BASE_URL_STORAGE, aiBaseUrl());
   localStorage.setItem(TIMEOUT_STORAGE, String(aiTimeout()));
-  document.getElementById('aiStatus').textContent = 'Key, model, API URL and timeout saved in this browser.';
+  localStorage.setItem(EFFORT_STORAGE, aiEffort());
+  document.getElementById('aiStatus').textContent = 'Settings saved in this browser.';
 });
 
 // Connection check. Deliberately its own button: every setup mistake and
@@ -1046,7 +1075,6 @@ document.getElementById('saveKey').addEventListener('click', () => {
 document.getElementById('pingAi').addEventListener('click', async () => {
   const apiKey = aiKey();
   const statusEl = document.getElementById('pingStatus');
-  if (!apiKey) { statusEl.textContent = 'Enter and save your OrcaRouter API key first.'; return; }
   statusEl.textContent = 'Sending one tiny request…';
   try {
     const resp = await fetchWithTimeout('/api/ai/ping', {
@@ -1067,7 +1095,6 @@ document.getElementById('askAi').addEventListener('click', async () => {
   const apiKey = aiKey();
   const statusEl = document.getElementById('aiStatus');
   const answerEl = document.getElementById('ai-answer');
-  if (!apiKey) { statusEl.textContent = 'Enter and save your OrcaRouter API key first.'; return; }
   if (!lastData) { statusEl.textContent = 'Run an analysis first.'; return; }
 
   const primary = lastData.scenarios[0];
@@ -1093,7 +1120,8 @@ document.getElementById('askAi').addEventListener('click', async () => {
     const resp = await fetchWithTimeout('/api/ai/advice', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ api_key: apiKey, context, model: aiModel(),
-                             base_url: aiBaseUrl(), timeout: aiTimeout() }),
+                             base_url: aiBaseUrl(), timeout: aiTimeout(),
+                             reasoning_effort: aiEffort() }),
     }, 90000);
     const data = await resp.json();
     if (!resp.ok) { statusEl.textContent = data.detail || 'Request failed.'; return; }
@@ -1112,7 +1140,6 @@ document.getElementById('askAiLabel').addEventListener('click', async () => {
   const apiKey = aiKey();
   const statusEl = document.getElementById('aiLabelStatus');
   const answerEl = document.getElementById('ai-label-answer');
-  if (!apiKey) { statusEl.textContent = 'Enter and save your OrcaRouter API key first.'; return; }
 
   const source = document.getElementById('source').value;
   if (source === 'live') {
@@ -1130,6 +1157,7 @@ document.getElementById('askAiLabel').addEventListener('click', async () => {
         model: aiModel(),
         base_url: aiBaseUrl(),
         timeout: aiTimeout(),
+        reasoning_effort: aiEffort(),
         source,
         symbol: normalizeSymbol(document.getElementById('symbol').value),
         timeframe: document.getElementById('timeframe').value,

@@ -46,10 +46,12 @@ import httpx
 from t3_engine.ai_advisor.advisor import (
     DEFAULT_MODEL,
     DEFAULT_READ_TIMEOUT,
+    DEFAULT_SEED,
     AIAdvisorError,
     _finish_reason,
     _message_of,
     _post,
+    apply_model_options,
 )
 from t3_engine.ai_advisor.analyst_tools import (
     AnalystToolbox,
@@ -71,7 +73,7 @@ DEFAULT_RUN_BUDGET_SECONDS = 480.0
 # Generous on purpose. The failure this replaces was a count truncated
 # mid-JSON because 2048 tokens covered the model's thinking but not its
 # answer; a labelling run that reasons across a whole history needs room.
-ANALYST_MAX_OUTPUT_TOKENS = 8192
+ANALYST_MAX_OUTPUT_TOKENS = 16384
 
 
 @dataclass
@@ -119,14 +121,16 @@ def opening_brief(candles: List[Candle], symbol: str, degree: Timeframe) -> str:
     )
 
 
-def _tool_payload(system_prompt: str, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
-    return {
+def _tool_payload(system_prompt: str, messages: List[Dict[str, Any]],
+                  seed: Optional[int] = DEFAULT_SEED,
+                  reasoning_effort: Optional[str] = None) -> Dict[str, Any]:
+    return apply_model_options({
         "messages": [{"role": "system", "content": system_prompt}] + messages,
         "tools": openai_tools(),
         "tool_choice": "auto",
         "temperature": 0.15,   # labelling is analysis, not invention
         "max_tokens": ANALYST_MAX_OUTPUT_TOKENS,
-    }
+    }, seed=seed, reasoning_effort=reasoning_effort)
 
 
 def _assistant_turn(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -170,7 +174,9 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
                 model: str = DEFAULT_MODEL, max_steps: int = DEFAULT_MAX_STEPS,
                 client: Optional[httpx.Client] = None, timeout: float = DEFAULT_READ_TIMEOUT,
                 base_url: Optional[str] = None,
-                run_budget_seconds: float = DEFAULT_RUN_BUDGET_SECONDS) -> AnalystResult:
+                run_budget_seconds: float = DEFAULT_RUN_BUDGET_SECONDS,
+                seed: Optional[int] = DEFAULT_SEED,
+                reasoning_effort: Optional[str] = None) -> AnalystResult:
     """Run the label-from-scratch loop and return whatever survived
     validation.
 
@@ -200,7 +206,8 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
             break
         steps_used = step + 1
         try:
-            data = _post(api_key, model, _tool_payload(ELLIOTT_PLAYBOOK, messages),
+            data = _post(api_key, model,
+                         _tool_payload(ELLIOTT_PLAYBOOK, messages, seed, reasoning_effort),
                          client, timeout, base_url)
             message = _assistant_turn(data)
         except AIAdvisorError as exc:
