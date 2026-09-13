@@ -2,6 +2,8 @@ import asyncio
 from unittest.mock import patch
 
 import httpx
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
 import t3_engine.dashboard.server as server_module
@@ -209,19 +211,30 @@ def test_index_ai_tab_is_wired_to_the_current_provider():
     GONE, not merely joined by the new one."""
     resp = client.get("/")
     assert "aiKey" in resp.text
-    assert "openrouter.ai" in resp.text
+    assert "orcarouter.ai" in resp.text
     assert "geminiKey" not in resp.text
     assert "aistudio.google.com" not in resp.text
     assert "openaiKey" not in resp.text
+    assert "openrouter.ai" not in resp.text
 
 
 def test_a_key_saved_for_an_old_provider_is_not_reused_for_the_new_one():
-    """localStorage survives the provider swap. Sending a leftover Google
-    key to OpenRouter would fail as "invalid key", which reads as "the app
-    is broken" rather than "that key is for the wrong service"."""
+    """localStorage survives a provider swap. Forwarding a leftover key
+    from the previous provider would fail as "invalid key", which reads as
+    "the app is broken" rather than "that key is for the wrong service"."""
     resp = client.get("/")
-    assert "t3_openrouter_key" in resp.text
+    assert "t3_orcarouter_key" in resp.text
     assert "t3_gemini_key" not in resp.text
+    assert "t3_openrouter_key" not in resp.text
+
+
+def test_index_lets_the_api_base_url_be_edited():
+    """The endpoint could not be verified from the build sandbox, so it is
+    a field rather than a constant - if the real path differs, that is a
+    paste, not a redeploy."""
+    resp = client.get("/")
+    assert "aiBaseUrl" in resp.text
+    assert server_module.DEFAULT_AI_API_BASE in resp.text
 
 
 def test_index_exposes_the_ai_labelling_mode():
@@ -441,7 +454,7 @@ def test_ai_advice_success_with_a_mocked_model():
         raw = {}
 
     with patch.object(server_module, "request_commentary", return_value=FakeResponse()):
-        resp = client.post("/api/ai/advice", json={"api_key": "sk-or-test", "context": {"wave": "3"}})
+        resp = client.post("/api/ai/advice", json={"api_key": "sk-test", "context": {"wave": "3"}})
         assert resp.status_code == 200
         assert "wave 3" in resp.json()["commentary"].lower()
 
@@ -471,7 +484,7 @@ def test_ai_label_rejects_a_hallucinated_pivot_index_instead_of_drawing_it():
     nonsense = [{"label": "1", "start_pivot_index": 0, "end_pivot_index": 99999}]
 
     with patch.object(server_module, "request_wave_count", return_value=_FakeProposal(nonsense)):
-        resp = client.post("/api/ai/label", json={"api_key": "sk-or-test", "source": "synthetic", "cycles": 2})
+        resp = client.post("/api/ai/label", json={"api_key": "sk-test", "source": "synthetic", "cycles": 2})
     assert resp.status_code == 200
     data = resp.json()
     assert data["valid"] is False
@@ -490,7 +503,7 @@ def test_ai_label_rejects_a_count_that_breaks_a_hard_elliott_rule():
     wave 2 retraces straight past the start of wave 1. The server rebuilds
     it from its OWN pivots, the hard rules fire, and the answer is a
     labelled failure rather than a drawn wave."""
-    def label_five_consecutive(api_key, pivots, direction, model=None):
+    def label_five_consecutive(api_key, pivots, direction, model=None, base_url=None):
         start = _first_index_of_kind(pivots, "HIGH" if direction == "DOWN" else "LOW")
         return _FakeProposal([
             {"label": label, "start_pivot_index": start + i, "end_pivot_index": start + i + 1}
@@ -498,7 +511,7 @@ def test_ai_label_rejects_a_count_that_breaks_a_hard_elliott_rule():
         ])
 
     with patch.object(server_module, "request_wave_count", side_effect=label_five_consecutive):
-        resp = client.post("/api/ai/label", json={"api_key": "sk-or-test", "source": "synthetic", "cycles": 2})
+        resp = client.post("/api/ai/label", json={"api_key": "sk-test", "source": "synthetic", "cycles": 2})
     assert resp.status_code == 200
     data = resp.json()
     assert data["valid"] is False
@@ -514,14 +527,14 @@ def test_ai_label_accepts_and_returns_server_built_waves_for_a_legal_count():
     server's pivots - the model supplied indices, never prices."""
     captured = {}
 
-    def label_from_real_pivots(api_key, pivots, direction, model=None):
+    def label_from_real_pivots(api_key, pivots, direction, model=None, base_url=None):
         captured["pivots"] = pivots
         captured["direction"] = direction
         start = _first_index_of_kind(pivots, "HIGH" if direction == "DOWN" else "LOW")
         return _FakeProposal([{"label": "1", "start_pivot_index": start, "end_pivot_index": start + 1}])
 
     with patch.object(server_module, "request_wave_count", side_effect=label_from_real_pivots):
-        resp = client.post("/api/ai/label", json={"api_key": "sk-or-test", "source": "synthetic", "cycles": 2})
+        resp = client.post("/api/ai/label", json={"api_key": "sk-test", "source": "synthetic", "cycles": 2})
     assert resp.status_code == 200
     data = resp.json()
     assert data["rejected"] is False
@@ -539,13 +552,13 @@ def test_ai_label_never_takes_pivots_from_the_caller():
     """If the client could supply pivots, "the server validated the
     indices" would be a claim about the caller's data, not the chart.
     Client-sent pivots must be ignored outright."""
-    def echo_pivot_count(api_key, pivots, direction, model=None):
+    def echo_pivot_count(api_key, pivots, direction, model=None, base_url=None):
         return _FakeProposal([{"label": "1", "start_pivot_index": 0, "end_pivot_index": 1}],
                              reasoning=f"saw {len(pivots)} pivots")
 
     with patch.object(server_module, "request_wave_count", side_effect=echo_pivot_count):
         resp = client.post("/api/ai/label", json={
-            "api_key": "sk-or-test", "source": "synthetic", "cycles": 2,
+            "api_key": "sk-test", "source": "synthetic", "cycles": 2,
             "pivots": [{"index": 0, "price": 1.0, "kind": "LOW"}],  # attacker-supplied, must be ignored
         })
     assert resp.status_code == 200
@@ -602,7 +615,7 @@ def test_analyst_returns_the_exact_candles_it_analysed():
 
     with patch.object(server_module, "run_analyst", side_effect=fake_run):
         resp = client.post("/api/ai/analyst",
-                           json={"api_key": "sk-or-test", "source": "synthetic", "cycles": 2})
+                           json={"api_key": "sk-test", "source": "synthetic", "cycles": 2})
     assert resp.status_code == 200
     data = resp.json()
     assert len(data["candles"]) == len(seen["candles"])
@@ -618,7 +631,7 @@ def test_analyst_reports_rejected_structures_rather_than_hiding_them():
     with patch.object(server_module, "run_analyst",
                       return_value=_FakeAnalystResult([], rejected=rejected)):
         resp = client.post("/api/ai/analyst",
-                           json={"api_key": "sk-or-test", "source": "synthetic", "cycles": 2})
+                           json={"api_key": "sk-test", "source": "synthetic", "cycles": 2})
     data = resp.json()
     assert data["accepted"] == []
     assert data["rejected"][0]["broken_rule"] == "WAVE4_OVERLAPS_WAVE1"
@@ -634,7 +647,7 @@ def test_analyst_passes_the_model_name_and_step_budget_through():
 
     with patch.object(server_module, "run_analyst", side_effect=fake_run):
         client.post("/api/ai/analyst", json={
-            "api_key": "sk-or-test", "source": "synthetic", "cycles": 2,
+            "api_key": "sk-test", "source": "synthetic", "cycles": 2,
             "model": "anthropic/some-other-model", "max_steps": 7,
         })
     assert seen["model"] == "anthropic/some-other-model"
@@ -643,7 +656,7 @@ def test_analyst_passes_the_model_name_and_step_budget_through():
 
 def test_analyst_step_budget_is_bounded_by_the_api_not_only_by_the_ui():
     resp = client.post("/api/ai/analyst", json={
-        "api_key": "sk-or-test", "source": "synthetic", "cycles": 2, "max_steps": 5000})
+        "api_key": "sk-test", "source": "synthetic", "cycles": 2, "max_steps": 5000})
     assert resp.status_code == 422
 
 
@@ -655,3 +668,28 @@ def test_switching_to_the_analyst_tab_actually_reveals_its_chart():
     resp = client.get("/")
     assert "onAnalyst ? 'block' : 'none'" in resp.text
     assert "onAnalyst ? '' : 'none'" not in resp.text
+
+
+def test_the_api_base_url_reaches_every_ai_endpoint():
+    """A base URL the UI keeps to itself would be a field that looks like
+    it works and doesn't."""
+    seen = {}
+
+    def fake_run(api_key, candles, degree, **kwargs):
+        seen["analyst"] = kwargs.get("base_url")
+        return _FakeAnalystResult([])
+
+    with patch.object(server_module, "run_analyst", side_effect=fake_run):
+        client.post("/api/ai/analyst", json={
+            "api_key": "sk-test", "source": "synthetic", "cycles": 2,
+            "base_url": "https://orcarouter.ai/v2"})
+    assert seen["analyst"] == "https://orcarouter.ai/v2"
+
+    def fake_commentary(api_key, context, model=None, base_url=None):
+        seen["advice"] = base_url
+        return SimpleNamespace(text="ok", model=model)
+
+    with patch.object(server_module, "request_commentary", side_effect=fake_commentary):
+        client.post("/api/ai/advice", json={
+            "api_key": "sk-test", "context": {}, "base_url": "https://orcarouter.ai/v2"})
+    assert seen["advice"] == "https://orcarouter.ai/v2"

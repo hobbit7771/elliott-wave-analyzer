@@ -17,7 +17,7 @@
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine, live
 market data from Bybit USDT perpetuals (see "Mobile app + live Bybit"
-below for why Binance was dropped). 264 automated tests, all passing,
+below for why Binance was dropped). 268 automated tests, all passing,
 cover every module described below.
 
 ## Read this first: what "done" means here
@@ -85,12 +85,12 @@ t3_engine/
   pipeline/           live_loop.py - the section-20 event-driven real-time orchestrator
   dashboard/           FastAPI backend + static/index.html (lightweight-charts UI),
                       PWA manifest/service worker, live-pipeline start/stop/state endpoints
-  ai_advisor/         optional BYO-key OpenRouter layer: second opinion, one-shot wave-labelling,
+  ai_advisor/         optional BYO-key OrcaRouter layer: second opinion, one-shot wave-labelling,
                       and the AI Analyst agent (playbook.py = the rulebook it is given,
                       analyst_tools.py = the tools it may use). Never a decision-maker.
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                264 tests, one file per module above
+tests/                268 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Bybit in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -329,8 +329,8 @@ desktop web page:
   import time so every module's logger actually reaches stdout. This is
   exactly what surfaced the Bybit fallback working in production (see the
   first bullet above).
-- **AI tab (OpenRouter, BYO key)**: paste your own OpenRouter key (from
-  `openrouter.ai/keys` - stored only in your browser's `localStorage`,
+- **AI tab (OrcaRouter, BYO key)**: paste your own OrcaRouter key (from
+  `orcarouter.ai` - stored only in your browser's `localStorage`,
   forwarded per-request and never written to disk server-side, see
   `ai_advisor/advisor.py`). The wire format is OpenAI-compatible chat
   completions, so any model the router carries can answer. Three separate
@@ -347,21 +347,28 @@ desktop web page:
   - **AI Analyst** (`/api/ai/analyst`): an agent that labels a clean chart
     from scratch using server-executed tools. See its own section below.
 
-  The **model id is editable in the AI tab** (saved next to the key in
-  `localStorage`) rather than pinned in the code. A router carries hundreds
-  of models from dozens of vendors, and which ones exist, are free, or
-  support tool calling changes week to week - so the correct model is a
-  property of whose key it is, not of this deployment. The API's own error
-  text is surfaced verbatim plus a hint pointing at that field, and the
-  status code is most of the diagnosis: `404` means the id no longer
-  resolves (check `openrouter.ai/models`), `401/403` is the key itself,
-  `402` is credit, `429` is the free tier's rate limit. A `200` carrying an
-  error body is treated as an error too - a router can answer OK while the
-  upstream vendor refused, and printing that as an empty second opinion
-  would read as "the model had no concerns".
+  Both the **model id and the API base URL are editable in the AI tab**
+  (saved next to the key in `localStorage`) rather than pinned in the code.
+  For the model, because a router's catalogue - which models exist, are
+  free, or support tool calling - changes week to week, so the correct
+  model is a property of whose key it is, not of this deployment. For the
+  endpoint, for a blunter reason: **the build sandbox cannot reach
+  `orcarouter.ai`** (its egress proxy refuses the connection), so
+  `/api/v1/chat/completions` is the OpenAI-compatible convention every
+  router of this kind exposes, *not* a path verified against the live
+  service. If every call 404s regardless of model, that path is wrong and
+  the fix is a paste, not a redeploy. `T3_AI_API_BASE` sets it
+  server-side; a pasted full endpoint is not doubled up.
+
+  The API's own error text is surfaced verbatim plus a hint, and the status
+  code is most of the diagnosis: `404` = the model id or the base URL,
+  `401/403` = the key, `402` = credit, `429` = the free tier's rate limit.
+  A `200` carrying an error body is treated as an error too - a router can
+  answer OK while the upstream vendor refused, and printing that as an
+  empty second opinion would read as "the model had no concerns".
 
   Provider history, since this keeps moving: OpenAI → Google Gemini →
-  OpenRouter. Nothing downstream of `ai_advisor/` cares which model
+  OrcaRouter. Nothing downstream of `ai_advisor/` cares which model
   answered, which is why each swap has been a rewrite of one module plus
   its tests rather than of the engine.
 
@@ -456,7 +463,7 @@ this server executes (`ai_advisor/analyst_tools.py`):
 | `submit_count(...)` | The final answer - re-validated before it is accepted. |
 
 The loop needs a model that supports **tool calling**. Not every model on
-OpenRouter does, and one that doesn't will answer in prose instead - which
+OrcaRouter does, and one that doesn't will answer in prose instead - which
 comes back as `finished: false` with the model's own last message attached,
 rather than as an empty result presented as a finished analysis.
 
@@ -513,7 +520,7 @@ independently.
    `T3_DATABASE_URL` to its connection string (see `.env.example`).
 4. Nothing here needs a Bybit API key (market data is public). If you
    later want the AI tab to work, you (or your users) just paste an
-   OpenRouter key into the browser - no server-side config needed either,
+   OrcaRouter key into the browser - no server-side config needed either,
    and the deterministic path runs fully without one.
 
 ### Troubleshooting: "Exited with status 1 while building your code" /
@@ -551,7 +558,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (264 tests)
+# Run the automated test suite (268 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)
