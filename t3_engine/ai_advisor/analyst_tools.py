@@ -28,6 +28,7 @@ The worst a confused model can do with these tools is waste its own steps.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -43,8 +44,13 @@ from t3_engine.market_structure.pivots import ZigZagPivotDetector
 # Guard rails on tool OUTPUT size. A 10k-candle history at a 0.2% deviation
 # produces thousands of pivots; dumping those into the context would crowd
 # out the reasoning that is the whole point of the exercise.
-MAX_PIVOTS_RETURNED = 400
-MAX_CANDLES_RETURNED = 300
+MAX_PIVOTS_RETURNED = 250
+MAX_CANDLES_RETURNED = 200
+# Prices are rounded to significant figures, not decimal places. Eight
+# decimals on a 77000-point instrument is 13 characters of noise per pivot
+# that the model then re-reads on every subsequent step, and no wave count
+# has ever turned on the ninth digit.
+PRICE_SIGNIFICANT_FIGURES = 7
 MIN_DEVIATION_PCT = 0.05
 MAX_DEVIATION_PCT = 25.0
 
@@ -66,6 +72,19 @@ class ToolCallRecord:
     name: str
     args: Dict[str, Any]
     result_summary: str
+
+
+def round_price(value: float) -> float:
+    """Round to significant figures so the same helper is right for a
+    5.9843 altcoin and a 77213.5 index."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return value
+    if number == 0:
+        return 0.0
+    magnitude = math.floor(math.log10(abs(number)))
+    return round(number, max(0, PRICE_SIGNIFICANT_FIGURES - 1 - magnitude))
 
 
 def _clamp_deviation(value: Any) -> float:
@@ -140,7 +159,8 @@ class AnalystToolbox:
                 "check_count and submit_count."
             ),
             "pivots": [
-                {"index": offset + i, "time": p.timestamp // 1000, "price": round(p.price, 8), "kind": p.kind}
+                {"index": offset + i, "time": p.timestamp // 1000,
+                 "price": round_price(p.price), "kind": p.kind}
                 for i, p in enumerate(shown)
             ],
         }
@@ -169,8 +189,8 @@ class AnalystToolbox:
             "candles_in_range": len(window),
             "sampling": f"every {step} candle(s)" if step > 1 else "every candle",
             "candles": [
-                {"i": start + i * step, "t": c.open_time // 1000, "o": c.open,
-                 "h": c.high, "l": c.low, "c": c.close}
+                {"i": start + i * step, "t": c.open_time // 1000, "o": round_price(c.open),
+                 "h": round_price(c.high), "l": round_price(c.low), "c": round_price(c.close)}
                 for i, c in enumerate(sampled)
             ],
         }
@@ -186,10 +206,10 @@ class AnalystToolbox:
         return {
             "from_pivot_index": int(from_pivot_index),
             "to_pivot_index": int(to_pivot_index),
-            "start_price": start.price,
-            "end_price": end.price,
-            "price_change": round(change, 8),
-            "length": round(abs(change), 8),
+            "start_price": round_price(start.price),
+            "end_price": round_price(end.price),
+            "price_change": round_price(change),
+            "length": round_price(abs(change)),
             "percent_change": round(change / start.price * 100, 4) if start.price else None,
             "direction": "UP" if change > 0 else "DOWN",
             "bars": end.index - start.index,
@@ -206,9 +226,9 @@ class AnalystToolbox:
             raise ToolError("That leg has zero price range - no ratios to compute")
         return {
             "leg": f"pivot {int(start_pivot_index)} ({start.price:g}) -> {int(end_pivot_index)} ({end.price:g})",
-            "length": round(abs(span), 8),
-            "retracements": {f"{r:.3f}": round(end.price - span * r, 8) for r in FIB_RETRACEMENTS},
-            "extensions": {f"{e:.3f}": round(start.price + span * e, 8) for e in FIB_EXTENSIONS},
+            "length": round_price(abs(span)),
+            "retracements": {f"{r:.3f}": round_price(end.price - span * r) for r in FIB_RETRACEMENTS},
+            "extensions": {f"{e:.3f}": round_price(start.price + span * e) for e in FIB_EXTENSIONS},
         }
 
     def check_count(self, deviation_pct: float, structure: str, waves: List[Dict[str, Any]],

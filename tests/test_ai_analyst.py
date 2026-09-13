@@ -526,3 +526,69 @@ def test_transcript_steps_are_numbered_so_you_can_see_where_it_ended():
 
     steps = sorted({e["step"] for e in result.transcript})
     assert steps == [1, 2, 3]
+
+
+def test_old_tool_results_are_collapsed_so_the_context_stops_growing():
+    """The whole conversation is resent on every step, so a pivot list sits
+    in the history and is re-read on every subsequent call. By step 8 a run
+    was carrying tens of kilobytes it had already used - latency on every
+    call, and a free tier's rate limit brought forward."""
+    from t3_engine.ai_advisor.analyst import KEEP_FULL_TOOL_RESULTS, trim_tool_history
+
+    messages = [{"role": "user", "content": "brief"}]
+    for i in range(6):
+        messages.append({"role": "assistant", "content": None, "tool_calls": [{"id": f"c{i}"}]})
+        messages.append({"role": "tool", "tool_call_id": f"c{i}", "name": "list_pivots",
+                         "content": json.dumps({"pivots": list(range(500))}),
+                         "_summary": f"list_pivots(deviation_pct={i}) -> 96 pivots"})
+    original_size = len(messages[2]["content"])
+
+    trim_tool_history(messages)
+
+    tools = [m for m in messages if m["role"] == "tool"]
+    kept = [m for m in tools if not m.get("_trimmed")]
+    assert len(kept) == KEEP_FULL_TOOL_RESULTS      # newest survive in full
+    assert kept == tools[-KEEP_FULL_TOOL_RESULTS:]
+    # Each collapsed result is a fraction of what it was, and the saving
+    # recurs on every later step because the whole history is resent.
+    collapsed_sizes = [len(m["content"]) for m in tools if m.get("_trimmed")]
+    assert collapsed_sizes and max(collapsed_sizes) < original_size / 5
+
+    # A collapsed result still says what it found, and how to get it back.
+    collapsed = json.loads(tools[0]["content"])
+    assert "96 pivots" in collapsed["summary"]
+    assert "Call the tool again" in collapsed["note"]
+
+
+def test_trimming_never_breaks_the_call_response_pairing():
+    """Dropping an assistant turn or a tool_call_id would make the request
+    invalid - only the RESULT bodies are trimmed."""
+    from t3_engine.ai_advisor.analyst import trim_tool_history
+
+    messages = [{"role": "user", "content": "brief"}]
+    for i in range(5):
+        messages.append({"role": "assistant", "content": None, "tool_calls": [{"id": f"c{i}"}]})
+        messages.append({"role": "tool", "tool_call_id": f"c{i}", "name": "t",
+                         "content": "{}", "_summary": "s"})
+    roles_before = [m["role"] for m in messages]
+    ids_before = [m.get("tool_call_id") for m in messages]
+
+    trim_tool_history(messages)
+
+    assert [m["role"] for m in messages] == roles_before
+    assert [m.get("tool_call_id") for m in messages] == ids_before
+
+
+def test_bookkeeping_keys_never_reach_the_wire():
+    """An API that validates its request shape rejects unknown fields."""
+    client, sent = scripted_client([
+        function_call_turn("list_pivots", {"deviation_pct": 1.0}),
+        function_call_turn("submit_count", {
+            "structures": [{"structure": "IMPULSE", "deviation_pct": 1.0,
+                            "direction": "UP", "waves": GOOD_IMPULSE}],
+            "summary": "s", "reasoning": "r"}, call_id="c2"),
+    ])
+    run_analyst("sk-test", CANDLES, DEGREE, client=client, max_steps=6)
+
+    for message in sent[1]["messages"]:
+        assert not any(key.startswith("_") for key in message), message

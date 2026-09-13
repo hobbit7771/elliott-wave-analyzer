@@ -44,6 +44,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from t3_engine.ai_advisor.advisor import (
+    ANALYSIS_TEMPERATURE,
     DEFAULT_MODEL,
     DEFAULT_READ_TIMEOUT,
     DEFAULT_SEED,
@@ -81,6 +82,18 @@ DEFAULT_RUN_BUDGET_SECONDS = 600.0
 # exploring when the budget ran out hands back nothing at all. With it, the
 # budget becomes a deadline the model can plan against, which is how a
 # 2-step run can still produce a (small) count instead of an empty panel.
+# How many of the most recent tool results stay in the conversation in
+# full. Everything older is collapsed to its one-line summary.
+#
+# This is the single biggest lever on how long a run takes. The whole
+# conversation is resent on every step, so a `list_pivots` result sits in
+# the history and is re-read by the model on every subsequent step - by
+# step 8 a run was carrying tens of kilobytes of pivot lists it had already
+# used, which costs latency on every call and brings a free tier's rate
+# limit forward. The model can always call the tool again if it needs the
+# detail back, and the summary tells it what it found.
+KEEP_FULL_TOOL_RESULTS = 3
+
 FINAL_STEP_NUDGE = (
     "This is your LAST step. Call submit_count now with whatever you are genuinely confident in, "
     "even if that is a single structure or a partial count, and say in `reasoning` what you did not "
@@ -156,7 +169,7 @@ def _tool_payload(system_prompt: str, messages: List[Dict[str, Any]],
         "messages": [{"role": "system", "content": system_prompt}] + messages,
         "tools": openai_tools(),
         "tool_choice": choice,
-        "temperature": 0.15,   # labelling is analysis, not invention
+        "temperature": ANALYSIS_TEMPERATURE,   # labelling is analysis, not invention
         "max_tokens": ANALYST_MAX_OUTPUT_TOKENS,
     }, seed=seed, reasoning_effort=reasoning_effort)
 
@@ -179,6 +192,34 @@ def _assistant_turn(data: Dict[str, Any]) -> Dict[str, Any]:
         raise AIAdvisorError(f"The model returned an empty turn (finish_reason: "
                              f"{_finish_reason(data) or 'unknown'})")
     return message
+
+
+def trim_tool_history(messages: List[Dict[str, Any]],
+                      keep: int = KEEP_FULL_TOOL_RESULTS) -> None:
+    """Collapse all but the newest `keep` tool results, in place.
+
+    Only tool RESULTS are trimmed. The model's own turns, its tool calls
+    and the opening brief all stay: dropping those would break the call/
+    response pairing the wire format requires, and would also erase the
+    reasoning the model is building on."""
+    tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+    for index in tool_indices[:-keep] if keep else tool_indices:
+        message = messages[index]
+        if message.get("_trimmed"):
+            continue
+        summary = message.get("_summary") or "(result omitted)"
+        message["content"] = json.dumps({
+            "summary": summary,
+            "note": "Full result omitted to keep this conversation small. Call the tool again if "
+                    "you need the detail.",
+        })
+        message["_trimmed"] = True
+
+
+def _wire_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Strip the bookkeeping keys before anything goes on the wire - an API
+    that validates its request shape rejects unknown fields."""
+    return [{k: v for k, v in m.items() if not k.startswith("_")} for m in messages]
 
 
 def _parse_tool_arguments(call: Dict[str, Any]) -> Dict[str, Any]:
@@ -247,7 +288,8 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
         steps_used = step + 1
         try:
             data = _post(api_key, model,
-                         _tool_payload(ELLIOTT_PLAYBOOK, messages, seed, reasoning_effort,
+                         _tool_payload(ELLIOTT_PLAYBOOK, _wire_messages(messages), seed,
+                                       reasoning_effort,
                                        force_submit=final_step and seen_pivots),
                          client, timeout, base_url)
             message = _assistant_turn(data)
@@ -299,7 +341,10 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
                 "tool_call_id": call.get("id", ""),
                 "name": name,
                 "content": json.dumps(result, default=str),
+                "_summary": f"{name}({', '.join(f'{k}={v}' for k, v in list(args.items())[:4])}) -> {summary}",
             })
+
+        trim_tool_history(messages)
 
         if toolbox.submitted is not None:
             break
