@@ -103,11 +103,24 @@ def resolve_api_key(supplied: Optional[str]) -> str:
 # 400 on a provider that does not know it - the UI offers it explicitly.
 VALID_REASONING_EFFORTS = ("low", "medium", "high", "max")
 
-# A fixed seed makes the same chart produce the same count, which is worth
-# having for an analysis tool: two runs that disagree should mean the data
-# changed, not that the sampler rolled differently. Not a guarantee - it is
-# best-effort on every provider that offers it.
-DEFAULT_SEED = 0
+# Sampling temperatures, chosen per job rather than one number everywhere.
+#
+# A wave count is not a creative task: the chart either does or does not
+# contain a legal impulse, so the correct temperature is 0. Anything above
+# that is asking the model to sometimes prefer a count it thinks is worse,
+# which for an analysis tool is a defect, not variety. It also makes runs
+# reproducible without needing a seed at all.
+#
+# Commentary is the exception and still only mildly warm: a second opinion
+# that is always phrased identically stops being read.
+ANALYSIS_TEMPERATURE = 0.0
+COMMENTARY_TEMPERATURE = 0.3
+
+# Seed is NOT sent by default. At temperature 0 it adds nothing - decoding
+# is already deterministic - while remaining one more parameter a provider
+# can reject with a 400, on an endpoint the user is free to point anywhere.
+# It stays available for anyone deliberately sampling above 0.
+DEFAULT_SEED = None
 
 # Output-token budgets. Under Gemini these were 400 and 2048, which covered
 # the answers themselves but NOT the internal reasoning current models emit
@@ -563,7 +576,7 @@ def request_commentary(api_key: str, context: Dict[str, Any], model: str = DEFAU
     )
     payload = apply_model_options({
         "messages": build_messages(ADVISOR_SYSTEM_PROMPT, user_content),
-        "temperature": 0.4,
+        "temperature": COMMENTARY_TEMPERATURE,
         "max_tokens": COMMENTARY_MAX_OUTPUT_TOKENS,
     }, seed=seed, reasoning_effort=reasoning_effort)
     data = _post(api_key, model, payload, client, timeout, base_url)
@@ -604,7 +617,7 @@ def request_wave_count(api_key: str, pivots: List[Dict[str, Any]], direction: st
     )
     payload = apply_model_options({
         "messages": build_messages(LABELLER_SYSTEM_PROMPT, user_content),
-        "temperature": 0.1,          # a count is an analysis, not a creative task
+        "temperature": ANALYSIS_TEMPERATURE,   # a count is an analysis, not a creative task
         "max_tokens": COUNT_MAX_OUTPUT_TOKENS,
         "response_format": {"type": "json_object"},
     }, seed=seed, reasoning_effort=reasoning_effort)

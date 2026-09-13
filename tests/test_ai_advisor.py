@@ -501,7 +501,10 @@ def test_an_http_error_in_stream_mode_still_reads_its_body():
 
 # ---- optional model options ----
 
-def test_seed_is_sent_so_the_same_chart_gives_the_same_count():
+def test_seed_is_not_sent_by_default():
+    """At temperature 0 decoding is already deterministic, so a seed adds
+    nothing while remaining one more parameter a provider can reject with a
+    400 - on an endpoint the user is free to point anywhere."""
     seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -509,7 +512,36 @@ def test_seed_is_sent_so_the_same_chart_gives_the_same_count():
         return chat_response("ok")
 
     request_commentary("sk-test", {"wave": "3"}, client=make_client(handler))
-    assert seen["seed"] == 0
+    assert "seed" not in seen
+
+    seen.clear()
+    request_commentary("sk-test", {"wave": "3"}, seed=42, client=make_client(handler))
+    assert seen["seed"] == 42
+
+
+def test_analysis_runs_at_temperature_zero_and_commentary_only_mildly_warm():
+    """A wave count is not a creative task: the chart either does or does
+    not contain a legal impulse. Sampling above 0 asks the model to
+    sometimes prefer a count it thinks is worse."""
+    from t3_engine.ai_advisor.advisor import request_wave_count
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return chat_response(json.dumps({"waves": []}))
+
+    request_wave_count("sk-test", SAMPLE_PIVOTS, "UP", client=make_client(handler))
+    assert seen["temperature"] == 0.0
+
+    seen.clear()
+
+    def prose(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return chat_response("a second opinion")
+
+    request_commentary("sk-test", {"wave": "3"}, client=make_client(prose))
+    assert 0 < seen["temperature"] <= 0.4
 
 
 def test_reasoning_effort_is_absent_unless_asked_for():

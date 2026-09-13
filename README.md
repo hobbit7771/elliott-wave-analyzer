@@ -17,7 +17,7 @@
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine, live
 market data from Bybit USDT perpetuals (see "Mobile app + live Bybit"
-below for why Binance was dropped). 328 automated tests, all passing,
+below for why Binance was dropped). 332 automated tests, all passing,
 cover every module described below.
 
 ## Read this first: what "done" means here
@@ -90,7 +90,7 @@ t3_engine/
                       analyst_tools.py = the tools it may use). Never a decision-maker.
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                328 tests, one file per module above
+tests/                332 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Bybit in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -452,6 +452,43 @@ desktop web page:
   characters at a time and two parallel calls interleave - splicing them
   produces JSON that parses fine and describes a wave nobody proposed.
 
+  **Generation settings, per job rather than one number everywhere:**
+
+  | | temperature | max output | notes |
+  | --- | --- | --- | --- |
+  | Wave count / Analyst | **0.0** | 16384 | A count is not a creative task |
+  | Second opinion | 0.3 | 2048 | Prose a human reads |
+  | Connection check | 0 | uncapped | Returns on the first token |
+
+  Temperature 0 for anything analytical is the whole point: the chart
+  either does or does not contain a legal impulse, so sampling above 0 asks
+  the model to sometimes prefer a count it thinks is worse. That is a
+  defect in an analysis tool, not variety - and it makes runs reproducible
+  without needing a seed. Commentary stays mildly warm only because a
+  second opinion phrased identically every time stops being read.
+
+  **Seed is no longer sent by default.** At temperature 0 decoding is
+  already deterministic, so it added nothing while remaining one more
+  parameter a provider can reject with a 400 - on an endpoint the user is
+  free to point anywhere. It stays available for deliberate sampling.
+
+  **The conversation no longer grows without bound.** The whole history is
+  resent on every step, so a `list_pivots` result used to sit in it and be
+  re-read by the model on every subsequent call: by step 8 a run was
+  carrying tens of kilobytes of pivot lists it had already used, paying for
+  them in latency on every call and bringing a free tier's rate limit
+  forward. Only the newest three tool results now stay in full; older ones
+  collapse to their one-line summary plus "call the tool again if you need
+  the detail". Over a 10-step run that halves what is resent (352 KB ->
+  177 KB measured). Only result *bodies* are trimmed - dropping an
+  assistant turn or a `tool_call_id` would break the call/response pairing
+  the wire format requires.
+
+  Tool payloads shrank too: prices are rounded to seven significant figures
+  rather than eight decimal places (eight decimals on a 77000-point
+  instrument is thirteen characters of noise per pivot, re-read on every
+  later step), and the candle and pivot caps came down to 200 and 250.
+
   **Reasoning effort** and **seed** are sent only when set. NVIDIA's own
   snippet for this model uses `reasoning_effort: max` - the best answer and
   by far the slowest, and the analyst makes one call per step, so the cost
@@ -686,7 +723,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (328 tests)
+# Run the automated test suite (332 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)
