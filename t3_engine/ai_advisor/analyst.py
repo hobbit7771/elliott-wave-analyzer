@@ -39,7 +39,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 
@@ -253,7 +253,8 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
                 run_budget_seconds: float = DEFAULT_RUN_BUDGET_SECONDS,
                 seed: Optional[int] = DEFAULT_SEED,
                 reasoning_effort: Optional[str] = None,
-                thinking: Optional[bool] = DEFAULT_THINKING) -> AnalystResult:
+                thinking: Optional[bool] = DEFAULT_THINKING,
+                on_progress: Optional[Callable[[str], None]] = None) -> AnalystResult:
     """Run the label-from-scratch loop and return whatever survived
     validation.
 
@@ -278,6 +279,15 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
     transcript: List[Dict[str, Any]] = []
     seen_pivots = False
     started = time.monotonic()
+    # A run is minutes long and nothing about it is visible from outside
+    # while it happens. `on_progress` is how a caller (the job runner)
+    # reports what the agent is doing STEP BY STEP instead of leaving a
+    # spinner to stand for "working" and "hung" alike.
+    def report(text: str) -> None:
+        if on_progress is not None:
+            on_progress(text)
+
+    report(f"Working the {degree.value} chart: {len(candles)} candles, up to {max_steps} steps.")
 
     for step in range(max_steps):
         if step > 0 and time.monotonic() - started > run_budget_seconds:
@@ -294,6 +304,7 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
             transcript.append({"role": "system", "step": step + 1, "text": FINAL_STEP_NUDGE})
 
         steps_used = step + 1
+        report(f"Step {steps_used}/{max_steps}: asking the model.")
         try:
             data = _post(api_key, model,
                          _tool_payload(ELLIOTT_PLAYBOOK, _wire_messages(messages), seed,
@@ -345,6 +356,7 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
                 seen_pivots = True
             transcript.append({"role": "tool", "step": steps_used, "name": name,
                                "args": args, "result": summary})
+            report(f"Step {steps_used}: {name} -> {summary[:120]}")
             messages.append({
                 "role": "tool",
                 "tool_call_id": call.get("id", ""),

@@ -1314,3 +1314,179 @@ def test_index_draws_the_saved_ai_count_on_the_live_chart():
     # be able to pass for a current one
     assert "AI count age" in resp.text
     assert "backfill" in resp.text
+
+
+# ---- long runs outlive the request that asked for them -----------------
+# Measured on the real deploy: POST /api/ai/multi took 12m13s, answered
+# correctly, and the page showed "Load failed" because the phone had
+# dropped that connection minutes earlier - after the tokens were spent.
+# The POST now starts a job and returns immediately.
+
+def _clean_jobs():
+    from t3_engine.ai_advisor import jobs
+    jobs.clear_all()
+    return jobs
+
+
+def _await_job(job_id, timeout=10.0):
+    import time
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        resp = client.get("/api/ai/job", params={"job_id": job_id})
+        body = resp.json()
+        if body["status"] != "running":
+            return body
+        time.sleep(0.02)
+    raise AssertionError("job never finished")
+
+
+def test_starting_an_analyst_run_returns_a_job_id_immediately():
+    import time
+    _clean_jobs()
+    accepted = [{"structure": "IMPULSE", "waves": [
+        {"label": "1", "start_time": 1, "end_time": 2, "start_price": 1.0, "end_price": 2.0,
+         "direction": "UP"}]}]
+
+    def slow_run(*a, **k):
+        time.sleep(0.3)
+        return _FakeAnalystResult(accepted)
+
+    with patch.object(server_module, "run_analyst", side_effect=slow_run):
+        started = time.monotonic()
+        resp = client.post("/api/ai/analyst/start",
+                           json={"api_key": "sk-or-test", "source": "synthetic", "cycles": 2})
+        # The whole point: the response does not wait for the run.
+        assert time.monotonic() - started < 0.3
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "running"
+        assert body["joined"] is False
+
+        finished = _await_job(body["job_id"])
+    assert finished["status"] == "done"
+    assert finished["result"]["accepted"] == accepted
+
+
+def test_a_second_identical_request_joins_the_run_instead_of_paying_twice():
+    import threading
+    import time
+    _clean_jobs()
+    gate = threading.Event()
+    calls = []
+
+    def blocking_run(*a, **k):
+        calls.append(1)
+        gate.wait(5)
+        return _FakeAnalystResult([])
+
+    with patch.object(server_module, "run_analyst", side_effect=blocking_run):
+        first = client.post("/api/ai/analyst/start",
+                            json={"source": "synthetic", "cycles": 2}).json()
+        time.sleep(0.1)
+        second = client.post("/api/ai/analyst/start",
+                             json={"source": "synthetic", "cycles": 2}).json()
+        assert second["joined"] is True
+        assert second["job_id"] == first["job_id"]
+        gate.set()
+        _await_job(first["job_id"])
+    assert len(calls) == 1          # the model was asked ONCE
+
+
+def test_a_failed_run_is_collectable_with_its_reason():
+    """A run that dies must be readable afterwards. A job that simply
+    disappears is indistinguishable from one still working."""
+    _clean_jobs()
+    with patch.object(server_module, "run_analyst",
+                      side_effect=server_module.AIAdvisorError("the provider said no")):
+        body = client.post("/api/ai/analyst/start",
+                           json={"source": "synthetic", "cycles": 2}).json()
+        finished = _await_job(body["job_id"])
+    assert finished["status"] == "error"
+    assert "the provider said no" in finished["error"]
+
+
+def test_polling_only_sends_progress_the_caller_does_not_have():
+    import threading
+    _clean_jobs()
+    gate = threading.Event()
+
+    def run(*a, **k):
+        on_progress = k.get("on_progress")
+        on_progress("step one")
+        on_progress("step two")
+        gate.wait(5)
+        return _FakeAnalystResult([])
+
+    with patch.object(server_module, "run_analyst", side_effect=run):
+        body = client.post("/api/ai/analyst/start",
+                           json={"source": "synthetic", "cycles": 2}).json()
+        import time
+        time.sleep(0.2)
+        first = client.get("/api/ai/job", params={"job_id": body["job_id"]}).json()
+        texts = [line["text"] for line in first["progress"]]
+        assert "step one" in texts and "step two" in texts
+        # A twelve-minute run must not re-send its whole transcript every
+        # few seconds.
+        again = client.get("/api/ai/job",
+                           params={"job_id": body["job_id"],
+                                   "since": first["progress_total"]}).json()
+        assert again["progress"] == []
+        assert again["progress_total"] == first["progress_total"]
+        gate.set()
+        _await_job(body["job_id"])
+
+
+def test_an_unknown_job_says_why_rather_than_looking_finished():
+    _clean_jobs()
+    resp = client.get("/api/ai/job", params={"job_id": "nosuchjob"})
+    assert resp.status_code == 404
+    detail = resp.json()["detail"]
+    assert "restart" in detail and "saved" in detail      # and what survives it
+
+
+def test_the_multi_timeframe_verdict_is_saved_and_can_be_collected_later(tmp_path, monkeypatch):
+    """The other half of surviving a dropped connection: a run that
+    finished while the page was gone is still there to be shown."""
+    store = _seed_store(tmp_path, monkeypatch)
+    _clean_jobs()
+
+    class FakeResult:
+        symbol = "SYNTHETIC-DEMO"
+        model = "~openai/gpt-astra-latest"
+        note = "Recomputed everything."
+        reused_timeframes = []
+        recomputed_timeframes = ["5m"]
+        verdict = {"trend": "UP", "headline": "Impulsive."}
+        per_timeframe = [SimpleNamespace(
+            timeframe="5m", reused=False, candles=500, coverage={"covered_fraction": 0.8},
+            summary="up", error="", steps_used=7, last_candle_time=12345,
+            accepted=[{"structure": "IMPULSE", "waves": []}], projection=None)]
+
+    with patch.object(server_module, "run_multi_timeframe", return_value=FakeResult()):
+        body = client.post("/api/ai/multi/start",
+                           json={"source": "synthetic", "symbol": "SYNTHETIC-DEMO"}).json()
+        finished = _await_job(body["job_id"])
+    assert finished["status"] == "done"
+    assert finished["result"]["verdict"]["trend"] == "UP"
+
+    saved = client.get("/api/ai/multi/saved",
+                       params={"source": "synthetic", "symbol": "SYNTHETIC-DEMO"}).json()
+    assert saved["saved"]["verdict"]["trend"] == "UP"
+    assert store.load("synthetic", "SYNTHETIC-DEMO", server_module.MTF_CACHE_KEY) is not None
+
+
+def test_no_saved_verdict_reads_as_nothing_saved_not_as_an_error(tmp_path, monkeypatch):
+    _seed_store(tmp_path, monkeypatch)
+    resp = client.get("/api/ai/multi/saved",
+                      params={"source": "bybit", "symbol": "NOSUCHUSDT"})
+    assert resp.status_code == 200
+    assert resp.json()["saved"] is None
+
+
+def test_index_follows_jobs_instead_of_holding_a_twelve_minute_request_open():
+    resp = client.get("/")
+    assert "/api/ai/analyst/start" in resp.text
+    assert "/api/ai/multi/start" in resp.text
+    assert "/api/ai/job?job_id=" in resp.text
+    assert "resumeJobs" in resp.text          # a reload reattaches to a running analysis
+    assert "Live progress" in resp.text       # and it is visible while it runs

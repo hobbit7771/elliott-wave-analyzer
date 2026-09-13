@@ -41,6 +41,18 @@
   .step .t .a { color:#7b8397; }
   .step .r { flex:1 1 120px; text-align:right; color:#c7cbd3; }
   .step .r.bad { color:#fca5a5; }
+  /* The running job's own log. Capped in height and scrolled to the
+     bottom: a twelve-minute run produces a lot of lines, and the one that
+     matters is always the last. */
+  .joblog { max-height:190px; overflow-y:auto; font-size:11px; line-height:1.5;
+            background:#0b0e14; border:1px solid #1b1f29; border-radius:8px; padding:7px 8px; }
+  .joblog div { color:#9aa3b2; padding:1px 0; word-break:break-word; }
+  .joblog div:last-child { color:#c7cbd3; }
+  /* A run that finished while you were on another tab has to say so
+     somewhere. Without this a resumed analysis completes into a hidden
+     panel and reads as "nothing happened". */
+  #tabs button.has-news::after { content:'●'; color:#4ade80; margin-left:5px; font-size:9px;
+                                 vertical-align:middle; }
   .turn { border:1px solid #232733; border-radius:8px; padding:7px 8px; margin-bottom:6px; font-size:11.5px; }
   .turn .who { font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:#8891a3; margin-bottom:3px; }
   .turn.model { border-color:#3b3159; }
@@ -326,6 +338,10 @@
         binding constraint rather than the budget.
       </div>
       <div class="hint" id="analystStatus">Uses the Source / Symbol / TF / Candles pickers in the header.</div>
+      <div id="analystProgressWrap" style="display:none;">
+        <h2>Live progress</h2>
+        <div id="analystProgress" class="joblog"></div>
+      </div>
 
       <div id="analystSummary" style="display:none;">
         <h2>Read</h2>
@@ -365,6 +381,10 @@
         <button class="panel-btn" id="clearMtf" style="flex:1;" title="Forget every saved analysis for this instrument and recompute from scratch">Forget cache</button>
       </div>
       <div class="hint" id="mtfStatus">Uses the Source / Symbol / Candles pickers in the header.</div>
+      <div id="mtfProgressWrap" style="display:none;">
+        <h2>Live progress</h2>
+        <div id="mtfProgress" class="joblog"></div>
+      </div>
       <div id="mtfVerdict" style="display:none;"></div>
       <div id="mtfFramesWrap" style="display:none;">
         <h2>Per timeframe</h2>
@@ -1035,6 +1055,7 @@ document.querySelectorAll('#tabs button').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('#tabs button').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
+    btn.classList.remove('has-news');
     const active = btn.dataset.tab;
     Object.entries(TAB_PANELS).forEach(([tab, id]) => {
       document.getElementById(id).style.display = tab === active ? '' : 'none';
@@ -1046,6 +1067,7 @@ document.querySelectorAll('#tabs button').forEach(btn => {
     document.getElementById('chart').style.display = onAnalyst ? 'none' : 'block';
     document.getElementById('analystChart').style.display = onAnalyst ? 'block' : 'none';
     if (onAnalyst) ensureAnalystChart();
+    if (active === 'mtf') loadSavedMtf();
   });
 });
 
@@ -1367,6 +1389,163 @@ async function drawMtfFrame(index) {
   }
 }
 
+// ---- background jobs -------------------------------------------------
+// A multi-timeframe run was measured at 12m13s on the real deploy: the
+// server finished and answered correctly, and the phone had dropped that
+// connection minutes earlier, so the page showed "Load failed" AFTER the
+// tokens were spent. No timeout setting fixes that - a twelve-minute HTTP
+// response is not something a mobile browser behind a CDN will hold open.
+// So the POST now starts a job and returns in milliseconds, and this code
+// follows it: each poll is a short request that can fail and be retried
+// without costing the run, because the run is on the server.
+const JOB_POLL_MS = 2500;
+// A poll failing is not the run failing. Only give up after this many
+// CONSECUTIVE failures - a phone changing cells should not lose an
+// analysis that is still being computed.
+const JOB_MAX_CONSECUTIVE_POLL_FAILURES = 12;
+
+function jobKey(kind) { return 't3_job_' + kind; }
+function rememberJob(kind, jobId) { try { localStorage.setItem(jobKey(kind), jobId); } catch (e) {} }
+function forgetJob(kind) { try { localStorage.removeItem(jobKey(kind)); } catch (e) {} }
+function rememberedJob(kind) { try { return localStorage.getItem(jobKey(kind)); } catch (e) { return null; } }
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function renderJobLog(el, lines) {
+  el.innerHTML = lines.map(l => `<div>${escapeHtml(l.text)}</div>`).join('');
+  el.scrollTop = el.scrollHeight;
+}
+
+// Follows a job to completion. `onSnapshot` is called on every poll with
+// the accumulated progress lines so the page can show what the model is
+// doing right now instead of a spinner that means "working" and "hung"
+// alike. Resolves with the result; throws with the reason on failure.
+async function followJob(kind, jobId, onSnapshot) {
+  let seen = 0;
+  let lines = [];
+  let failures = 0;
+  for (;;) {
+    let snap = null;
+    try {
+      const resp = await fetchWithTimeout(
+        `/api/ai/job?job_id=${encodeURIComponent(jobId)}&since=${seen}`, {}, 45000);
+      if (resp.status === 404) {
+        forgetJob(kind);
+        // Marked so the retry branch below lets it through: a job the
+        // server has never heard of will not appear on the next poll, and
+        // retrying it twelve times only delays saying so.
+        const gone = new Error((await resp.json()).detail || 'Unknown job.');
+        gone.__jobGone = true;
+        throw gone;
+      }
+      snap = await resp.json();
+      failures = 0;
+    } catch (e) {
+      if (e.__jobGone) throw e;
+      failures += 1;
+      if (failures >= JOB_MAX_CONSECUTIVE_POLL_FAILURES) {
+        throw new Error('Lost contact with the server while the run was in progress. '
+          + 'The run itself continues there — reopen this tab to pick it up.');
+      }
+      await sleep(JOB_POLL_MS);
+      continue;
+    }
+    lines = lines.concat(snap.progress || []);
+    seen = snap.progress_total !== undefined ? snap.progress_total : seen;
+    onSnapshot(snap, lines);
+    if (snap.status === 'done') { forgetJob(kind); return snap.result; }
+    if (snap.status === 'error') { forgetJob(kind); throw new Error(snap.error || 'The run failed.'); }
+    await sleep(JOB_POLL_MS);
+  }
+}
+
+// Starts a job, or attaches to the identical one already running. The
+// server does the joining (see jobs.find_running) - two taps must not buy
+// the same four analyst runs twice.
+async function startJob(kind, path, body) {
+  const resp = await fetchWithTimeout(path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }, 45000);
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(data.detail || 'Could not start the run.');
+  rememberJob(kind, data.job_id);
+  return data;
+}
+
+// Marks a tab whose background run has produced something while the user
+// was looking elsewhere. Cleared when that tab is opened.
+function flagTab(tab) {
+  const btn = document.querySelector(`#tabs button[data-tab="${tab}"]`);
+  if (btn && !btn.classList.contains('active')) btn.classList.add('has-news');
+}
+
+function elapsed(snap) {
+  const secs = Math.round(snap.elapsed_seconds || 0);
+  return secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`;
+}
+
+// Follows an already-started multi-timeframe job to its end. Split out
+// from the button handler because the same code has to run when a reload
+// reattaches to a job that was already in flight.
+async function watchMtfJob(jobId) {
+  const statusEl = document.getElementById('mtfStatus');
+  const progressEl = document.getElementById('mtfProgress');
+  document.getElementById('mtfProgressWrap').style.display = '';
+  try {
+    const data = await followJob('mtf', jobId, (snap, lines) => {
+      renderJobLog(progressEl, lines);
+      const last = lines.length ? lines[lines.length - 1].text : 'starting…';
+      statusEl.textContent = `Running for ${elapsed(snap)} — ${last}`;
+    });
+    ensureAnalystChart();
+    mtfShowing = true;
+    renderMtf(data);
+    flagTab('mtf');
+    statusEl.textContent = data.note
+      || `Recomputed ${(data.recomputed || []).join(', ') || 'nothing'}.`;
+  } catch (e) {
+    statusEl.textContent = e.message || 'The multi-timeframe run failed.';
+    flagTab('mtf');
+  }
+}
+
+// The last finished verdict for this instrument, fetched from the server.
+// This is the other half of surviving a dropped connection: the run that
+// completed while the page was gone is still here, and showing it costs
+// nothing. Never overwrites a verdict already on screen.
+let mtfShowing = false;
+async function loadSavedMtf() {
+  if (mtfShowing || rememberedJob('mtf')) return;
+  const statusEl = document.getElementById('mtfStatus');
+  const source = document.getElementById('source').value;
+  if (source === 'live') return;
+  try {
+    const resp = await fetchWithTimeout(
+      `/api/ai/multi/saved?source=${encodeURIComponent(source)}`
+      + `&symbol=${encodeURIComponent(normalizeSymbol(document.getElementById('symbol').value))}`,
+      {}, 30000);
+    if (!resp.ok) return;
+    const body = await resp.json();
+    if (!body.saved) return;
+    ensureAnalystChart();
+    renderMtf(body.saved);
+    const when = body.analysed_at ? fmtTime(body.analysed_at) : 'earlier';
+    statusEl.textContent = `Showing the saved verdict from ${when}. `
+      + 'Press Analyse to bring it up to date — unchanged timeframes are reused, not repaid for.';
+  } catch (e) { /* a saved verdict that cannot be fetched is not an error worth showing */ }
+}
+
+// A reload, a locked phone or a closed tab must not orphan a run that is
+// still going. The job id is remembered locally, so the page reattaches to
+// the run and picks up its progress where it left off.
+function resumeJobs() {
+  const mtf = rememberedJob('mtf');
+  if (mtf) { mtfShowing = true; watchMtfJob(mtf); }
+  const analyst = rememberedJob('analyst');
+  if (analyst) watchAnalystJob(analyst);
+}
+
 document.getElementById('runMtf').addEventListener('click', async () => {
   const statusEl = document.getElementById('mtfStatus');
   const source = document.getElementById('source').value;
@@ -1375,24 +1554,21 @@ document.getElementById('runMtf').addEventListener('click', async () => {
     return;
   }
   ensureAnalystChart();
-  statusEl.textContent = 'Counting 5m, 15m, 1h and 4h… cached timeframes are skipped.';
+  statusEl.textContent = 'Starting… cached timeframes are skipped.';
   try {
-    const resp = await fetchWithTimeout('/api/ai/multi', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        api_key: aiKey(), model: aiModel(), base_url: aiBaseUrl(), timeout: aiTimeout(),
-        reasoning_effort: aiEffort(), thinking: aiThinking(), source,
-        symbol: normalizeSymbol(document.getElementById('symbol').value),
-        limit: Number(document.getElementById('limit').value),
-        cycles: Number(document.getElementById('cycles').value),
-        max_steps: Number(document.getElementById('analystSteps').value),
-      }),
-    }, 1800000);
-    const data = await resp.json();
-    if (!resp.ok) { statusEl.textContent = data.detail || 'Request failed.'; return; }
-    renderMtf(data);
-    statusEl.textContent = data.note
-      || `Recomputed ${(data.recomputed || []).join(', ') || 'nothing'}.`;
+    const started = await startJob('mtf', '/api/ai/multi/start', {
+      api_key: aiKey(), model: aiModel(), base_url: aiBaseUrl(), timeout: aiTimeout(),
+      reasoning_effort: aiEffort(), thinking: aiThinking(), source,
+      symbol: normalizeSymbol(document.getElementById('symbol').value),
+      limit: Number(document.getElementById('limit').value),
+      cycles: Number(document.getElementById('cycles').value),
+      max_steps: Number(document.getElementById('analystSteps').value),
+    });
+    if (started.joined) {
+      statusEl.textContent = 'A run for this instrument is already in progress — following it '
+        + 'rather than paying for the same analysis twice.';
+    }
+    await watchMtfJob(started.job_id);
   } catch (e) {
     statusEl.textContent = e.message || 'Network error running the multi-timeframe analysis.';
   }
@@ -1413,8 +1589,73 @@ document.getElementById('clearMtf').addEventListener('click', async () => {
   }
 });
 
+// Everything the analyst tab shows once a run has produced an answer.
+// Split out from the button handler so a reload that reattaches to a job
+// already in flight renders it exactly the same way.
+function applyAnalystResult(data) {
+  const statusEl = document.getElementById('analystStatus');
+  ensureAnalystChart();
+  analystSeries.setData(data.candles);
+  if (data.candles.length) {
+    analystFirstTime = data.candles[0].time;
+    analystLastTime = data.candles[data.candles.length - 1].time;
+  }
+  drawAnalystCount(data.accepted);
+  drawAnalystProjection(data.projection);
+  analystChart.timeScale().fitContent();
+  renderAnalystStructures(data);
+  renderAnalystSteps(data.steps);
+  renderAnalystChat(data.transcript);
+
+  const cover = data.coverage || {};
+  const accepted = (data.accepted || []).length;
+  // A run that stalled part way still did real work, and the transcript of
+  // that work is information. Say what happened rather than showing an
+  // empty result that reads like a finished analysis.
+  statusEl.textContent = data.error
+    ? `Stopped after ${data.steps_used} step(s) — see below. Partial work is still shown.`
+    : `${accepted} structure(s) accepted, ${(data.rejected || []).length} rejected, `
+      + `${cover.covered_fraction !== undefined
+            ? Math.round(cover.covered_fraction * 100) + '% of the chart labelled, ' : ''}`
+      + `after ${data.steps_used} step(s).`;
+  document.getElementById('analystSummary').style.display = '';
+  document.getElementById('analystRead').innerHTML =
+    `<div class="row"><span class="k">Model</span><span class="v">${escapeHtml(data.model)}</span></div>`
+    + (data.summary ? `<div class="row"><span class="k">Where we are</span>`
+        + `<span class="v" style="text-align:left;max-width:200px;">${escapeHtml(data.summary)}</span></div>` : '')
+    + (data.reasoning ? `<div class="row"><span class="k">Reasoning</span>`
+        + `<span class="v" style="text-align:left;max-width:200px;">${escapeHtml(data.reasoning)}</span></div>` : '')
+    + (data.projection ? `<div class="row"><span class="k">Next: wave ${escapeHtml(data.projection.next_label)}</span>`
+        + `<span class="v" style="color:#f0abfc;">`
+        + `${(data.projection.targets || []).map(t => t.price).join(' · ')}</span></div>`
+        + `<div class="hint">${escapeHtml(data.projection.basis)} — drawn dashed `
+        + `${data.projection.bars_ahead || 50} candles ahead`
+        + `${data.projection.expected_bars ? ', reaching the target in about '
+             + data.projection.expected_bars + ' of them' : ''}. `
+        + `Computed by the server from the waves already counted, not supplied by the model.</div>` : '')
+    + (data.error ? `<div class="note error" style="margin-top:8px;">${escapeHtml(data.error)}</div>` : '')
+    + (data.note ? `<div class="hint">${escapeHtml(data.note)}</div>` : '');
+}
+
+async function watchAnalystJob(jobId) {
+  const statusEl = document.getElementById('analystStatus');
+  const progressEl = document.getElementById('analystProgress');
+  document.getElementById('analystProgressWrap').style.display = '';
+  try {
+    const data = await followJob('analyst', jobId, (snap, lines) => {
+      renderJobLog(progressEl, lines);
+      const last = lines.length ? lines[lines.length - 1].text : 'starting…';
+      statusEl.textContent = `Running for ${elapsed(snap)} — ${last}`;
+    });
+    applyAnalystResult(data);
+    flagTab('analyst');
+  } catch (e) {
+    statusEl.textContent = e.message || 'The analyst run failed.';
+    flagTab('analyst');
+  }
+}
+
 document.getElementById('runAnalyst').addEventListener('click', async () => {
-  const apiKey = aiKey();
   const statusEl = document.getElementById('analystStatus');
   const source = document.getElementById('source').value;
   if (source === 'live') {
@@ -1423,73 +1664,28 @@ document.getElementById('runAnalyst').addEventListener('click', async () => {
   }
   ensureAnalystChart();
 
-  statusEl.textContent = 'The analyst is working the chart… (it calls tools in a loop, so this takes a while)';
+  statusEl.textContent = 'Starting the analyst…';
   document.getElementById('analystSummary').style.display = 'none';
   try {
-    const resp = await fetchWithTimeout('/api/ai/analyst', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        api_key: apiKey,
-        model: aiModel(),
-        base_url: aiBaseUrl(),
-        timeout: aiTimeout(),
-        reasoning_effort: aiEffort(),
-        thinking: aiThinking(),
-        source,
-        symbol: normalizeSymbol(document.getElementById('symbol').value),
-        timeframe: document.getElementById('timeframe').value,
-        limit: Number(document.getElementById('limit').value),
-        cycles: Number(document.getElementById('cycles').value),
-        timeout: aiTimeout(),
-        max_steps: Number(document.getElementById('analystSteps').value),
-      }),
-    // Above the server's own 600s run budget on purpose: the server should
-    // be the side that decides a run is over, because it is the side that
-    // can return the transcript. A browser that gives up first loses it.
-    }, 900000);
-    const data = await resp.json();
-    if (!resp.ok) { statusEl.textContent = data.detail || 'Request failed.'; return; }
-
-    analystSeries.setData(data.candles);
-    if (data.candles.length) {
-      analystFirstTime = data.candles[0].time;
-      analystLastTime = data.candles[data.candles.length - 1].time;
+    const started = await startJob('analyst', '/api/ai/analyst/start', {
+      api_key: aiKey(),
+      model: aiModel(),
+      base_url: aiBaseUrl(),
+      timeout: aiTimeout(),
+      reasoning_effort: aiEffort(),
+      thinking: aiThinking(),
+      source,
+      symbol: normalizeSymbol(document.getElementById('symbol').value),
+      timeframe: document.getElementById('timeframe').value,
+      limit: Number(document.getElementById('limit').value),
+      cycles: Number(document.getElementById('cycles').value),
+      max_steps: Number(document.getElementById('analystSteps').value),
+    });
+    if (started.joined) {
+      statusEl.textContent = 'This exact run is already in progress — following it rather than '
+        + 'paying for the same analysis twice.';
     }
-    drawAnalystCount(data.accepted);
-    drawAnalystProjection(data.projection);
-    analystChart.timeScale().fitContent();
-    renderAnalystStructures(data);
-    renderAnalystSteps(data.steps);
-    renderAnalystChat(data.transcript);
-
-    const cover = data.coverage || {};
-    const accepted = (data.accepted || []).length;
-    // A run that stalled part way still did real work, and the transcript of
-    // that work is information. Say what happened rather than showing an
-    // empty result that reads like a finished analysis.
-    statusEl.textContent = data.error
-      ? `Stopped after ${data.steps_used} step(s) — see below. Partial work is still shown.`
-      : `${accepted} structure(s) accepted, ${(data.rejected || []).length} rejected, `
-        + `${cover.covered_fraction !== undefined
-              ? Math.round(cover.covered_fraction * 100) + '% of the chart labelled, ' : ''}`
-        + `after ${data.steps_used} step(s).`;
-    document.getElementById('analystSummary').style.display = '';
-    document.getElementById('analystRead').innerHTML =
-      `<div class="row"><span class="k">Model</span><span class="v">${escapeHtml(data.model)}</span></div>`
-      + (data.summary ? `<div class="row"><span class="k">Where we are</span>`
-          + `<span class="v" style="text-align:left;max-width:200px;">${escapeHtml(data.summary)}</span></div>` : '')
-      + (data.reasoning ? `<div class="row"><span class="k">Reasoning</span>`
-          + `<span class="v" style="text-align:left;max-width:200px;">${escapeHtml(data.reasoning)}</span></div>` : '')
-      + (data.projection ? `<div class="row"><span class="k">Next: wave ${escapeHtml(data.projection.next_label)}</span>`
-          + `<span class="v" style="color:#f0abfc;">`
-          + `${(data.projection.targets || []).map(t => t.price).join(' · ')}</span></div>`
-          + `<div class="hint">${escapeHtml(data.projection.basis)} — drawn dashed `
-          + `${data.projection.bars_ahead || 50} candles ahead`
-          + `${data.projection.expected_bars ? ', reaching the target in about '
-               + data.projection.expected_bars + ' of them' : ''}. `
-          + `Computed by the server from the waves already counted, not supplied by the model.</div>` : '')
-      + (data.error ? `<div class="note error" style="margin-top:8px;">${escapeHtml(data.error)}</div>` : '')
-      + (data.note ? `<div class="hint">${escapeHtml(data.note)}</div>` : '');
+    await watchAnalystJob(started.job_id);
   } catch (e) {
     statusEl.textContent = e.message || 'Network error running the analyst.';
   }
@@ -1951,6 +2147,10 @@ async function loadSymbolList() {
 updateSourceUI();
 run();
 loadSymbolList();
+// Reattach to anything that was still running when this page was last
+// closed. A twelve-minute analysis must survive a reload of the page that
+// asked for it.
+resumeJobs();
 </script>
 </body>
 </html>

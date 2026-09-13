@@ -175,6 +175,44 @@ desktop web page:
   count is paid for once and then reused by whichever view asks for it;
   when nothing has ever been analysed for the series, the panel says so
   and names the tab to run, rather than leaving a blank.
+- **Long analyses run as background jobs, not as one long HTTP request.**
+  This is a fix for a *measured* failure, not a hypothetical one. A
+  multi-timeframe run counts 5m, 15m, 1h and 4h and then reconciles them -
+  four full analyst runs plus a synthesis. One such run was timed on the
+  real deploy at **12 minutes 13 seconds** (`POST /api/ai/multi`,
+  15:35:56 -> 15:48:09, in the service's own request log). The server
+  produced a complete, correct answer and nobody ever saw it: the phone,
+  the radio and the hosting proxy had all dropped that connection minutes
+  earlier, so the page showed "Load failed" **after** the tokens had been
+  spent. No timeout setting fixes that - a twelve-minute HTTP response is
+  not something a mobile browser behind a CDN will hold open. So:
+  - `POST /api/ai/multi/start` and `POST /api/ai/analyst/start` return a
+    **job id in milliseconds**; the run continues on its own thread
+    (`ai_advisor/jobs.py`). `GET /api/ai/job?job_id=...&since=N` returns
+    its status, elapsed time and the progress lines the caller does not
+    have yet (`since` keeps a long run from re-sending its whole
+    transcript every poll). Each poll is a short request that can fail and
+    be retried without costing the run, because the run is not on that
+    connection.
+  - **Progress is live.** Every analyst step and tool result is reported
+    as it happens ("Step 4/10: fibonacci_levels -> 5 levels", "15m: reused
+    the saved count"), shown under "Live progress". A spinner means
+    "working" and "hung" equally; this does not.
+  - **A second identical request joins the run in flight** rather than
+    starting another one (`jobs.find_running`, keyed on kind + instrument
+    + timeframe). Double-tapping Analyse used to buy the same four
+    analyst runs twice.
+  - **A reload, a locked phone or a closed tab costs nothing.** The job id
+    is kept in `localStorage`, so the page reattaches on load and picks
+    the progress up where it left off; if the run finishes while you are
+    on another tab, that tab is marked. And the finished verdict is saved
+    server-side (`GET /api/ai/multi/saved`), so even a session that ended
+    entirely comes back to the answer it paid for, with the date it was
+    computed.
+  - The original synchronous `POST /api/ai/multi` and `POST
+    /api/ai/analyst` are unchanged and still there for scripts and tests -
+    they call the same `run_multi_work` / `run_analyst_work` functions the
+    jobs do, so the two paths cannot drift apart.
 - **Symbol picker**: the symbol field is backed by a custom JS dropdown
   (not the native HTML `<datalist>` element - see below for why) fed by
   `GET /api/symbols` (cached in-process for an hour) - type any letter and

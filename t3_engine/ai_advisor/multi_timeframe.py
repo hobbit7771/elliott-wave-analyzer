@@ -143,8 +143,14 @@ class MultiTimeframeResult:
 
 def _analyse_timeframe(api_key: str, load_candles: Callable, source: str, symbol: str,
                        timeframe: Timeframe, limit: int, cycles: int, model: str,
-                       force: bool, database_url: Optional[str], **analyst_kwargs
-                       ) -> TimeframeAnalysis:
+                       force: bool, database_url: Optional[str],
+                       on_progress: Optional[Callable[[str], None]] = None,
+                       **analyst_kwargs) -> TimeframeAnalysis:
+    def report(text: str) -> None:
+        if on_progress is not None:
+            on_progress(text)
+
+    report(f"{timeframe.value}: loading candles.")
     candles, resolved_symbol, degree = load_candles(source, symbol, timeframe.value, limit, cycles)
     if not candles:
         return TimeframeAnalysis(timeframe=timeframe.value, reused=False, candles=0,
@@ -155,6 +161,7 @@ def _analyse_timeframe(api_key: str, load_candles: Callable, source: str, symbol
         cached = analysis_store.load(source, resolved_symbol, degree.value, database_url)
         if cached and cached.is_fresh_for(newest):
             payload = cached.payload
+            report(f"{degree.value}: reused the saved count - no new candles since it ran.")
             return TimeframeAnalysis(
                 timeframe=degree.value, reused=True, candles=cached.candle_count,
                 last_candle_time=cached.last_candle_time,
@@ -166,8 +173,9 @@ def _analyse_timeframe(api_key: str, load_candles: Callable, source: str, symbol
 
     try:
         result = run_analyst(api_key, candles, degree, symbol=resolved_symbol, model=model,
-                             **analyst_kwargs)
+                             on_progress=on_progress, **analyst_kwargs)
     except AIAdvisorError as exc:
+        report(f"{degree.value}: failed - {exc}")
         return TimeframeAnalysis(timeframe=degree.value, reused=False, candles=len(candles),
                                  last_candle_time=newest, error=str(exc))
 
@@ -183,6 +191,10 @@ def _analyse_timeframe(api_key: str, load_candles: Callable, source: str, symbol
     if analysis.accepted:
         analysis_store.save(source, resolved_symbol, degree.value, newest, len(candles),
                             analysis.as_payload(), model=model, database_url=database_url)
+        report(f"{degree.value}: {len(analysis.accepted)} structure(s) in "
+               f"{analysis.steps_used} step(s) - saved.")
+    else:
+        report(f"{degree.value}: no validated structure. {analysis.error}".strip())
     return analysis
 
 
@@ -225,17 +237,23 @@ def run_multi_timeframe(api_key: str, load_candles: Callable, source: str, symbo
                         database_url: Optional[str] = None,
                         client: Optional[httpx.Client] = None,
                         max_steps: int = DEFAULT_MAX_STEPS,
+                        on_progress: Optional[Callable[[str], None]] = None,
                         **analyst_kwargs) -> MultiTimeframeResult:
     analyses: List[TimeframeAnalysis] = []
     resolved_symbol = symbol
-    for timeframe in timeframes:
+    for position, timeframe in enumerate(timeframes, start=1):
+        if on_progress is not None:
+            on_progress(f"[{position}/{len(timeframes)}] {timeframe.value}")
         analysis = _analyse_timeframe(api_key, load_candles, source, symbol, timeframe,
                                       limit, cycles, model, force, database_url,
+                                      on_progress=on_progress,
                                       max_steps=max_steps, client=client, **analyst_kwargs)
         analyses.append(analysis)
 
     reused = [a.timeframe for a in analyses if a.reused]
     recomputed = [a.timeframe for a in analyses if not a.reused and not a.error]
+    if on_progress is not None:
+        on_progress(f"Reconciling {len(analyses)} timeframes into one verdict.")
     verdict = synthesise(api_key, analyses, resolved_symbol, model=model, client=client,
                          **{k: v for k, v in analyst_kwargs.items()
                             if k in ("timeout", "base_url", "thinking")})
