@@ -221,19 +221,151 @@ class AnalystToolbox:
         }
 
     def fibonacci_levels(self, deviation_pct: float, start_pivot_index: int,
-                         end_pivot_index: int) -> Dict[str, Any]:
-        """Retracements of, and extensions beyond, one measured leg."""
+                         end_pivot_index: int, ratios: Optional[List[float]] = None,
+                         project_from_pivot_index: Optional[int] = None) -> Dict[str, Any]:
+        """Retracements of, and extensions beyond, one measured leg.
+
+        `project_from_pivot_index` is the one that matters for forecasting:
+        it projects the leg's LENGTH from a third pivot, which is how every
+        Elliott target is actually built - wave 3 is wave 1's length from
+        the end of wave 2, wave C is wave A's from the end of B. Without it
+        an extension can only ever be measured from the leg's own start,
+        which is the wrong anchor for a target."""
         pivots = self.pivots_at(deviation_pct)
         start = self._pivot_or_error(pivots, start_pivot_index, "start_pivot_index")
         end = self._pivot_or_error(pivots, end_pivot_index, "end_pivot_index")
         span = end.price - start.price
         if span == 0:
             raise ToolError("That leg has zero price range - no ratios to compute")
-        return {
+
+        custom = None
+        if ratios:
+            try:
+                custom = [float(r) for r in ratios][:12]
+            except (TypeError, ValueError):
+                raise ToolError(f"ratios must be numbers, got {ratios!r}")
+
+        result: Dict[str, Any] = {
             "leg": f"pivot {int(start_pivot_index)} ({start.price:g}) -> {int(end_pivot_index)} ({end.price:g})",
             "length": round_price(abs(span)),
-            "retracements": {f"{r:.3f}": round_price(end.price - span * r) for r in FIB_RETRACEMENTS},
-            "extensions": {f"{e:.3f}": round_price(start.price + span * e) for e in FIB_EXTENSIONS},
+            "bars": end.index - start.index,
+            "retracements": {f"{r:.3f}": round_price(end.price - span * r)
+                             for r in (custom or FIB_RETRACEMENTS)},
+            "extensions": {f"{e:.3f}": round_price(start.price + span * e)
+                           for e in (custom or FIB_EXTENSIONS)},
+        }
+        if project_from_pivot_index is not None:
+            anchor = self._pivot_or_error(pivots, project_from_pivot_index, "project_from_pivot_index")
+            result["projected_from"] = {"pivot_index": int(project_from_pivot_index),
+                                        "price": round_price(anchor.price)}
+            result["projections"] = {f"{r:.3f}": round_price(anchor.price + span * r)
+                                     for r in (custom or FIB_EXTENSIONS)}
+        return result
+
+    def fibonacci_confluence(self, deviation_pct: float, legs: List[Dict[str, Any]],
+                             tolerance_pct: float = 0.4) -> Dict[str, Any]:
+        """Where levels from SEVERAL legs land on the same price.
+
+        One leg's 61.8% is a line; three legs agreeing within half a
+        percent is a zone, and that difference is most of what Fibonacci is
+        good for in practice. Clustering is arithmetic, so the server does
+        it rather than asking the model to eyeball a list of numbers."""
+        if not isinstance(legs, list) or not 2 <= len(legs) <= 6:
+            raise ToolError("fibonacci_confluence needs between 2 and 6 legs")
+        pivots = self.pivots_at(deviation_pct)
+        tolerance = max(0.05, min(float(tolerance_pct), 3.0)) / 100.0
+
+        points: List[Dict[str, Any]] = []
+        for position, leg in enumerate(legs):
+            if not isinstance(leg, dict):
+                raise ToolError(f"leg #{position + 1} must be an object")
+            start = self._pivot_or_error(pivots, leg.get("start_pivot_index"),
+                                         f"leg {position + 1} start_pivot_index")
+            end = self._pivot_or_error(pivots, leg.get("end_pivot_index"),
+                                       f"leg {position + 1} end_pivot_index")
+            span = end.price - start.price
+            if span == 0:
+                continue
+            anchor_index = leg.get("project_from_pivot_index")
+            for ratio in FIB_RETRACEMENTS:
+                points.append({"leg": position, "kind": f"retrace {ratio}",
+                               "price": end.price - span * ratio})
+            if anchor_index is not None:
+                anchor = self._pivot_or_error(pivots, anchor_index,
+                                              f"leg {position + 1} project_from_pivot_index")
+                for ratio in FIB_EXTENSIONS:
+                    points.append({"leg": position, "kind": f"project {ratio}",
+                                   "price": anchor.price + span * ratio})
+
+        points.sort(key=lambda item: item["price"])
+        clusters: List[Dict[str, Any]] = []
+        for point in points:
+            if clusters and abs(point["price"] - clusters[-1]["prices"][-1]) <= clusters[-1]["prices"][-1] * tolerance:
+                clusters[-1]["prices"].append(point["price"])
+                clusters[-1]["members"].append(f"leg{point['leg'] + 1} {point['kind']}")
+            else:
+                clusters.append({"prices": [point["price"]],
+                                 "members": [f"leg{point['leg'] + 1} {point['kind']}"]})
+
+        zones = []
+        for cluster in clusters:
+            legs_involved = {member.split()[0] for member in cluster["members"]}
+            if len(legs_involved) < 2:
+                continue        # one leg agreeing with itself is not confluence
+            zones.append({
+                "price": round_price(sum(cluster["prices"]) / len(cluster["prices"])),
+                "low": round_price(min(cluster["prices"])),
+                "high": round_price(max(cluster["prices"])),
+                "legs_agreeing": len(legs_involved),
+                "from": cluster["members"][:6],
+            })
+        zones.sort(key=lambda z: (-z["legs_agreeing"], z["price"]))
+        return {"tolerance_pct": round(tolerance * 100, 3), "zones": zones[:8],
+                "note": "Zones where levels from two or more different legs coincide, strongest first."}
+
+    def swing_statistics(self, deviation_pct: float = 1.0) -> Dict[str, Any]:
+        """What THIS chart has actually done, in numbers.
+
+        The alternation guideline and the ratio guidelines are claims about
+        tendencies, and a tendency is only worth using if it holds here.
+        This measures every swing in the loaded history - how far each leg
+        retraced the one before it, how long each took, whether up legs and
+        down legs behave differently - so a forecast can lean on the
+        instrument's own habits rather than on a remembered average."""
+        pivots = self.pivots_at(deviation_pct)
+        if len(pivots) < 4:
+            raise ToolError(f"Only {len(pivots)} pivots at this deviation - too few to measure habits")
+
+        legs = []
+        for previous, current in zip(pivots, pivots[1:]):
+            length = abs(current.price - previous.price)
+            legs.append({"direction": "UP" if current.price > previous.price else "DOWN",
+                         "length": length, "bars": current.index - previous.index})
+        retraces = [round(current["length"] / previous["length"], 3)
+                    for previous, current in zip(legs, legs[1:]) if previous["length"] > 0]
+
+        def median(values):
+            ordered = sorted(values)
+            return round(ordered[len(ordered) // 2], 3) if ordered else None
+
+        ups = [leg for leg in legs if leg["direction"] == "UP"]
+        downs = [leg for leg in legs if leg["direction"] == "DOWN"]
+        return {
+            "deviation_pct": round(_clamp_deviation(deviation_pct), 3),
+            "swings": len(legs),
+            "median_retracement_of_previous_leg": median(retraces),
+            "retracement_quartiles": {
+                "p25": median(sorted(retraces)[: max(1, len(retraces) // 2)]),
+                "p75": median(sorted(retraces)[len(retraces) // 2:]),
+            } if retraces else {},
+            "median_bars_per_swing": median([leg["bars"] for leg in legs]),
+            "up_legs": {"count": len(ups), "median_length": median([leg["length"] for leg in ups]),
+                        "median_bars": median([leg["bars"] for leg in ups])},
+            "down_legs": {"count": len(downs), "median_length": median([leg["length"] for leg in downs]),
+                          "median_bars": median([leg["bars"] for leg in downs])},
+            "note": ("Retracement is each leg as a fraction of the leg before it. Compare the median "
+                     "against the textbook 0.382/0.5/0.618 before leaning on them here, and compare "
+                     "up against down legs before assuming symmetry."),
         }
 
     def check_count(self, deviation_pct: float, structure: str, waves: List[Dict[str, Any]],
@@ -291,8 +423,10 @@ class AnalystToolbox:
                 live = all_accepted[int(index)]
             except (TypeError, ValueError, IndexError):
                 live = all_accepted[-1]
-            projection = project_next_wave(live.get("waves") or [],
-                                           expectation.get("next_label", ""))
+            projection = project_next_wave(
+                live.get("waves") or [], expectation.get("next_label", ""),
+                bar_seconds=self.degree.seconds,
+                expected_bars=expectation.get("expected_bars"))
 
         cover = coverage_of(self.candles, all_accepted)
         self.submitted = {
@@ -380,6 +514,8 @@ class AnalystToolbox:
             "get_candles": self.get_candles,
             "measure_move": self.measure_move,
             "fibonacci_levels": self.fibonacci_levels,
+            "fibonacci_confluence": self.fibonacci_confluence,
+            "swing_statistics": self.swing_statistics,
             "check_count": self.check_count,
             "submit_count": self.submit_count,
         }
@@ -412,6 +548,13 @@ def _summarize(name: str, result: Dict[str, Any]) -> str:
         return f"{result.get('direction')} {result.get('length')} over {result.get('bars')} bars"
     if name == "fibonacci_levels":
         return f"levels for {result.get('leg')}"
+    if name == "fibonacci_confluence":
+        zones = result.get("zones") or []
+        return (f"{len(zones)} confluence zone(s), strongest at {zones[0]['price']}"
+                if zones else "no confluence between these legs")
+    if name == "swing_statistics":
+        return (f"{result.get('swings')} swings, median retrace "
+                f"{result.get('median_retracement_of_previous_leg')}")
     if name == "check_count":
         return "valid" if result.get("valid") else f"rejected: {result.get('broken_rule') or result.get('reason')}"
     if name == "submit_count":
@@ -493,8 +636,63 @@ FUNCTION_DECLARATIONS: List[Dict[str, Any]] = [
                 "deviation_pct": {"type": "number"},
                 "start_pivot_index": {"type": "integer"},
                 "end_pivot_index": {"type": "integer"},
+                "ratios": {"type": "array", "items": {"type": "number"},
+                           "description": "Custom ratios instead of the defaults."},
+                "project_from_pivot_index": {
+                    "type": "integer",
+                    "description": "Project the leg's LENGTH from this third pivot. This is how "
+                                   "every Elliott target is built - wave 3 is wave 1's length from "
+                                   "the end of wave 2 - and without it an extension is measured "
+                                   "from the wrong anchor.",
+                },
             },
             "required": ["deviation_pct", "start_pivot_index", "end_pivot_index"],
+        },
+    },
+    {
+        "name": "fibonacci_confluence",
+        "description": (
+            "Find prices where Fibonacci levels from SEVERAL legs coincide. One leg's 61.8% is a "
+            "line; three legs agreeing within half a percent is a zone, and that is most of what "
+            "Fibonacci is good for. Give 2-6 legs; add project_from_pivot_index to a leg to include "
+            "its projected targets in the search, not just its retracements."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "deviation_pct": {"type": "number"},
+                "tolerance_pct": {"type": "number",
+                                  "description": "How close counts as agreement, in % of price "
+                                                 "(default 0.4)."},
+                "legs": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "start_pivot_index": {"type": "integer"},
+                            "end_pivot_index": {"type": "integer"},
+                            "project_from_pivot_index": {"type": "integer"},
+                        },
+                        "required": ["start_pivot_index", "end_pivot_index"],
+                    },
+                },
+            },
+            "required": ["deviation_pct", "legs"],
+        },
+    },
+    {
+        "name": "swing_statistics",
+        "description": (
+            "What THIS chart has actually done: how far each swing retraced the one before it "
+            "(median and quartiles), how many bars a swing usually takes, and whether up legs and "
+            "down legs behave differently. Use it before leaning on the textbook 0.382/0.5/0.618 - "
+            "a guideline is only worth using if it holds on the instrument in front of you - and to "
+            "estimate how long the next wave should take."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"deviation_pct": {"type": "number"}},
+            "required": ["deviation_pct"],
         },
     },
     {
@@ -594,6 +792,13 @@ FUNCTION_DECLARATIONS: List[Dict[str, Any]] = [
                                                            "unfolding (0-based, across all submissions)."},
                         "next_label": {"type": "string",
                                        "description": "The wave expected next: 2, 3, 4, 5, B or C."},
+                        "expected_bars": {
+                            "type": "integer",
+                            "description": "Roughly how many candles you expect it to take. Use "
+                                           "swing_statistics for the median swing duration on this "
+                                           "chart rather than guessing; the projection is drawn 50 "
+                                           "bars ahead either way.",
+                        },
                     },
                     "required": ["structure_index", "next_label"],
                 },
@@ -639,7 +844,15 @@ from t3_engine.fibonacci.calculator import (  # noqa: E402  (grouped with its us
 PROJECTABLE_LABELS = ("2", "3", "4", "5", "B", "C")
 
 
-def project_next_wave(waves: List[Dict[str, Any]], next_label: str) -> Optional[Dict[str, Any]]:
+# How far ahead the projection is drawn. The chart is the argument for a
+# fixed horizon: a target with no time axis is a horizontal line that never
+# expires, and a path that stops at the last candle is invisible.
+PROJECTION_BARS = 50
+
+
+def project_next_wave(waves: List[Dict[str, Any]], next_label: str,
+                      bar_seconds: int = 300, bars: int = PROJECTION_BARS,
+                      expected_bars: Optional[int] = None) -> Optional[Dict[str, Any]]:
     """Fibonacci targets for the wave the count says comes next.
 
     `waves` are the SERVER-BUILT waves of an already-validated structure
@@ -683,12 +896,39 @@ def project_next_wave(waves: List[Dict[str, Any]], next_label: str) -> Optional[
         return None
 
     anchor = waves[-1]
+    start_time = int(anchor.get("end_time") or 0)
+    start_price = float(anchor.get("end_price") or 0.0)
+
+    # The middle ratio is the one to draw a path to: the extremes are the
+    # tails of the distribution, and a path drawn to a tail reads as a
+    # forecast of the tail.
+    primary_index = len(levels) // 2
+    targets = [{"ratio": level.ratio, "price": round_price(level.price),
+                "primary": i == primary_index} for i, level in enumerate(levels)]
+
+    horizon = max(5, min(int(bars or PROJECTION_BARS), 300))
+    reach = max(1, min(int(expected_bars or horizon), horizon))
+    primary_price = levels[primary_index].price
+    # A straight run to the primary target over `reach` bars, then flat to
+    # the end of the horizon. Straight because the shape of an unformed
+    # wave is not knowable; the honest content here is where and roughly
+    # when, not the wiggles on the way.
+    path = []
+    for step in range(horizon + 1):
+        moved = min(step, reach) / reach
+        path.append({"time": start_time + step * bar_seconds,
+                     "price": round_price(start_price + (primary_price - start_price) * moved)})
+
     return {
         "next_label": label,
         "basis": basis,
-        "from_time": anchor.get("end_time"),
-        "from_price": round_price(anchor.get("end_price", 0.0)),
-        "targets": [{"ratio": level.ratio, "price": round_price(level.price)} for level in levels],
+        "from_time": start_time,
+        "from_price": round_price(start_price),
+        "bars_ahead": horizon,
+        "expected_bars": reach,
+        "primary_target": round_price(primary_price),
+        "targets": targets,
+        "path": path,
     }
 
 

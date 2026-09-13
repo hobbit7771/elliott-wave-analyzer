@@ -125,7 +125,15 @@ G1. ALTERNATION. If wave 2 is a sharp correction, expect wave 4 to be a
 G2. DEPTH OF CORRECTIONS. Wave 4 usually ends within the price span of
     subwave 4 of wave 3, and commonly retraces 38.2% of wave 3. Wave 2 is
     typically deep: 50%, 61.8% or 78.6% of wave 1.
-G3. FIBONACCI RATIOS between waves:
+G3. FIBONACCI RATIOS between waves. Two habits make these useful rather
+    than decorative:
+      - PROJECT from the right anchor. A target is a length projected from
+        where the next wave STARTS, not an extension of the leg's own
+        start: pass project_from_pivot_index to fibonacci_levels.
+      - Look for CONFLUENCE. One leg's 61.8% is a line; three legs agreeing
+        within half a percent is a zone worth acting on. Use
+        fibonacci_confluence rather than reading lists of numbers.
+    The ratios themselves:
       Wave 3 = 1.618, 2.618 or 4.236 x wave 1 (1.618 is the common case).
       Wave 5 = wave 1, or 0.618 x wave 1, or 1.618 x (wave 1 through 3).
       Wave 2 = 0.5, 0.618 or 0.786 x wave 1.
@@ -143,7 +151,21 @@ G6. WAVE PERSONALITY. Wave 3 is normally the longest, strongest and never
     the shortest; wave 5 typically shows less momentum than wave 3; wave B
     is weak and unconvincing; wave C is broad and strong like a third
     wave.
-G7. DEGREE CONSISTENCY. Waves of one degree should be roughly comparable
+G7. CHECK THE GUIDELINES AGAINST THIS CHART. Every ratio above is a
+    tendency, and a tendency is only worth using if it holds on the
+    instrument in front of you. swing_statistics measures what this chart
+    actually does - median retracement of the previous leg, the quartiles
+    around it, how many bars a swing takes, whether up legs and down legs
+    differ. Prefer those numbers to the textbook ones when they disagree,
+    and say in your reasoning which you used.
+
+G8. ALTERNATION IS A FORECAST, NOT AN OBSERVATION. If the corrections in
+    this history have alternated sharp/sideways, the next one is more
+    likely to be the opposite of the last. Same for depth: a shallow wave 2
+    argues for a deeper wave 4. Use swing_statistics to see whether this
+    chart alternates at all before assuming it does.
+
+G9. DEGREE CONSISTENCY. Waves of one degree should be roughly comparable
     in size and duration. If one "wave 2" took three bars and another took
     three hundred, they are not the same degree - fix the degree, not the
     labels. Use the list_pivots tool at a LARGER deviation to see the

@@ -17,7 +17,7 @@
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine, live
 market data from Bybit USDT perpetuals (see "Mobile app + live Bybit"
-below for why Binance was dropped). 389 automated tests, all passing,
+below for why Binance was dropped). 399 automated tests, all passing,
 cover every module described below.
 
 ## Read this first: what "done" means here
@@ -90,7 +90,7 @@ t3_engine/
                       analyst_tools.py = the tools it may use). Never a decision-maker.
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                389 tests, one file per module above
+tests/                399 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Bybit in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -711,7 +711,9 @@ this server executes (`ai_advisor/analyst_tools.py`):
 | `list_pivots(deviation_pct)` | The swing skeleton at a chosen degree. Large deviation = the higher-degree structure, small = subwaves. |
 | `get_candles(start, end)` | Raw OHLC for a range, downsampled, for reading the shape inside a leg. |
 | `measure_move(...)` | Exact price distance, % move and bar count between two pivots. |
-| `fibonacci_levels(...)` | Retracements and extensions of a measured leg. |
+| `fibonacci_levels(...)` | Retracements, extensions, and - with `project_from_pivot_index` - a leg's length **projected from a third pivot**, which is how every Elliott target is actually built. Custom ratios allowed. |
+| `fibonacci_confluence(...)` | Prices where levels from 2-6 different legs coincide. One leg's 61.8% is a line; three legs agreeing within half a percent is a zone. |
+| `swing_statistics(...)` | What *this* chart does: median retracement of the previous leg and its quartiles, bars per swing, up legs vs down legs. |
 | `check_count(...)` | **Runs the real rule engine** and returns the rule that broke. |
 | `submit_count(...)` | The final answer - re-validated before it is accepted. |
 
@@ -729,6 +731,16 @@ oldest third labelled and the recent two thirds untouched, the model having
 simply stopped with nothing asking it to go on. The recent part is the part
 anyone trades, so the playbook now says to reach the last candle.
 
+**Forecasting leans on the chart's own habits.** Every Fibonacci ratio in
+the playbook is a tendency, and a tendency is only worth using if it holds
+on the instrument in front of you - so `swing_statistics` measures what
+this history actually did, and the playbook says to prefer those numbers to
+the textbook ones when they disagree and to say which were used.
+Alternation is treated as a *forecast* rather than an observation: if this
+chart's corrections have alternated sharp/sideways, the next one is more
+likely to be the opposite of the last, and a shallow wave 2 argues for a
+deeper wave 4 - but only after checking that this chart alternates at all.
+
 **The count says where price goes next.** A count that stops at the last
 confirmed pivot answers "what happened"; the reason to count waves at all
 is what the count implies comes next, and that is arithmetic over waves
@@ -737,9 +749,17 @@ and which wave it expects (2, 3, 4, 5, B or C), and **the server computes
 the targets** with the same Fibonacci code the deterministic engine uses -
 wave 5 off wave 1's length from the end of wave 4, wave C off wave A's from
 the end of B, and so on. The model never supplies a price. The dashboard
-draws the targets forward from the last labelled swing, dashed and in their
-own colour, because they are the one thing on that chart that has not
-happened yet. A projection that needs a wave the count does not have comes
+draws it **50 candles past the last one**, dashed and in its own colour,
+because it is the one thing on that chart that has not happened yet - a
+target with no time axis is a horizontal line that never expires, and a
+path that stops at the last candle is invisible. The path runs to the
+*middle* ratio rather than an extreme, since a path drawn to a tail of the
+distribution gets read as a forecast of the tail; the other targets fan out
+as thinner lines and as labelled levels, with the primary one starred. The
+model may say how many candles it expects the wave to take (from
+`swing_statistics`, not a guess) - that changes how fast the path reaches
+the target, never the size of the window, so two runs stay visually
+comparable. A projection that needs a wave the count does not have comes
 back absent rather than invented.
 
 A run that **stalls part way keeps the work it already did**. The agent
@@ -868,7 +888,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (389 tests)
+# Run the automated test suite (399 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)

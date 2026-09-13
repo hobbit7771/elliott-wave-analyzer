@@ -276,7 +276,7 @@ def test_the_agent_is_given_tools_and_the_playbook_not_a_pre_made_count():
         assert leak not in brief, f"the opening brief leaks {leak!r}"
     assert [t["function"]["name"] for t in payload["tools"]] == [
         "list_pivots", "get_candles", "measure_move", "fibonacci_levels",
-        "check_count", "submit_count"]
+        "fibonacci_confluence", "swing_statistics", "check_count", "submit_count"]
     assert all(t["type"] == "function" for t in payload["tools"])
     system = payload["messages"][0]["content"]
     assert "Wave 3 is never the shortest" in system
@@ -737,3 +737,131 @@ def test_the_playbook_tells_the_model_to_cover_the_whole_chart_and_project():
     assert "SAY WHAT COMES NEXT" in ELLIOTT_PLAYBOOK
     assert "complete=true" in ELLIOTT_PLAYBOOK
     assert "Do not supply prices" in ELLIOTT_PLAYBOOK
+
+
+# ---- richer Fibonacci, and forecasting from the chart's own habits ----
+
+def test_fibonacci_projects_from_a_third_anchor_not_the_legs_own_start():
+    """Every Elliott target is a length projected from where the NEXT wave
+    starts. Measuring an extension from the leg's own start is the wrong
+    anchor, and that difference is the whole usefulness of the tool."""
+    box = toolbox()
+    plain = box.fibonacci_levels(1.0, 0, 1)
+    projected = box.fibonacci_levels(1.0, 0, 1, project_from_pivot_index=2)
+
+    assert "projections" not in plain
+    assert projected["projected_from"]["pivot_index"] == 2
+    assert projected["projections"] != projected["extensions"]
+
+
+def test_custom_ratios_are_honoured():
+    box = toolbox()
+    result = box.fibonacci_levels(1.0, 0, 1, ratios=[0.5, 0.707])
+    assert sorted(result["retracements"]) == ["0.500", "0.707"]
+
+
+def test_confluence_only_reports_agreement_between_DIFFERENT_legs():
+    """One leg agreeing with itself is not confluence, and reporting it as
+    such would turn every chart into a wall of zones."""
+    box = toolbox()
+    result = box.fibonacci_confluence(1.0, legs=[
+        {"start_pivot_index": 0, "end_pivot_index": 1},
+        {"start_pivot_index": 2, "end_pivot_index": 3},
+    ], tolerance_pct=0.5)
+
+    for zone in result["zones"]:
+        assert zone["legs_agreeing"] >= 2
+        assert len({member.split()[0] for member in zone["from"]}) >= 2
+
+
+def test_confluence_refuses_a_single_leg():
+    with pytest.raises(ToolError, match="between 2 and 6 legs"):
+        toolbox().fibonacci_confluence(1.0, legs=[{"start_pivot_index": 0, "end_pivot_index": 1}])
+
+
+def test_swing_statistics_measure_this_chart_rather_than_a_remembered_average():
+    """A guideline is only worth using if it holds on the instrument in
+    front of you."""
+    result = toolbox().swing_statistics(1.0)
+    assert result["swings"] > 0
+    assert result["median_retracement_of_previous_leg"] is not None
+    assert result["up_legs"]["count"] + result["down_legs"]["count"] == result["swings"]
+    assert "0.382/0.5/0.618" in result["note"]
+
+
+def test_swing_statistics_refuses_a_history_too_short_to_have_habits():
+    from t3_engine.ai_advisor.analyst_tools import AnalystToolbox
+
+    box = AnalystToolbox(CANDLES, DEGREE)
+    with pytest.raises(ToolError, match="too few to measure habits"):
+        box.swing_statistics(20.0)      # a deviation that finds almost nothing
+
+
+# ---- the 50-candle forward path ----
+
+def test_the_projection_is_drawn_past_the_last_candle():
+    """A target with no time axis is a horizontal line that never expires,
+    and a path that stops at the last candle is invisible."""
+    from t3_engine.ai_advisor.analyst_tools import PROJECTION_BARS, project_next_wave
+
+    waves = [
+        {"label": "1", "start_price": 100.0, "end_price": 120.0, "end_time": 0},
+        {"label": "2", "start_price": 120.0, "end_price": 110.0, "end_time": 300},
+        {"label": "3", "start_price": 110.0, "end_price": 150.0, "end_time": 600},
+        {"label": "4", "start_price": 150.0, "end_price": 138.0, "end_time": 900},
+    ]
+    projection = project_next_wave(waves, "5", bar_seconds=300)
+
+    assert projection["bars_ahead"] == PROJECTION_BARS
+    assert len(projection["path"]) == PROJECTION_BARS + 1
+    assert projection["path"][0] == {"time": 900, "price": 138.0}
+    assert projection["path"][-1]["time"] == 900 + 300 * PROJECTION_BARS
+    times = [point["time"] for point in projection["path"]]
+    assert times == sorted(times)            # the chart needs them ordered
+
+
+def test_the_path_runs_to_the_middle_ratio_not_an_extreme():
+    """A path drawn to a tail of the distribution gets read as a forecast
+    of the tail."""
+    from t3_engine.ai_advisor.analyst_tools import project_next_wave
+
+    waves = [
+        {"label": "1", "start_price": 100.0, "end_price": 120.0, "end_time": 0},
+        {"label": "2", "start_price": 120.0, "end_price": 110.0, "end_time": 300},
+        {"label": "3", "start_price": 110.0, "end_price": 150.0, "end_time": 600},
+        {"label": "4", "start_price": 150.0, "end_price": 138.0, "end_time": 900},
+    ]
+    projection = project_next_wave(waves, "5", bar_seconds=300)
+    primary = [t for t in projection["targets"] if t["primary"]]
+
+    assert len(primary) == 1
+    assert primary[0]["price"] == projection["primary_target"]
+    assert projection["path"][-1]["price"] == projection["primary_target"]
+    prices = [t["price"] for t in projection["targets"]]
+    assert min(prices) < projection["primary_target"] < max(prices)
+
+
+def test_an_expected_duration_shortens_the_reach_but_not_the_horizon():
+    """The model says how long it expects the wave to take; the chart still
+    shows the same window, so two runs stay visually comparable."""
+    from t3_engine.ai_advisor.analyst_tools import project_next_wave
+
+    waves = [
+        {"label": "A", "start_price": 150.0, "end_price": 130.0, "end_time": 0},
+        {"label": "B", "start_price": 130.0, "end_price": 142.0, "end_time": 300},
+    ]
+    quick = project_next_wave(waves, "C", bar_seconds=300, expected_bars=10)
+    assert quick["expected_bars"] == 10
+    assert quick["bars_ahead"] == 50
+    # Reached the target by bar 10, then held flat to the horizon.
+    assert quick["path"][10]["price"] == quick["primary_target"]
+    assert quick["path"][-1]["price"] == quick["primary_target"]
+
+
+def test_the_playbook_teaches_confluence_projection_anchors_and_alternation():
+    from t3_engine.ai_advisor.playbook import ELLIOTT_PLAYBOOK
+
+    assert "project_from_pivot_index" in ELLIOTT_PLAYBOOK
+    assert "fibonacci_confluence" in ELLIOTT_PLAYBOOK
+    assert "ALTERNATION IS A FORECAST" in ELLIOTT_PLAYBOOK
+    assert "swing_statistics" in ELLIOTT_PLAYBOOK
