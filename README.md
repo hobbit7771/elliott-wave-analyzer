@@ -17,7 +17,7 @@
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine, live
 market data from Bybit USDT perpetuals (see "Mobile app + live Bybit"
-below for why Binance was dropped). 303 automated tests, all passing,
+below for why Binance was dropped). 310 automated tests, all passing,
 cover every module described below.
 
 ## Read this first: what "done" means here
@@ -90,7 +90,7 @@ t3_engine/
                       analyst_tools.py = the tools it may use). Never a decision-maker.
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                303 tests, one file per module above
+tests/                310 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Bybit in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -554,8 +554,25 @@ Two things this does **not** change:
   trades, no settings, no state, no network. The worst a confused model can
   do is waste its own steps.
 
-Rejected structures are shown in the panel with the rule they broke, next
-to a transcript of every tool call the agent made - **with its arguments**,
+The panel shows the **conversation itself**: what the model said, what it
+was thinking (where the model streams reasoning separately, which this one
+does), what it called, and what came back - in order, numbered by step. The
+question "why did it stop at step 2" is unanswerable from a list of tool
+names, and guessing at it was costing real debugging time.
+
+A step budget that merely cuts the model off produces nothing, so on its
+**last allowed step the model is told so** and asked to submit whatever it
+is genuinely confident in, partial or not. Once it has actually looked at
+some pivots, `tool_choice` is pinned to `submit_count` for that step - but
+never before, since forcing an answer out of a model that has looked at
+nothing just manufactures indices for the validator to reject. That
+instruction appears in the transcript too, because it changes what the
+model does. In practice the agent needs **6+ steps** (skeleton, finer
+degree, measure, test, fix, answer); the UI says so, and above ~12 rate
+limits become the binding constraint rather than the budget.
+
+Rejected structures are shown with the rule they broke, next to a
+transcript of every tool call the agent made - **with its arguments**,
 so the transcript says which swings it listed and which legs it compared
 rather than just naming verbs. The section is never hidden: "it made no
 tool calls at all" is itself the finding when a model answers in prose
@@ -624,7 +641,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (303 tests)
+# Run the automated test suite (310 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)

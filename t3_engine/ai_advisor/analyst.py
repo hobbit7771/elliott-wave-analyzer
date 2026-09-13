@@ -69,7 +69,23 @@ MAX_MAX_STEPS = 30
 # case is steps x timeout - long enough for a proxy in front of this app to
 # give up first, which loses the transcript along with the answer. Hitting
 # this returns what the agent HAS done rather than nothing.
-DEFAULT_RUN_BUDGET_SECONDS = 480.0
+# Raised from 480s once 429s started being retried rather than fatal: a
+# retry can legitimately sleep half a minute, and a budget that expires
+# during a sanctioned wait would throw away a run that was about to
+# continue. The frontend's own request timeout is set above this so the
+# server is always the side that decides, and always returns a transcript.
+DEFAULT_RUN_BUDGET_SECONDS = 600.0
+
+# Told to the model on its LAST allowed step. Without it, a step budget
+# does not end a run - it interrupts one, and an agent that was still
+# exploring when the budget ran out hands back nothing at all. With it, the
+# budget becomes a deadline the model can plan against, which is how a
+# 2-step run can still produce a (small) count instead of an empty panel.
+FINAL_STEP_NUDGE = (
+    "This is your LAST step. Call submit_count now with whatever you are genuinely confident in, "
+    "even if that is a single structure or a partial count, and say in `reasoning` what you did not "
+    "get to check. A small verified count is worth far more than nothing. Do not call any other tool."
+)
 # Generous on purpose. The failure this replaces was a count truncated
 # mid-JSON because 2048 tokens covered the model's thinking but not its
 # answer; a labelling run that reasons across a whole history needs room.
@@ -88,6 +104,10 @@ class AnalystResult:
     finished: bool = False
     note: str = ""
     error: str = ""
+    # The conversation itself, in order: what the model said, what it was
+    # thinking, what it called, and what came back. Without this the only
+    # answer to "why did it stop there" is a guess.
+    transcript: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def waves(self) -> List[Dict[str, Any]]:
@@ -123,11 +143,19 @@ def opening_brief(candles: List[Candle], symbol: str, degree: Timeframe) -> str:
 
 def _tool_payload(system_prompt: str, messages: List[Dict[str, Any]],
                   seed: Optional[int] = DEFAULT_SEED,
-                  reasoning_effort: Optional[str] = None) -> Dict[str, Any]:
+                  reasoning_effort: Optional[str] = None,
+                  force_submit: bool = False) -> Dict[str, Any]:
+    """`force_submit` pins tool_choice to submit_count, which is what turns
+    "ran out of steps" into "answered with what it had". Only ever used on
+    the last step, and only once the model has actually looked at some
+    pivots - forcing a submission from a model that has seen nothing would
+    just manufacture indices for the validator to reject."""
+    choice: Any = ({"type": "function", "function": {"name": "submit_count"}}
+                   if force_submit else "auto")
     return apply_model_options({
         "messages": [{"role": "system", "content": system_prompt}] + messages,
         "tools": openai_tools(),
-        "tool_choice": "auto",
+        "tool_choice": choice,
         "temperature": 0.15,   # labelling is analysis, not invention
         "max_tokens": ANALYST_MAX_OUTPUT_TOKENS,
     }, seed=seed, reasoning_effort=reasoning_effort)
@@ -198,16 +226,29 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
     note = ""
     error = ""
     steps_used = 0
+    transcript: List[Dict[str, Any]] = []
+    seen_pivots = False
     started = time.monotonic()
+
     for step in range(max_steps):
         if step > 0 and time.monotonic() - started > run_budget_seconds:
             note = (f"Stopped after {step} step(s): the run passed its {run_budget_seconds:.0f}s "
                     "budget. Everything the analyst did up to that point is below.")
             break
+
+        # On the final step, stop exploring and answer. A budget that just
+        # cuts the model off mid-thought produces nothing; a budget the
+        # model KNOWS about produces a smaller count.
+        final_step = step == max_steps - 1
+        if final_step and toolbox.submitted is None:
+            messages.append({"role": "user", "content": FINAL_STEP_NUDGE})
+            transcript.append({"role": "system", "step": step + 1, "text": FINAL_STEP_NUDGE})
+
         steps_used = step + 1
         try:
             data = _post(api_key, model,
-                         _tool_payload(ELLIOTT_PLAYBOOK, messages, seed, reasoning_effort),
+                         _tool_payload(ELLIOTT_PLAYBOOK, messages, seed, reasoning_effort,
+                                       force_submit=final_step and seen_pivots),
                          client, timeout, base_url)
             message = _assistant_turn(data)
         except AIAdvisorError as exc:
@@ -218,7 +259,15 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
                     "The steps completed before that are below.")
             steps_used = step   # the failed step did no work
             break
+
         calls = message.get("tool_calls") or []
+        transcript.append({
+            "role": "assistant",
+            "step": steps_used,
+            "text": (message.get("content") or "").strip(),
+            "reasoning": (message.get("reasoning_content") or "").strip(),
+            "tool_calls": [(c.get("function") or {}).get("name", "") for c in calls],
+        })
 
         if not calls:
             # The model answered in prose. If it already submitted, fine.
@@ -235,10 +284,16 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
             args = _parse_tool_arguments(call)
             if "__arguments_error__" in args:
                 result = {"error": f"Bad arguments for {name}: {args['__arguments_error__']}"}
-                toolbox.calls.append(ToolCallRecord(name=name, args={},
-                                                    result_summary=f"error: {result['error']}"))
+                summary = f"error: {result['error']}"
+                toolbox.calls.append(ToolCallRecord(name=name, args={}, result_summary=summary))
+                args = {}
             else:
                 result = toolbox.call(name, args)
+                summary = toolbox.calls[-1].result_summary
+            if name == "list_pivots" and "error" not in result:
+                seen_pivots = True
+            transcript.append({"role": "tool", "step": steps_used, "name": name,
+                               "args": args, "result": summary})
             messages.append({
                 "role": "tool",
                 "tool_call_id": call.get("id", ""),
@@ -250,8 +305,10 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
             break
     else:
         if toolbox.submitted is None:
-            note = (f"The model used all {max_steps} steps without submitting a count. "
-                    "Raise the step budget or load a shorter history.")
+            note = (f"The model used all {max_steps} step(s) without submitting a count, even after "
+                    "being told the last one was its last. Raise the step budget - this agent "
+                    "normally needs 6 or more steps to look at the chart and verify a count before "
+                    "answering.")
 
     submitted = toolbox.submitted or {}
     return AnalystResult(
@@ -265,4 +322,5 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
         finished=toolbox.submitted is not None,
         note=note,
         error=error,
+        transcript=transcript,
     )

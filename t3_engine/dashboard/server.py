@@ -144,7 +144,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-017"
+BUILD_VERSION = "BUILD-CHECK-018"
 
 
 @app.get("/api/health")
@@ -592,6 +592,10 @@ def ai_analyst(api_key: str = Body("", embed=True), source: str = Body("syntheti
         "steps_used": result.steps_used,
         "steps": [{"tool": call.name, "args": call.args, "result": call.result_summary}
                   for call in result.steps],
+        # The conversation itself. "Why did it stop there" is unanswerable
+        # from a list of tool names, so the model's own words and its
+        # reasoning travel with the result.
+        "transcript": result.transcript,
         "accepted": result.accepted,
         "rejected": result.rejected,
         "waves": result.waves,
