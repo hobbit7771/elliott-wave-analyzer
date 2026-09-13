@@ -30,7 +30,7 @@ def chat_response(text: str, finish_reason: str = "stop") -> httpx.Response:
 def test_request_commentary_parses_a_chat_completion():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["authorization"] == "Bearer sk-test"
-        assert str(request.url) == "https://orcarouter.ai/api/v1/chat/completions"
+        assert str(request.url) == "https://api.orcarouter.ai/v1/chat/completions"
         return chat_response("This wave 3 count looks reasonable but watch for extension.")
 
     result = request_commentary("sk-test", {"wave": "3", "confidence": 82}, client=make_client(handler))
@@ -179,12 +179,65 @@ def test_empty_answer_text_is_an_error():
         request_commentary("sk-test", {"wave": "3"}, client=make_client(handler))
 
 
-def test_network_failure_is_reported_clearly():
+def test_a_connect_failure_points_at_the_endpoint():
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("no route to host", request=request)
 
-    with pytest.raises(AIAdvisorError, match="Could not reach the OrcaRouter API"):
+    with pytest.raises(AIAdvisorError, match="Could not connect"):
         request_commentary("sk-test", {"wave": "3"}, client=make_client(handler))
+
+
+def test_a_read_timeout_is_not_reported_as_an_unreachable_endpoint():
+    """This is the production failure it fixes: a read timeout was printed
+    as "could not access the API", which is the wrong diagnosis. The
+    connection WORKED - the model was still thinking - and that has a
+    completely different fix from a wrong URL."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    with pytest.raises(AIAdvisorError) as excinfo:
+        request_commentary("sk-test", {"wave": "3"}, timeout=180, client=make_client(handler))
+    message = str(excinfo.value)
+    assert "did not answer within 180s" in message
+    assert "connection to" in message and "worked" in message
+    assert "Could not connect" not in message
+    assert "Raise the Timeout field" in message
+
+
+def test_connecting_is_not_given_the_long_read_budget():
+    """One scalar timeout would make an unreachable host hang for the full
+    read budget before admitting it. Connect fails fast; reads are patient."""
+    from t3_engine.ai_advisor.advisor import CONNECT_TIMEOUT, build_timeout
+
+    timeout = build_timeout(300)
+    assert timeout.connect == CONNECT_TIMEOUT
+    assert timeout.read == 300
+
+
+def test_the_read_timeout_is_bounded_at_both_ends():
+    from t3_engine.ai_advisor.advisor import MAX_READ_TIMEOUT, build_timeout
+
+    assert build_timeout(1).read == 10.0
+    assert build_timeout(99999).read == MAX_READ_TIMEOUT
+
+
+def test_ping_confirms_the_key_url_and_model_in_one_tiny_request():
+    """A wrong key, a wrong URL, a dead model id and a model that merely
+    queues all look identical from the dashboard. This separates them."""
+    from t3_engine.ai_advisor.advisor import ping
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return chat_response("ok")
+
+    result = ping("sk-test", model="deepseek/deepseek-v4-flash", client=make_client(handler))
+    assert result["ok"] is True
+    assert result["answer"] == "ok"
+    assert result["endpoint"].endswith("/chat/completions")
+    # Tiny on purpose: this must not itself be slow enough to time out.
+    assert seen["max_tokens"] <= 16
 
 
 # ---- wave-count proposals ----

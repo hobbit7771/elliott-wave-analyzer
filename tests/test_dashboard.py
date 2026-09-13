@@ -503,7 +503,7 @@ def test_ai_label_rejects_a_count_that_breaks_a_hard_elliott_rule():
     wave 2 retraces straight past the start of wave 1. The server rebuilds
     it from its OWN pivots, the hard rules fire, and the answer is a
     labelled failure rather than a drawn wave."""
-    def label_five_consecutive(api_key, pivots, direction, model=None, base_url=None):
+    def label_five_consecutive(api_key, pivots, direction, model=None, base_url=None, timeout=None):
         start = _first_index_of_kind(pivots, "HIGH" if direction == "DOWN" else "LOW")
         return _FakeProposal([
             {"label": label, "start_pivot_index": start + i, "end_pivot_index": start + i + 1}
@@ -527,7 +527,7 @@ def test_ai_label_accepts_and_returns_server_built_waves_for_a_legal_count():
     server's pivots - the model supplied indices, never prices."""
     captured = {}
 
-    def label_from_real_pivots(api_key, pivots, direction, model=None, base_url=None):
+    def label_from_real_pivots(api_key, pivots, direction, model=None, base_url=None, timeout=None):
         captured["pivots"] = pivots
         captured["direction"] = direction
         start = _first_index_of_kind(pivots, "HIGH" if direction == "DOWN" else "LOW")
@@ -552,7 +552,7 @@ def test_ai_label_never_takes_pivots_from_the_caller():
     """If the client could supply pivots, "the server validated the
     indices" would be a claim about the caller's data, not the chart.
     Client-sent pivots must be ignored outright."""
-    def echo_pivot_count(api_key, pivots, direction, model=None, base_url=None):
+    def echo_pivot_count(api_key, pivots, direction, model=None, base_url=None, timeout=None):
         return _FakeProposal([{"label": "1", "start_pivot_index": 0, "end_pivot_index": 1}],
                              reasoning=f"saw {len(pivots)} pivots")
 
@@ -586,9 +586,10 @@ def test_analyst_requires_a_key_like_every_other_ai_path():
 
 
 class _FakeAnalystResult:
-    def __init__(self, accepted, rejected=None, note=""):
+    def __init__(self, accepted, rejected=None, note="", error=""):
         self.accepted = accepted
         self.rejected = rejected or []
+        self.error = error
         self.summary = "Five waves up look complete."
         self.reasoning = "Wave 3 is the longest."
         self.steps = []
@@ -685,7 +686,7 @@ def test_the_api_base_url_reaches_every_ai_endpoint():
             "base_url": "https://orcarouter.ai/v2"})
     assert seen["analyst"] == "https://orcarouter.ai/v2"
 
-    def fake_commentary(api_key, context, model=None, base_url=None):
+    def fake_commentary(api_key, context, model=None, base_url=None, timeout=None):
         seen["advice"] = base_url
         return SimpleNamespace(text="ok", model=model)
 
@@ -693,3 +694,68 @@ def test_the_api_base_url_reaches_every_ai_endpoint():
         client.post("/api/ai/advice", json={
             "api_key": "sk-test", "context": {}, "base_url": "https://orcarouter.ai/v2"})
     assert seen["advice"] == "https://orcarouter.ai/v2"
+
+
+def test_a_partial_run_returns_its_transcript_instead_of_nothing():
+    """A run that stalls part way still did real work, and the transcript is
+    information ("it listed the swings, measured wave 3, then the model
+    stopped answering"). Throwing that away and showing an empty result
+    would read as a finished analysis that found nothing."""
+    partial = _FakeAnalystResult([], note="Stopped at step 3.",
+                                 error="The model did not answer within 180s.")
+    partial.finished = False
+    partial.steps_used = 2
+    with patch.object(server_module, "run_analyst", return_value=partial):
+        resp = client.post("/api/ai/analyst",
+                           json={"api_key": "sk-test", "source": "synthetic", "cycles": 2})
+    data = resp.json()
+    assert resp.status_code == 200
+    assert data["finished"] is False
+    assert "did not answer within" in data["error"]
+    assert data["steps_used"] == 2
+
+
+def test_ping_reports_a_broken_setup_as_an_answer_not_as_a_server_error():
+    """A 5xx here would read in the UI as "the dashboard is broken". The
+    request was fine; the answer is "your key/URL/model doesn't work"."""
+    with patch.object(server_module, "ai_ping",
+                      side_effect=server_module.AIAdvisorError("OrcaRouter API error 401: bad key")):
+        resp = client.post("/api/ai/ping", json={"api_key": "sk-wrong"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
+    assert "401" in body["error"]
+
+
+def test_ping_passes_the_whole_setup_through_so_it_tests_what_the_real_run_uses():
+    """A connection check against different settings than the real run uses
+    would be worse than none at all."""
+    seen = {}
+
+    def fake_ping(api_key, model=None, base_url=None, timeout=None):
+        seen.update({"key": api_key, "model": model, "base_url": base_url})
+        return {"ok": True, "model": model, "endpoint": base_url, "answer": "ok"}
+
+    with patch.object(server_module, "ai_ping", side_effect=fake_ping):
+        client.post("/api/ai/ping", json={
+            "api_key": "sk-test", "model": "deepseek/deepseek-v4-flash",
+            "base_url": "https://api.orcarouter.ai/v1"})
+    assert seen["key"] == "sk-test"
+    assert seen["model"] == "deepseek/deepseek-v4-flash"
+    assert seen["base_url"] == "https://api.orcarouter.ai/v1"
+
+
+def test_index_exposes_the_connection_test_and_timeout_controls():
+    resp = client.get("/")
+    assert "pingAi" in resp.text
+    assert "/api/ai/ping" in resp.text
+    assert "aiTimeout" in resp.text
+
+
+def test_the_analyst_error_text_is_rendered_not_only_the_step_count():
+    """"Stopped after 2 steps" without the reason is not a diagnosis. The
+    error line is the one that says whether to wait longer, change the
+    model, or fix the URL."""
+    resp = client.get("/")
+    assert "data.error ?" in resp.text
+    assert 'class="note error"' in resp.text

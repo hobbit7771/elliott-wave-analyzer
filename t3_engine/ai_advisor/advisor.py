@@ -24,13 +24,13 @@ is OpenAI-compatible chat completions, so the payloads here are plain
 `messages` + `tools` rather than Gemini's `contents`/`systemInstruction`/
 `functionCall` shapes.
 
-UNVERIFIED ENDPOINT: the sandbox this was written in cannot reach
-orcarouter.ai (the egress proxy refuses the CONNECT), so `/api/v1/chat/
-completions` below is the OpenAI-compatible convention every router of
-this kind exposes - it is NOT something this code has confirmed against
-the live service. That is exactly why the base URL is overridable per
-request and by environment variable, the same way the model id is: if the
-real path differs, it is a paste in the dashboard rather than a redeploy.
+ENDPOINT: the sandbox this was written in cannot reach orcarouter.ai (the
+egress proxy refuses the CONNECT), so the default below is not verified
+here. It is, however, the URL that a production run reached successfully
+at the transport level - see the comment on DEFAULT_API_BASE. It stays
+overridable per request and by environment variable, the same way the
+model id is: if it turns out wrong, that is a paste in the dashboard
+rather than a redeploy.
 
 The practical reason this keeps changing, and why the model name is an
 editable field in the UI rather than a constant in this file: a router
@@ -67,7 +67,14 @@ import httpx
 # constantly, so the dashboard keeps the model name editable and surfaces
 # the API's own error text verbatim when a name stops resolving.
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash-free"
-DEFAULT_API_BASE = os.getenv("T3_AI_API_BASE", "https://orcarouter.ai/api/v1")
+# Default moved from https://orcarouter.ai/api/v1 to this after production
+# evidence: a run against api.orcarouter.ai/v1 failed with a READ timeout,
+# not a connect error or a 404. That means DNS resolved, TCP and TLS
+# completed and the request was accepted - the host and path are live, and
+# the model was simply still working. A wrong host fails at connect; a
+# wrong path 404s immediately. Still overridable, for the same reason as
+# before: nothing here has completed a real call.
+DEFAULT_API_BASE = os.getenv("T3_AI_API_BASE", "https://api.orcarouter.ai/v1")
 
 # Sent so the call is attributable on the router's side. Neither header is
 # required, and neither carries anything about the user.
@@ -83,6 +90,21 @@ APP_URL = "https://github.com/hobbit7771/elliott-wave-analyzer"
 # parse error that sends you looking at the wrong thing.
 COMMENTARY_MAX_OUTPUT_TOKENS = 2048
 COUNT_MAX_OUTPUT_TOKENS = 8192
+
+# Timeouts, split by phase rather than one number for everything.
+#
+# Connecting is either fast or broken - 15s is already generous, and a short
+# connect timeout is what makes "the host is wrong" fail quickly instead of
+# looking like a slow model. READING is the slow part: a free router model
+# queues behind other traffic, and a reasoning model thinks before it emits
+# a first token, so a read can legitimately take minutes. Production hit
+# exactly this - a read timeout at 120s on the analyst, reported as "could
+# not reach the API", which is the wrong diagnosis: the connection worked
+# fine.
+CONNECT_TIMEOUT = 15.0
+WRITE_TIMEOUT = 60.0
+DEFAULT_READ_TIMEOUT = 180.0
+MAX_READ_TIMEOUT = 600.0
 
 ADVISOR_SYSTEM_PROMPT = (
     "You are a risk-aware trading assistant reviewing an Elliott Wave signal that has "
@@ -186,6 +208,35 @@ def _api_error_message(resp: httpx.Response, model: str) -> str:
     return f"OrcaRouter API error {resp.status_code}: {detail}{hint}"
 
 
+def build_timeout(read_seconds: float) -> httpx.Timeout:
+    """Granular timeout. One scalar would apply the long read budget to the
+    connect phase too, so an unreachable host would hang for minutes before
+    admitting it."""
+    read = max(10.0, min(float(read_seconds), MAX_READ_TIMEOUT))
+    return httpx.Timeout(connect=CONNECT_TIMEOUT, read=read, write=WRITE_TIMEOUT, pool=read)
+
+
+def _transport_error_message(exc: httpx.RequestError, url: str, read_seconds: float) -> str:
+    """Name the phase that failed. "Could not reach the API" is true of a
+    DNS or TCP failure and FALSE of a read timeout - there the connection
+    worked and the model simply did not answer in time, which has a
+    completely different fix (wait longer, smaller job, faster model)."""
+    if isinstance(exc, httpx.ReadTimeout):
+        return (f"The model did not answer within {read_seconds:.0f}s. The connection to {url} worked - "
+                "this is the model taking too long, not an unreachable endpoint. Free router models "
+                "queue behind other traffic. Raise the Timeout field, pick a faster model, or lower "
+                "the step budget.")
+    if isinstance(exc, httpx.ConnectTimeout):
+        return (f"Could not open a connection to {url} within {CONNECT_TIMEOUT:.0f}s. Check the API "
+                "base URL in the AI tab.")
+    if isinstance(exc, httpx.ConnectError):
+        return (f"Could not connect to {url}: {exc}. The host may be wrong or unreachable from this "
+                "server - check the API base URL in the AI tab.")
+    if isinstance(exc, httpx.WriteTimeout):
+        return f"Timed out sending the request to {url}. The history may be too large."
+    return f"Request to {url} failed: {exc}"
+
+
 def _headers(api_key: str) -> Dict[str, str]:
     return {
         "Authorization": f"Bearer {api_key}",
@@ -203,7 +254,7 @@ def _post(api_key: str, model: str, payload: Dict[str, Any],
 
     url = chat_url(base_url)
     body = {**payload, "model": model}
-    http_client = client or httpx.Client(timeout=timeout)
+    http_client = client or httpx.Client(timeout=build_timeout(timeout))
     owns_client = client is None
     try:
         resp = http_client.post(url, headers=_headers(api_key), json=body)
@@ -211,7 +262,7 @@ def _post(api_key: str, model: str, payload: Dict[str, Any],
             raise AIAdvisorError(_api_error_message(resp, model))
         data = resp.json()
     except httpx.RequestError as exc:
-        raise AIAdvisorError(f"Could not reach the OrcaRouter API at {url}: {exc}")
+        raise AIAdvisorError(_transport_error_message(exc, url, timeout))
     finally:
         if owns_client:
             http_client.close()
@@ -266,7 +317,7 @@ def _extract_text(data: Dict[str, Any]) -> str:
 
 
 def request_commentary(api_key: str, context: Dict[str, Any], model: str = DEFAULT_MODEL,
-                        client: Optional[httpx.Client] = None, timeout: float = 60.0,
+                        client: Optional[httpx.Client] = None, timeout: float = DEFAULT_READ_TIMEOUT,
                         base_url: Optional[str] = None) -> AdvisorResponse:
     user_content = (
         "Here is the current Elliott Wave engine state as JSON. Give your second opinion.\n\n"
@@ -301,7 +352,7 @@ def _parse_count_json(text: str) -> Dict[str, Any]:
 
 def request_wave_count(api_key: str, pivots: List[Dict[str, Any]], direction: str,
                         model: str = DEFAULT_MODEL, client: Optional[httpx.Client] = None,
-                        timeout: float = 90.0, base_url: Optional[str] = None) -> WaveCountProposal:
+                        timeout: float = DEFAULT_READ_TIMEOUT, base_url: Optional[str] = None) -> WaveCountProposal:
     """Ask for a count over the whole pivot history. The returned `waves`
     are RAW model output - structurally unvalidated on purpose. Pass them
     straight to elliott_engine.external_count.validate_external_count;
@@ -328,3 +379,32 @@ def request_wave_count(api_key: str, pivots: List[Dict[str, Any]], direction: st
         model=model,
         raw=data,
     )
+
+
+def ping(api_key: str, model: str = DEFAULT_MODEL, base_url: Optional[str] = None,
+         client: Optional[httpx.Client] = None, timeout: float = 60.0) -> Dict[str, Any]:
+    """One tiny round trip, to separate "the setup is wrong" from "this
+    particular job is too slow".
+
+    Worth its own function because those two failures look identical from
+    the dashboard: a wrong key, a wrong URL, a retired model id and a model
+    that simply queues for four minutes all present as "nothing happened".
+    This asks for a single token, so anything other than a prompt answer is
+    a configuration problem rather than a patience problem.
+
+    It also reports whether the model advertises tool calling, which the AI
+    Analyst requires and many free models lack."""
+    payload = {
+        "messages": [{"role": "user", "content": "Reply with the single word: ok"}],
+        "max_tokens": 16,
+        "temperature": 0,
+    }
+    data = _post(api_key, model, payload, client, timeout, base_url)
+    message = _message_of(data)
+    return {
+        "ok": True,
+        "model": data.get("model") or model,
+        "endpoint": chat_url(base_url),
+        "answer": (message.get("content") or "").strip()[:200],
+        "finish_reason": _finish_reason(data),
+    }

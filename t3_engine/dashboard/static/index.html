@@ -170,14 +170,33 @@
 
       <h2>API base URL</h2>
       <div class="field-row">
-        <input id="aiBaseUrl" type="text" placeholder="https://orcarouter.ai/api/v1" />
+        <input id="aiBaseUrl" type="text" placeholder="https://api.orcarouter.ai/v1" />
       </div>
       <div class="hint">
-        Editable for an honest reason: the sandbox this was built in cannot reach
-        <code>orcarouter.ai</code>, so the default path is the OpenAI-compatible convention every router
-        of this kind uses — <em>not</em> something verified against the live service. If every call
-        returns <code>404</code> no matter which model you pick, the path is wrong: paste the one from
-        OrcaRouter's own docs here. Pasting the full endpoint works too; it won't be doubled up.
+        The default is the URL a production run reached successfully at the transport level — it
+        failed on a <em>read</em> timeout, meaning the connection and the request went through and the
+        model was still working. Still editable, because this build cannot reach
+        <code>orcarouter.ai</code> to confirm it: if every call returns <code>404</code> no matter which
+        model you pick, the path is wrong — paste the one from OrcaRouter's docs. Pasting the full
+        endpoint works too; it won't be doubled up.
+      </div>
+
+      <h2>Timeout</h2>
+      <div class="field-row">
+        <input id="aiTimeout" type="number" value="180" min="10" max="600" step="10" />
+      </div>
+      <div class="hint">
+        Seconds to wait for <em>one</em> answer. Free router models queue behind other traffic and
+        reasoning models think before emitting a first token, so a slow reply is normal — a read
+        timeout means the connection worked and the model was still busy, which is a different
+        problem from a wrong URL.
+      </div>
+
+      <h2>Check the connection</h2>
+      <button class="panel-btn" id="pingAi">Test key, URL and model</button>
+      <div class="hint" id="pingStatus">
+        One tiny request. A wrong key, a wrong URL, a dead model id and a model that just queues all
+        look the same from here — this tells them apart before you wait on a long run.
       </div>
 
       <h2>Ask the model about the current setup</h2>
@@ -930,11 +949,13 @@ document.getElementById('runAnalyst').addEventListener('click', async () => {
         api_key: apiKey,
         model: aiModel(),
         base_url: aiBaseUrl(),
+        timeout: aiTimeout(),
         source,
         symbol: normalizeSymbol(document.getElementById('symbol').value),
         timeframe: document.getElementById('timeframe').value,
         limit: Number(document.getElementById('limit').value),
         cycles: Number(document.getElementById('cycles').value),
+        timeout: aiTimeout(),
         max_steps: Number(document.getElementById('analystSteps').value),
       }),
     }, 600000);
@@ -948,15 +969,21 @@ document.getElementById('runAnalyst').addEventListener('click', async () => {
     renderAnalystSteps(data.steps);
 
     const accepted = (data.accepted || []).length;
-    statusEl.textContent = `${accepted} structure(s) accepted, ${(data.rejected || []).length} rejected, `
-      + `after ${data.steps_used} step(s).`;
+    // A run that stalled part way still did real work, and the transcript of
+    // that work is information. Say what happened rather than showing an
+    // empty result that reads like a finished analysis.
+    statusEl.textContent = data.error
+      ? `Stopped after ${data.steps_used} step(s) — see below. Partial work is still shown.`
+      : `${accepted} structure(s) accepted, ${(data.rejected || []).length} rejected, `
+        + `after ${data.steps_used} step(s).`;
     document.getElementById('analystSummary').style.display = '';
     document.getElementById('analystRead').innerHTML =
       `<div class="row"><span class="k">Model</span><span class="v">${escapeHtml(data.model)}</span></div>`
-      + `<div class="row"><span class="k">Where we are</span><span class="v" style="text-align:left;max-width:200px;">`
-      + `${escapeHtml(data.summary || '—')}</span></div>`
-      + `<div class="row"><span class="k">Reasoning</span><span class="v" style="text-align:left;max-width:200px;">`
-      + `${escapeHtml(data.reasoning || '—')}</span></div>`
+      + (data.summary ? `<div class="row"><span class="k">Where we are</span>`
+          + `<span class="v" style="text-align:left;max-width:200px;">${escapeHtml(data.summary)}</span></div>` : '')
+      + (data.reasoning ? `<div class="row"><span class="k">Reasoning</span>`
+          + `<span class="v" style="text-align:left;max-width:200px;">${escapeHtml(data.reasoning)}</span></div>` : '')
+      + (data.error ? `<div class="note error" style="margin-top:8px;">${escapeHtml(data.error)}</div>` : '')
       + (data.note ? `<div class="hint">${escapeHtml(data.note)}</div>` : '');
   } catch (e) {
     statusEl.textContent = e.message || 'Network error running the analyst.';
@@ -972,7 +999,9 @@ const KEY_STORAGE = 't3_orcarouter_key';
 const MODEL_STORAGE = 't3_orcarouter_model';
 const BASE_URL_STORAGE = 't3_orcarouter_base_url';
 const DEFAULT_AI_MODEL = 'deepseek/deepseek-v4-flash-free';
-const DEFAULT_AI_BASE_URL = 'https://orcarouter.ai/api/v1';
+const TIMEOUT_STORAGE = 't3_orcarouter_timeout';
+const DEFAULT_AI_BASE_URL = 'https://api.orcarouter.ai/v1';
+const DEFAULT_AI_TIMEOUT = 180;
 
 function aiKey() {
   return localStorage.getItem(KEY_STORAGE) || document.getElementById('aiKey').value.trim();
@@ -996,11 +1025,42 @@ function aiBaseUrl() {
 document.getElementById('aiKey').value = localStorage.getItem(KEY_STORAGE) || '';
 document.getElementById('aiModel').value = localStorage.getItem(MODEL_STORAGE) || DEFAULT_AI_MODEL;
 document.getElementById('aiBaseUrl').value = localStorage.getItem(BASE_URL_STORAGE) || DEFAULT_AI_BASE_URL;
+function aiTimeout() {
+  return Number(document.getElementById('aiTimeout').value)
+    || Number(localStorage.getItem(TIMEOUT_STORAGE))
+    || DEFAULT_AI_TIMEOUT;
+}
+document.getElementById('aiTimeout').value =
+  Number(localStorage.getItem(TIMEOUT_STORAGE)) || DEFAULT_AI_TIMEOUT;
 document.getElementById('saveKey').addEventListener('click', () => {
   localStorage.setItem(KEY_STORAGE, document.getElementById('aiKey').value.trim());
   localStorage.setItem(MODEL_STORAGE, aiModel());
   localStorage.setItem(BASE_URL_STORAGE, aiBaseUrl());
-  document.getElementById('aiStatus').textContent = 'Key, model and API URL saved in this browser.';
+  localStorage.setItem(TIMEOUT_STORAGE, String(aiTimeout()));
+  document.getElementById('aiStatus').textContent = 'Key, model, API URL and timeout saved in this browser.';
+});
+
+// Connection check. Deliberately its own button: every setup mistake and
+// every slow model produce the same "nothing happened" from a real run, so
+// there has to be a cheap way to ask which one it is.
+document.getElementById('pingAi').addEventListener('click', async () => {
+  const apiKey = aiKey();
+  const statusEl = document.getElementById('pingStatus');
+  if (!apiKey) { statusEl.textContent = 'Enter and save your OrcaRouter API key first.'; return; }
+  statusEl.textContent = 'Sending one tiny request…';
+  try {
+    const resp = await fetchWithTimeout('/api/ai/ping', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: apiKey, model: aiModel(), base_url: aiBaseUrl(), timeout: 60 }),
+    }, 70000);
+    const data = await resp.json();
+    if (!resp.ok) { statusEl.textContent = data.detail || 'Request failed.'; return; }
+    statusEl.textContent = data.ok
+      ? `Works. ${data.model} answered via ${data.endpoint}: "${data.answer || '(empty)'}"`
+      : data.error;
+  } catch (e) {
+    statusEl.textContent = e.message || 'Network error during the connection test.';
+  }
 });
 
 document.getElementById('askAi').addEventListener('click', async () => {
@@ -1032,7 +1092,8 @@ document.getElementById('askAi').addEventListener('click', async () => {
     // request that hangs forever looks identical to one that failed.
     const resp = await fetchWithTimeout('/api/ai/advice', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ api_key: apiKey, context, model: aiModel(), base_url: aiBaseUrl() }),
+      body: JSON.stringify({ api_key: apiKey, context, model: aiModel(),
+                             base_url: aiBaseUrl(), timeout: aiTimeout() }),
     }, 90000);
     const data = await resp.json();
     if (!resp.ok) { statusEl.textContent = data.detail || 'Request failed.'; return; }
@@ -1068,6 +1129,7 @@ document.getElementById('askAiLabel').addEventListener('click', async () => {
         api_key: apiKey,
         model: aiModel(),
         base_url: aiBaseUrl(),
+        timeout: aiTimeout(),
         source,
         symbol: normalizeSymbol(document.getElementById('symbol').value),
         timeframe: document.getElementById('timeframe').value,

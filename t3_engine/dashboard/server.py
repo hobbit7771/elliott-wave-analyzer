@@ -42,7 +42,10 @@ from fastapi.staticfiles import StaticFiles
 from t3_engine.ai_advisor.advisor import (
     DEFAULT_API_BASE as DEFAULT_AI_API_BASE,
     DEFAULT_MODEL as DEFAULT_AI_MODEL,
+    DEFAULT_READ_TIMEOUT,
+    MAX_READ_TIMEOUT,
     AIAdvisorError,
+    ping as ai_ping,
     request_commentary,
     request_wave_count,
 )
@@ -139,7 +142,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-014"
+BUILD_VERSION = "BUILD-CHECK-015"
 
 
 @app.get("/api/health")
@@ -392,13 +395,14 @@ def live_state(symbol: str = Query(...), timeframe: str = Query("5m")):
 @app.post("/api/ai/advice")
 def ai_advice(api_key: str = Body(..., embed=True), context: dict = Body(..., embed=True),
               model: str = Body(DEFAULT_AI_MODEL, embed=True),
-              base_url: str = Body(DEFAULT_AI_API_BASE, embed=True)):
+              base_url: str = Body(DEFAULT_AI_API_BASE, embed=True),
+              timeout: float = Body(DEFAULT_READ_TIMEOUT, embed=True, gt=0, le=MAX_READ_TIMEOUT)):
     """BYO-key OrcaRouter second opinion. The key is used for exactly one
     outbound request and never written to disk/DB/logs - see
     ai_advisor/advisor.py's docstring for why this only ever produces
     commentary, never a trading decision."""
     try:
-        result = request_commentary(api_key, context, model=model, base_url=base_url)
+        result = request_commentary(api_key, context, model=model, base_url=base_url, timeout=timeout)
     except AIAdvisorError as exc:
         raise HTTPException(502, str(exc))
     return {"commentary": result.text, "model": result.model}
@@ -410,7 +414,8 @@ def ai_label(api_key: str = Body(..., embed=True), source: str = Body("synthetic
              limit: int = Body(1500, embed=True, ge=100, le=10000),
              cycles: int = Body(2, embed=True, ge=1, le=10),
              model: str = Body(DEFAULT_AI_MODEL, embed=True),
-             base_url: str = Body(DEFAULT_AI_API_BASE, embed=True)):
+             base_url: str = Body(DEFAULT_AI_API_BASE, embed=True),
+             timeout: float = Body(DEFAULT_READ_TIMEOUT, embed=True, gt=0, le=MAX_READ_TIMEOUT)):
     """AI wave-labelling mode: the model proposes a count over the WHOLE
     loaded history - the one thing the deterministic engine deliberately
     won't do, since it only ever anchors on recent pivots.
@@ -455,6 +460,7 @@ def ai_label(api_key: str = Body(..., embed=True), source: str = Body("synthetic
             direction.value,
             model=model,
             base_url=base_url,
+            timeout=timeout,
         )
     except AIAdvisorError as exc:
         raise HTTPException(502, str(exc))
@@ -488,6 +494,29 @@ def ai_label(api_key: str = Body(..., embed=True), source: str = Body("synthetic
     }
 
 
+@app.post("/api/ai/ping")
+def ai_ping_endpoint(api_key: str = Body(..., embed=True),
+                     model: str = Body(DEFAULT_AI_MODEL, embed=True),
+                     base_url: str = Body(DEFAULT_AI_API_BASE, embed=True),
+                     timeout: float = Body(60.0, embed=True, gt=0, le=MAX_READ_TIMEOUT)):
+    """One tiny round trip to the model, to tell a broken SETUP apart from
+    a slow JOB.
+
+    These look identical from the dashboard - a wrong key, a wrong base
+    URL, a retired model id and a model that simply queues for four minutes
+    all present as "nothing happened, then an error". This asks for a
+    single token: if it comes back, the key, the URL and the model id are
+    all correct and any later failure is about how long the real work
+    takes. If it doesn't, the error names which of the three is wrong."""
+    try:
+        return ai_ping(api_key, model=model, base_url=base_url, timeout=timeout)
+    except AIAdvisorError as exc:
+        # 200 with ok:false, not a 5xx: the REQUEST was fine, the answer is
+        # "your setup doesn't work and here is which part". A 502 here would
+        # read in the UI as "the dashboard is broken".
+        return {"ok": False, "error": str(exc), "model": model}
+
+
 @app.post("/api/ai/analyst")
 def ai_analyst(api_key: str = Body(..., embed=True), source: str = Body("synthetic", embed=True),
                symbol: str = Body("SYNTHETIC", embed=True), timeframe: str = Body("5m", embed=True),
@@ -495,6 +524,7 @@ def ai_analyst(api_key: str = Body(..., embed=True), source: str = Body("synthet
                cycles: int = Body(2, embed=True, ge=1, le=10),
                model: str = Body(DEFAULT_AI_MODEL, embed=True),
                base_url: str = Body(DEFAULT_AI_API_BASE, embed=True),
+               timeout: float = Body(DEFAULT_READ_TIMEOUT, embed=True, gt=0, le=MAX_READ_TIMEOUT),
                max_steps: int = Body(DEFAULT_MAX_STEPS, embed=True, ge=1, le=MAX_MAX_STEPS)):
     """The AI analyst: label a CLEAN chart from scratch, as an agent.
 
@@ -520,7 +550,7 @@ def ai_analyst(api_key: str = Body(..., embed=True), source: str = Body("synthet
 
     try:
         result = run_analyst(api_key, candles, tf, symbol=symbol, model=model,
-                             max_steps=max_steps, base_url=base_url)
+                             max_steps=max_steps, base_url=base_url, timeout=timeout)
     except ToolError as exc:
         raise HTTPException(422, str(exc))
     except AIAdvisorError as exc:
@@ -532,6 +562,7 @@ def ai_analyst(api_key: str = Body(..., embed=True), source: str = Body("synthet
         "model": result.model,
         "finished": result.finished,
         "note": result.note,
+        "error": result.error,
         "summary": result.summary,
         "reasoning": result.reasoning,
         "steps_used": result.steps_used,
