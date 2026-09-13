@@ -242,6 +242,7 @@ def test_the_agent_works_the_chart_then_submits_a_validated_count():
                             "note": "the whole visible advance"}],
             "summary": "Five waves up are complete.",
             "reasoning": "Wave 3 is the longest; wave 4 stays clear of wave 1.",
+            "complete": True,
         }),
     ])
     result = run_analyst("sk-test", CANDLES, DEGREE, symbol="SYNTHETIC", client=client)
@@ -261,7 +262,7 @@ def test_the_agent_is_given_tools_and_the_playbook_not_a_pre_made_count():
         function_call_turn("submit_count", {
             "structures": [{"structure": "IMPULSE", "deviation_pct": 1.0,
                             "direction": "UP", "waves": GOOD_IMPULSE}],
-            "summary": "s", "reasoning": "r",
+            "summary": "s", "reasoning": "r", "complete": True,
         }),
     ])
     run_analyst("sk-test", CANDLES, DEGREE, symbol="SYNTHETIC", client=client)
@@ -288,7 +289,7 @@ def test_tool_results_are_fed_back_so_the_model_reasons_over_real_data():
         function_call_turn("submit_count", {
             "structures": [{"structure": "IMPULSE", "deviation_pct": 1.0,
                             "direction": "UP", "waves": GOOD_IMPULSE}],
-            "summary": "s", "reasoning": "r",
+            "summary": "s", "reasoning": "r", "complete": True,
         }),
     ])
     run_analyst("sk-test", CANDLES, DEGREE, client=client)
@@ -376,7 +377,7 @@ def test_a_tool_error_does_not_end_the_run_it_is_handed_back_to_the_model():
         function_call_turn("submit_count", {
             "structures": [{"structure": "IMPULSE", "deviation_pct": 1.0,
                             "direction": "UP", "waves": GOOD_IMPULSE}],
-            "summary": "s", "reasoning": "r",
+            "summary": "s", "reasoning": "r", "complete": True,
         }),
     ])
     result = run_analyst("sk-test", CANDLES, DEGREE, client=client)
@@ -493,7 +494,7 @@ def test_the_transcript_records_the_conversation_not_just_the_tool_calls():
     client, _ = scripted_client([thinking, function_call_turn("submit_count", {
         "structures": [{"structure": "IMPULSE", "deviation_pct": 1.0,
                         "direction": "UP", "waves": GOOD_IMPULSE}],
-        "summary": "s", "reasoning": "r"}, call_id="c2")])
+        "summary": "s", "reasoning": "r", "complete": True}, call_id="c2")])
     result = run_analyst("sk-test", CANDLES, DEGREE, client=client, max_steps=6)
 
     assistant_turns = [e for e in result.transcript if e["role"] == "assistant"]
@@ -513,7 +514,7 @@ def test_the_final_step_instruction_appears_in_the_transcript_too():
     client, _ = scripted_client([function_call_turn("submit_count", {
         "structures": [{"structure": "IMPULSE", "deviation_pct": 1.0,
                         "direction": "UP", "waves": GOOD_IMPULSE}],
-        "summary": "s", "reasoning": "r"})])
+        "summary": "s", "reasoning": "r", "complete": True})])
     result = run_analyst("sk-test", CANDLES, DEGREE, client=client, max_steps=1)
 
     system_turns = [e for e in result.transcript if e["role"] == "system"]
@@ -610,7 +611,7 @@ def test_the_models_reasoning_is_carried_into_the_next_step_unmodified():
     client, sent = scripted_client([first, function_call_turn("submit_count", {
         "structures": [{"structure": "IMPULSE", "deviation_pct": 1.0,
                         "direction": "UP", "waves": GOOD_IMPULSE}],
-        "summary": "s", "reasoning": "r"}, call_id="c2")])
+        "summary": "s", "reasoning": "r", "complete": True}, call_id="c2")])
     run_analyst("sk-or-test", CANDLES, DEGREE, client=client, max_steps=6)
 
     assistant_turn = next(m for m in sent[1]["messages"] if m["role"] == "assistant")
@@ -635,3 +636,104 @@ def test_trimming_tool_history_never_touches_the_reasoning_chain():
 
     blobs = [m["reasoning_details"][0]["data"] for m in messages if m["role"] == "assistant"]
     assert blobs == [f"blob-{i}" for i in range(6)]
+
+
+# ---- finishing the chart, and saying where it goes next ----
+
+def test_a_partial_submission_is_told_what_is_still_unlabelled():
+    """The complaint this answers: a chart labelled on the left third and
+    bare on the right. The model had simply stopped, and nothing asked it
+    to go on."""
+    box = toolbox()
+    result = box.submit_count(structures=[
+        {"structure": "IMPULSE", "deviation_pct": 1.0, "direction": "UP", "waves": GOOD_IMPULSE},
+    ], summary="s", reasoning="r")
+
+    assert not box.finished                       # the run continues
+    assert "%" in result["chart_covered"]
+    assert result["unlabelled"]                   # and where the gaps are
+    assert "submit_count again" in result["status"]
+
+
+def test_structures_accumulate_across_several_submissions():
+    """One all-or-nothing answer is what made a partial count the final
+    one. Submissions add up instead."""
+    box = toolbox()
+    box.submit_count(structures=[
+        {"structure": "IMPULSE", "deviation_pct": 1.0, "direction": "UP", "waves": GOOD_IMPULSE},
+    ], summary="first", reasoning="r")
+    second = box.submit_count(structures=[
+        {"structure": "IMPULSE", "deviation_pct": 1.0, "direction": "UP", "waves": GOOD_IMPULSE},
+    ], summary="", reasoning="", complete=True)
+
+    assert second["accepted_structures"] == 2
+    assert box.finished
+    assert box.submitted["summary"] == "first"    # an empty follow-up does not erase it
+
+
+def test_a_fully_covered_chart_ends_the_run_without_being_told_to():
+    box = toolbox()
+    whole_chart = [{"structure": "IMPULSE", "deviation_pct": 1.0, "direction": "UP",
+                    "waves": GOOD_IMPULSE}]
+    box.submit_count(structures=whole_chart, summary="s", reasoning="r")
+    # Pretend the accepted structure spans everything.
+    box.submitted["accepted"][0]["waves"][0]["start_time"] = CANDLES[0].open_time // 1000
+    box.submitted["accepted"][0]["waves"][-1]["end_time"] = CANDLES[-1].open_time // 1000
+    box.submit_count(structures=whole_chart, summary="s", reasoning="r")
+    assert box.finished
+
+
+def test_the_server_computes_the_projection_the_model_never_supplies_prices():
+    """A count that stops at the last pivot answers "what happened". The
+    reason to count at all is what it implies comes next - and that is
+    arithmetic over waves already on the chart, not the model's opinion."""
+    from t3_engine.ai_advisor.analyst_tools import project_next_wave
+
+    waves = [
+        {"label": "1", "start_price": 100.0, "end_price": 120.0, "end_time": 10},
+        {"label": "2", "start_price": 120.0, "end_price": 110.0, "end_time": 20},
+        {"label": "3", "start_price": 110.0, "end_price": 150.0, "end_time": 30},
+        {"label": "4", "start_price": 150.0, "end_price": 138.0, "end_time": 40},
+    ]
+    projection = project_next_wave(waves, "5")
+    assert projection["next_label"] == "5"
+    assert projection["from_price"] == 138.0            # anchored on the last wave's end
+    assert "wave 1 length" in projection["basis"]
+    # Wave 5 targets = wave-1 length (20) projected off the end of wave 4.
+    prices = [t["price"] for t in projection["targets"]]
+    assert 158.0 in prices                              # 138 + 1.000 x 20
+
+
+def test_a_projection_that_needs_a_wave_the_count_lacks_is_absent_not_invented():
+    """An honest absence beats a number derived from a wave that is not
+    there."""
+    from t3_engine.ai_advisor.analyst_tools import project_next_wave
+
+    assert project_next_wave([{"label": "1", "start_price": 1, "end_price": 2, "end_time": 1}],
+                             "5") is None
+    assert project_next_wave([], "3") is None
+    assert project_next_wave([{"label": "1", "start_price": 1, "end_price": 2, "end_time": 1}],
+                             "banana") is None
+
+
+def test_the_projection_rides_back_with_the_result():
+    box = toolbox()
+    box.submit_count(
+        structures=[{"structure": "IMPULSE", "deviation_pct": 1.0, "direction": "UP",
+                     "waves": GOOD_IMPULSE}],
+        summary="s", reasoning="r", complete=True,
+        expectation={"structure_index": 0, "next_label": "C"})
+    # Whether this particular count supports a C projection or not, the
+    # field exists and is either a computed projection or an honest None.
+    assert "projection" in box.submitted
+
+
+def test_the_playbook_tells_the_model_to_cover_the_whole_chart_and_project():
+    """Both of these were real gaps in a live run: the recent two thirds
+    came back bare, and nothing said where price goes next."""
+    from t3_engine.ai_advisor.playbook import ELLIOTT_PLAYBOOK
+
+    assert "COVER THE WHOLE CHART" in ELLIOTT_PLAYBOOK
+    assert "SAY WHAT COMES NEXT" in ELLIOTT_PLAYBOOK
+    assert "complete=true" in ELLIOTT_PLAYBOOK
+    assert "Do not supply prices" in ELLIOTT_PLAYBOOK

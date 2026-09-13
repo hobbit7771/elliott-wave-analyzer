@@ -155,7 +155,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-026"
+BUILD_VERSION = "BUILD-CHECK-027"
 
 
 @app.get("/api/health")
@@ -718,6 +718,11 @@ def ai_analyst(api_key: str = Body("", embed=True), source: str = Body("syntheti
         # from a list of tool names, so the model's own words and its
         # reasoning travel with the result.
         "transcript": result.transcript,
+        # Where the count says price should go next, computed server-side
+        # from waves already on the chart - the model names the wave, never
+        # a price.
+        "projection": result.projection,
+        "coverage": result.coverage,
         "accepted": result.accepted,
         "rejected": result.rejected,
         "waves": result.waves,

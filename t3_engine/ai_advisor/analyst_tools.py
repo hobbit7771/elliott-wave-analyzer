@@ -117,6 +117,11 @@ class AnalystToolbox:
         self._pivot_cache: Dict[float, List] = {}
         self.calls: List[ToolCallRecord] = []
         self.submitted: Optional[Dict[str, Any]] = None
+        # submit_count may be called MORE THAN ONCE. A chart usually holds
+        # several structures at different degrees and spans, and forcing
+        # one all-or-nothing answer is how a run ends with the left third
+        # labelled and the right two thirds bare.
+        self.finished = False
 
     # ---- shared ----
 
@@ -240,10 +245,16 @@ class AnalystToolbox:
         return result
 
     def submit_count(self, structures: List[Dict[str, Any]], reasoning: str = "",
-                     summary: str = "") -> Dict[str, Any]:
-        """The final answer. Every structure is re-validated here - passing
-        check_count earlier is not taken on trust, because nothing stops a
-        model from submitting something other than what it checked."""
+                     summary: str = "", expectation: Optional[Dict[str, Any]] = None,
+                     complete: bool = False) -> Dict[str, Any]:
+        """Submit what you have. Every structure is re-validated here -
+        passing check_count earlier is not taken on trust, because nothing
+        stops a model from submitting something other than what it checked.
+
+        Callable more than once: structures accumulate. The result reports
+        how much of the chart is now labelled and where the gaps are, so a
+        partial answer can be continued rather than being the end of it.
+        Set `complete` once the whole history is counted."""
         if not isinstance(structures, list) or not structures:
             raise ToolError("submit_count needs a non-empty list of structures")
         if len(structures) > 12:
@@ -269,20 +280,54 @@ class AnalystToolbox:
             }
             (accepted if verdict.get("valid") else rejected).append(entry)
 
+        previous = self.submitted or {"accepted": [], "rejected": []}
+        all_accepted = previous["accepted"] + accepted
+        all_rejected = previous["rejected"] + rejected
+
+        projection = None
+        if isinstance(expectation, dict) and all_accepted:
+            index = expectation.get("structure_index", len(all_accepted) - 1)
+            try:
+                live = all_accepted[int(index)]
+            except (TypeError, ValueError, IndexError):
+                live = all_accepted[-1]
+            projection = project_next_wave(live.get("waves") or [],
+                                           expectation.get("next_label", ""))
+
+        cover = coverage_of(self.candles, all_accepted)
         self.submitted = {
-            "reasoning": str(reasoning)[:4000],
-            "summary": str(summary)[:1000],
-            "accepted": accepted,
-            "rejected": rejected,
+            "reasoning": str(reasoning)[:4000] or previous.get("reasoning", ""),
+            "summary": str(summary)[:1000] or previous.get("summary", ""),
+            "accepted": all_accepted,
+            "rejected": all_rejected,
+            "projection": projection or previous.get("projection"),
+            "coverage": cover,
         }
-        return {
-            "accepted_structures": len(accepted),
-            "rejected_structures": len(rejected),
+        # Done when the model says so, or when there is nothing left worth
+        # labelling. Otherwise say what is still bare and let it continue -
+        # the budget is better spent finishing the chart than idling.
+        self.finished = bool(complete) or cover["covered_fraction"] >= 0.9 or not cover["gaps"]
+
+        result = {
+            "accepted_structures": len(all_accepted),
+            "rejected_structures": len(all_rejected),
             "rejections": [{"position": r["position"], "reason": r.get("reason") or r.get("notes")}
                            for r in rejected],
-            "status": "Answer recorded. Analysis complete." if accepted else
-                      "Nothing was accepted - every structure broke a rule. Fix them and submit again.",
+            "chart_covered": f"{cover['covered_fraction'] * 100:.0f}%",
+            "projection": projection,
         }
+        if not all_accepted:
+            result["status"] = "Nothing was accepted - every structure broke a rule. Fix them and submit again."
+        elif self.finished:
+            result["status"] = "Answer recorded. Analysis complete."
+        else:
+            result["status"] = (
+                f"Recorded, but only {cover['covered_fraction'] * 100:.0f}% of the chart is labelled. "
+                "Unlabelled stretches are listed below - count those too and call submit_count again "
+                "(structures accumulate). Set complete=true when the whole history is done."
+            )
+            result["unlabelled"] = cover["gaps"]
+        return result
 
     # ---- validation shared by check_count and submit_count ----
 
@@ -492,11 +537,15 @@ FUNCTION_DECLARATIONS: List[Dict[str, Any]] = [
     {
         "name": "submit_count",
         "description": (
-            "Your final answer: every structure you are confident in, oldest first. Call it ONCE, "
-            "after you have checked your counts. Structures may be at different deviation_pct "
-            "values - that is how you express a higher-degree count plus the subwaves inside it. "
-            "Every structure is re-validated; anything that breaks a rule is dropped, so submit "
-            "only what you have verified."
+            "Submit the structures you are confident in, oldest first. You may call this MORE THAN "
+            "ONCE - structures accumulate, and the result tells you what percentage of the chart is "
+            "labelled and which stretches are still bare, so submit early and keep going rather than "
+            "saving everything for one final answer. Set complete=true only when the whole history "
+            "is counted. Structures may be at different deviation_pct values - that is how you "
+            "express a higher-degree count plus the subwaves inside it. Every structure is "
+            "re-validated; anything that breaks a rule is dropped. Use `expectation` to say which "
+            "structure is still unfolding and which wave you expect next: the server then computes "
+            "the Fibonacci targets for it and the chart draws them as a projection."
         ),
         "parameters": {
             "type": "object",
@@ -534,6 +583,22 @@ FUNCTION_DECLARATIONS: List[Dict[str, Any]] = [
                 "reasoning": {"type": "string",
                               "description": "Which rules and guidelines drove this count, and what "
                                              "would invalidate it."},
+                "expectation": {
+                    "type": "object",
+                    "description": "What the count implies comes NEXT. The server computes the target "
+                                   "prices itself from the waves already on the chart - do not supply "
+                                   "prices.",
+                    "properties": {
+                        "structure_index": {"type": "integer",
+                                            "description": "Which submitted structure is still "
+                                                           "unfolding (0-based, across all submissions)."},
+                        "next_label": {"type": "string",
+                                       "description": "The wave expected next: 2, 3, 4, 5, B or C."},
+                    },
+                    "required": ["structure_index", "next_label"],
+                },
+                "complete": {"type": "boolean",
+                             "description": "True only when the WHOLE loaded history is labelled."},
             },
             "required": ["structures", "summary", "reasoning"],
         },
@@ -549,3 +614,118 @@ def openai_tools() -> List[Dict[str, Any]]:
     the third provider this code has been pointed at, and each one wants
     the same functions wrapped slightly differently."""
     return [{"type": "function", "function": declaration} for declaration in FUNCTION_DECLARATIONS]
+
+
+# --------------------------------------------------------------------------
+# Where the count says price should go next
+# --------------------------------------------------------------------------
+# A count that stops at the last confirmed pivot answers "what happened".
+# The reason to count waves at all is the other question - what the count
+# implies comes next - and that answer is arithmetic, not opinion: given
+# waves 1 to 4, wave 5's targets are fixed ratios of waves already on the
+# chart. So the model names WHICH structure is live and WHAT it expects
+# next; the server computes the levels with the same Fibonacci code the
+# deterministic engine uses. The model never supplies a target price.
+
+from t3_engine.fibonacci.calculator import (  # noqa: E402  (grouped with its users)
+    retracement_levels,
+    wave2_levels,
+    wave3_targets_from_wave2_end,
+    wave4_levels,
+    wave5_targets,
+    wave_c_targets,
+)
+
+PROJECTABLE_LABELS = ("2", "3", "4", "5", "B", "C")
+
+
+def project_next_wave(waves: List[Dict[str, Any]], next_label: str) -> Optional[Dict[str, Any]]:
+    """Fibonacci targets for the wave the count says comes next.
+
+    `waves` are the SERVER-BUILT waves of an already-validated structure
+    (label/start_price/end_price/end_time), so the prices here are the
+    engine's own, not anything the model typed. Returns None when the
+    requested projection needs a wave the structure does not have - an
+    honest absence beats a number derived from a wave that is not there."""
+    label = str(next_label or "").strip().upper()
+    if label not in PROJECTABLE_LABELS:
+        return None
+
+    by_label = {str(w.get("label", "")).upper(): w for w in waves}
+
+    def leg(name: str) -> Optional[Dict[str, Any]]:
+        return by_label.get(name)
+
+    levels = None
+    basis = ""
+    if label == "2" and leg("1"):
+        levels = wave2_levels(leg("1")["start_price"], leg("1")["end_price"])
+        basis = "retracement of wave 1"
+    elif label == "3" and leg("1") and leg("2"):
+        levels = wave3_targets_from_wave2_end(leg("1")["start_price"], leg("1")["end_price"],
+                                              leg("2")["end_price"])
+        basis = "wave 1 length projected from the end of wave 2"
+    elif label == "4" and leg("3"):
+        levels = wave4_levels(leg("3")["start_price"], leg("3")["end_price"])
+        basis = "retracement of wave 3"
+    elif label == "5" and leg("1") and leg("4"):
+        levels = wave5_targets(leg("1")["start_price"], leg("1")["end_price"], leg("4")["end_price"])
+        basis = "wave 1 length projected from the end of wave 4"
+    elif label == "B" and leg("A"):
+        levels = retracement_levels(leg("A")["start_price"], leg("A")["end_price"],
+                                    [0.382, 0.5, 0.618, 0.786])
+        basis = "retracement of wave A"
+    elif label == "C" and leg("A") and leg("B"):
+        levels = wave_c_targets(leg("A")["start_price"], leg("A")["end_price"],
+                                leg("B")["end_price"])
+        basis = "wave A length projected from the end of wave B"
+    if not levels:
+        return None
+
+    anchor = waves[-1]
+    return {
+        "next_label": label,
+        "basis": basis,
+        "from_time": anchor.get("end_time"),
+        "from_price": round_price(anchor.get("end_price", 0.0)),
+        "targets": [{"ratio": level.ratio, "price": round_price(level.price)} for level in levels],
+    }
+
+
+def coverage_of(candles: List[Candle], structures: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """How much of the loaded history the accepted structures actually
+    label, and where the gaps are.
+
+    Without this the run ends whenever the model first says "done", which
+    is how a chart comes back labelled on the left third and bare on the
+    right - the model had simply stopped, and nothing asked it to go on."""
+    if not candles:
+        return {"covered_fraction": 0.0, "gaps": []}
+    first, last = candles[0].open_time // 1000, candles[-1].open_time // 1000
+    span = max(1, last - first)
+
+    spans = []
+    for structure in structures:
+        waves = structure.get("waves") or []
+        if waves:
+            spans.append((waves[0].get("start_time", first), waves[-1].get("end_time", first)))
+    spans.sort()
+
+    merged: List[List[int]] = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+
+    covered = sum(end - start for start, end in merged)
+    gaps = []
+    cursor = first
+    for start, end in merged:
+        if start - cursor > span * 0.05:      # ignore slivers
+            gaps.append({"from_time": cursor, "to_time": start})
+        cursor = max(cursor, end)
+    if last - cursor > span * 0.05:
+        gaps.append({"from_time": cursor, "to_time": last})
+
+    return {"covered_fraction": round(min(1.0, covered / span), 3), "gaps": gaps[:4]}

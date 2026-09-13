@@ -596,6 +596,8 @@ class _FakeAnalystResult:
         self.rejected = rejected or []
         self.error = error
         self.transcript = []
+        self.projection = None
+        self.coverage = {}
         self.summary = "Five waves up look complete."
         self.reasoning = "Wave 3 is the longest."
         self.steps = []
@@ -1076,3 +1078,36 @@ def test_index_can_fill_the_model_field_from_the_catalogue():
     assert "fillModels" in resp.text
     assert "tool_capable" in resp.text
     assert "includes(':free')" in resp.text      # free ones first, not a surprise invoice
+
+
+def test_the_analyst_returns_where_the_count_says_price_goes_next():
+    """A count that stops at the last pivot answers "what happened". The
+    reason to count at all is what it implies comes next."""
+    fake = _FakeAnalystResult([])
+    fake.projection = {"next_label": "5", "basis": "wave 1 length projected from the end of wave 4",
+                       "from_time": 1000, "from_price": 138.0,
+                       "targets": [{"ratio": 0.618, "price": 150.4},
+                                   {"ratio": 1.0, "price": 158.0}]}
+    fake.coverage = {"covered_fraction": 0.82, "gaps": []}
+
+    with patch.object(server_module, "run_analyst", return_value=fake):
+        resp = client.post("/api/ai/analyst",
+                           json={"api_key": "sk-or-test", "source": "synthetic", "cycles": 2})
+    body = resp.json()
+    assert body["projection"]["next_label"] == "5"
+    assert body["projection"]["targets"][1]["price"] == 158.0
+    assert body["coverage"]["covered_fraction"] == 0.82
+
+
+def test_index_draws_the_projection_dashed_and_says_who_computed_it():
+    """Dashed and in its own colour because it is the one thing on the
+    chart that has not happened yet."""
+    resp = client.get("/")
+    assert "drawAnalystProjection" in resp.text
+    assert "lineStyle: 2" in resp.text
+    assert "not supplied by the model" in resp.text
+
+
+def test_index_reports_how_much_of_the_chart_got_labelled():
+    resp = client.get("/")
+    assert "of the chart labelled" in resp.text

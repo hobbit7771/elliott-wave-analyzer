@@ -938,8 +938,13 @@ function resizeAnalystChart() {
   if (analystChart && el.clientWidth) analystChart.resize(el.clientWidth, el.clientHeight);
 }
 
+let analystFirstTime = 0, analystLastTime = 0;
+
 function clearAnalystOverlays() {
-  analystOverlays.forEach(s => analystChart.removeSeries(s));
+  analystOverlays.forEach(s => {
+    if (s && s.__priceLine) analystSeries.removePriceLine(s.__priceLine);
+    else analystChart.removeSeries(s);
+  });
   analystOverlays = [];
   if (analystSeries) analystSeries.setMarkers([]);
 }
@@ -999,6 +1004,37 @@ function formatStepArgs(args) {
     if (shown.length > 40) shown = shown.slice(0, 39) + '…';
     return `${key}=${shown}`;
   }).join(', ');
+}
+
+// The projection: where the count says price goes next, drawn forward from
+// the last labelled swing. Dashed and in its own colour because it is the
+// one thing on this chart that has not happened yet - a projection that
+// looks like a wave is a projection that gets read as one.
+const PROJECTION_COLOR = '#f0abfc';
+
+function drawAnalystProjection(projection) {
+  if (!projection || !projection.targets || !projection.targets.length) return;
+  const from = { time: projection.from_time, value: projection.from_price };
+  // Space the targets out into the future so they are readable instead of
+  // stacked on one candle. The step is a fraction of the loaded span.
+  const span = Math.max(60, (analystLastTime - analystFirstTime) || 3600);
+  const step = Math.round(span * 0.04);
+  projection.targets.forEach((target, i) => {
+    const line = analystChart.addLineSeries({
+      color: PROJECTION_COLOR, lineWidth: 1, lineStyle: 2,
+      lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false,
+    });
+    line.setData([from, { time: projection.from_time + step * (i + 1), value: target.price }]);
+    analystOverlays.push(line);
+  });
+  // And the levels themselves, so a target is readable as a price too.
+  projection.targets.forEach(target => {
+    const level = analystSeries.createPriceLine({
+      price: target.price, color: PROJECTION_COLOR, lineWidth: 1, lineStyle: 2,
+      title: `W${projection.next_label} ${target.ratio}`,
+    });
+    analystOverlays.push({ __priceLine: level });
+  });
 }
 
 function renderAnalystSteps(steps) {
@@ -1120,12 +1156,18 @@ document.getElementById('runAnalyst').addEventListener('click', async () => {
     if (!resp.ok) { statusEl.textContent = data.detail || 'Request failed.'; return; }
 
     analystSeries.setData(data.candles);
+    if (data.candles.length) {
+      analystFirstTime = data.candles[0].time;
+      analystLastTime = data.candles[data.candles.length - 1].time;
+    }
     drawAnalystCount(data.accepted);
+    drawAnalystProjection(data.projection);
     analystChart.timeScale().fitContent();
     renderAnalystStructures(data);
     renderAnalystSteps(data.steps);
     renderAnalystChat(data.transcript);
 
+    const cover = data.coverage || {};
     const accepted = (data.accepted || []).length;
     // A run that stalled part way still did real work, and the transcript of
     // that work is information. Say what happened rather than showing an
@@ -1133,6 +1175,8 @@ document.getElementById('runAnalyst').addEventListener('click', async () => {
     statusEl.textContent = data.error
       ? `Stopped after ${data.steps_used} step(s) — see below. Partial work is still shown.`
       : `${accepted} structure(s) accepted, ${(data.rejected || []).length} rejected, `
+        + `${cover.covered_fraction !== undefined
+              ? Math.round(cover.covered_fraction * 100) + '% of the chart labelled, ' : ''}`
         + `after ${data.steps_used} step(s).`;
     document.getElementById('analystSummary').style.display = '';
     document.getElementById('analystRead').innerHTML =
@@ -1141,6 +1185,11 @@ document.getElementById('runAnalyst').addEventListener('click', async () => {
           + `<span class="v" style="text-align:left;max-width:200px;">${escapeHtml(data.summary)}</span></div>` : '')
       + (data.reasoning ? `<div class="row"><span class="k">Reasoning</span>`
           + `<span class="v" style="text-align:left;max-width:200px;">${escapeHtml(data.reasoning)}</span></div>` : '')
+      + (data.projection ? `<div class="row"><span class="k">Next: wave ${escapeHtml(data.projection.next_label)}</span>`
+          + `<span class="v" style="color:#f0abfc;">`
+          + `${(data.projection.targets || []).map(t => t.price).join(' · ')}</span></div>`
+          + `<div class="hint">${escapeHtml(data.projection.basis)} — drawn dashed on the chart. `
+          + `Computed by the server from the waves already counted, not supplied by the model.</div>` : '')
       + (data.error ? `<div class="note error" style="margin-top:8px;">${escapeHtml(data.error)}</div>` : '')
       + (data.note ? `<div class="hint">${escapeHtml(data.note)}</div>` : '');
   } catch (e) {
