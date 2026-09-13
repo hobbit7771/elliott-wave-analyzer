@@ -61,6 +61,7 @@ from t3_engine.ai_advisor.analyst_tools import (
     openai_tools,
 )
 from t3_engine.ai_advisor.playbook import ELLIOTT_PLAYBOOK
+from t3_engine.ai_advisor.usage import UsageMeter
 from t3_engine.common.models import Candle
 from t3_engine.common.types import Timeframe
 
@@ -115,6 +116,9 @@ class AnalystResult:
     reasoning: str = ""
     steps: List[ToolCallRecord] = field(default_factory=list)
     model: str = ""
+    # Tokens this run actually consumed, summed over every call it made.
+    # The basis for answering "what does running this cost" with a number.
+    usage: Dict[str, Any] = field(default_factory=dict)
     steps_used: int = 0
     finished: bool = False
     note: str = ""
@@ -142,10 +146,20 @@ class AnalystResult:
         return flat
 
 
-def opening_brief(candles: List[Candle], symbol: str, degree: Timeframe) -> str:
+def opening_brief(candles: List[Candle], symbol: str, degree: Timeframe,
+                  record_line: str = "") -> str:
     """What the analyst is told before it has called anything. Deliberately
     thin: the range and the size of the job, no pivots and no hints about
-    where waves might be. Finding those is the task."""
+    where waves might be. Finding those is the task.
+
+    `record_line` is the one exception, and it is a statement of fact, not
+    a hint: what the paper trades opened from PREVIOUS counts of this same
+    chart actually did (see ai_advisor/trade_journal.py). It is included
+    because an analyst who never learns whether its reading paid is
+    working blind. It is phrased as history and carries no instruction to
+    change anything - "your last count lost, so try something else" is how
+    a model is talked into fitting its answer to the last result instead
+    of to the chart."""
     first, last = candles[0], candles[-1]
     highest = max(c.high for c in candles)
     lowest = min(c.low for c in candles)
@@ -153,8 +167,9 @@ def opening_brief(candles: List[Candle], symbol: str, degree: Timeframe) -> str:
         f"Chart: {symbol or 'unnamed instrument'}, {degree.value} candles.\n"
         f"{len(candles)} candles, indices 0 to {len(candles) - 1}.\n"
         f"First candle opens at {first.open:g}; last candle closes at {last.close:g}.\n"
-        f"Highest high {highest:g}, lowest low {lowest:g}.\n\n"
-        "No pivots have been computed for you and nothing is labelled. Start by calling "
+        f"Highest high {highest:g}, lowest low {lowest:g}.\n"
+        + (f"{record_line}\n" if record_line else "")
+        + "\nNo pivots have been computed for you and nothing is labelled. Start by calling "
         "list_pivots at a coarse deviation to see the skeleton, then work down. "
         "Finish by calling submit_count exactly once."
     )
@@ -254,7 +269,8 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
                 seed: Optional[int] = DEFAULT_SEED,
                 reasoning_effort: Optional[str] = None,
                 thinking: Optional[bool] = DEFAULT_THINKING,
-                on_progress: Optional[Callable[[str], None]] = None) -> AnalystResult:
+                on_progress: Optional[Callable[[str], None]] = None,
+                record_line: str = "") -> AnalystResult:
     """Run the label-from-scratch loop and return whatever survived
     validation.
 
@@ -270,13 +286,14 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
     max_steps = max(1, min(int(max_steps), MAX_MAX_STEPS))
     toolbox = AnalystToolbox(candles, degree, symbol)
     messages: List[Dict[str, Any]] = [
-        {"role": "user", "content": opening_brief(candles, symbol, degree)}
+        {"role": "user", "content": opening_brief(candles, symbol, degree, record_line)}
     ]
 
     note = ""
     error = ""
     steps_used = 0
     transcript: List[Dict[str, Any]] = []
+    meter = UsageMeter()
     seen_pivots = False
     started = time.monotonic()
     # A run is minutes long and nothing about it is visible from outside
@@ -312,6 +329,7 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
                                        force_submit=final_step and seen_pivots,
                                        thinking=thinking),
                          client, timeout, base_url)
+            meter.add(data.get("usage"))
             message = _assistant_turn(data)
         except AIAdvisorError as exc:
             if step == 0:
@@ -386,6 +404,7 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
         reasoning=submitted.get("reasoning", ""),
         steps=toolbox.calls,
         model=model,
+        usage=meter.as_dict(),
         steps_used=steps_used,
         finished=toolbox.submitted is not None,
         note=note,

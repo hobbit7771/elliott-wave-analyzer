@@ -483,6 +483,11 @@ def _consume_stream(lines, model: str) -> Dict[str, Any]:
     tool_calls: Dict[int, Dict[str, Any]] = {}
     finish_reason = ""
     saw_any_chunk = False
+    # Token usage arrives in its own trailing chunk (one with no choices),
+    # and was being dropped on the floor along with it. Without it there is
+    # no way to answer "what does running this cost" with a number instead
+    # of a guess - see the cost accounting in ai_advisor/usage.py.
+    usage: Dict[str, Any] = {}
 
     # Kept so a provider that ignores `stream: true` and answers with an
     # ordinary JSON body still works. Without this the SSE reader waits out
@@ -508,6 +513,8 @@ def _consume_stream(lines, model: str) -> Dict[str, Any]:
         # An error can arrive mid-stream, after a 200 on the headers.
         if isinstance(chunk, dict) and chunk.get("error"):
             _raise_for_error_body(chunk, model)
+        if isinstance(chunk.get("usage"), dict):
+            usage = chunk["usage"]
         choices = chunk.get("choices") or []
         if not choices:
             continue
@@ -552,8 +559,13 @@ def _consume_stream(lines, model: str) -> Dict[str, Any]:
         message["reasoning_details"] = [reasoning_details[i] for i in sorted(reasoning_details)]
     if tool_calls:
         message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
-    return {"choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
-            "model": model}
+    out: Dict[str, Any] = {
+        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+        "model": model,
+    }
+    if usage:
+        out["usage"] = usage
+    return out
 
 
 def _should_retry(resp: httpx.Response) -> bool:
@@ -642,6 +654,11 @@ def _post(api_key: str, model: str, payload: Dict[str, Any],
 
     url = chat_url(base_url)
     body = {**payload, "model": models[0], "stream": bool(stream)}
+    if stream:
+        # Ask for the usage trailer explicitly. OpenAI-compatible providers
+        # omit token counts from a stream unless this is set, and a run
+        # whose cost is unknown cannot be budgeted - only guessed at.
+        body["stream_options"] = {"include_usage": True}
     if len(models) > 1:
         body["models"] = models
     http_client = client or httpx.Client(timeout=build_timeout(timeout))

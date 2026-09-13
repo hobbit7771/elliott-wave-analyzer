@@ -34,7 +34,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 
-from t3_engine.ai_advisor import analysis_store
+from t3_engine.ai_advisor import analysis_store, trade_journal
 from t3_engine.ai_advisor.advisor import (
     ANALYSIS_TEMPERATURE,
     DEFAULT_MODEL,
@@ -171,9 +171,14 @@ def _analyse_timeframe(api_key: str, load_candles: Callable, source: str, symbol
                 steps_used=payload.get("steps_used", 0),
             )
 
+    record = trade_journal.summary_for(source, resolved_symbol, degree.value,
+                                       database_url=database_url)
     try:
         result = run_analyst(api_key, candles, degree, symbol=resolved_symbol, model=model,
-                             on_progress=on_progress, **analyst_kwargs)
+                             on_progress=on_progress,
+                             record_line=trade_journal.brief_line(record, resolved_symbol,
+                                                                  degree.value),
+                             **analyst_kwargs)
     except AIAdvisorError as exc:
         report(f"{degree.value}: failed - {exc}")
         return TimeframeAnalysis(timeframe=degree.value, reused=False, candles=len(candles),

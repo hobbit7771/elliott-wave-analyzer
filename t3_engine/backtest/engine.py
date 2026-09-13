@@ -110,6 +110,11 @@ class BacktestEngine:
         # a candle closed cannot have been traded on it.
         self.ai_only: bool = False
         self.ai_scenario = None
+        # Called for every stop and every take-profit leg that fills, with
+        # (position, reason, price, candle). Set by the live loop so fills
+        # reach the trade journal; None everywhere else, which leaves the
+        # backtest path exactly as it was.
+        self.on_fill = None
         self._ai_fingerprint: str = ""
         self._ai_evaluated_id: str = ""
 
@@ -234,13 +239,30 @@ class BacktestEngine:
             # extreme first (protects against overstating performance if
             # both the stop and a TP technically sit inside one bar's range).
             if pos.side == TradeSide.LONG:
-                self.position_manager.on_price_update(position_id, candle.low, candle.close_time)
+                self._apply_price(position_id, candle.low, candle)
                 if position_id in self.position_manager.positions and not self.position_manager.positions[position_id].closed:
-                    self.position_manager.on_price_update(position_id, candle.high, candle.close_time)
+                    self._apply_price(position_id, candle.high, candle)
             else:
-                self.position_manager.on_price_update(position_id, candle.high, candle.close_time)
+                self._apply_price(position_id, candle.high, candle)
                 if position_id in self.position_manager.positions and not self.position_manager.positions[position_id].closed:
-                    self.position_manager.on_price_update(position_id, candle.low, candle.close_time)
+                    self._apply_price(position_id, candle.low, candle)
+
+    def _apply_price(self, position_id: str, price: float, candle: Candle) -> None:
+        """One price against one open position, reporting anything it filled.
+
+        on_price_update already returned a reason string for every fill and
+        this loop threw it away. That is why a position with two of its
+        four take-profit legs filled could show as "open: 1, closed: 0" and
+        nothing else - the fills were real, the money was real, and nothing
+        was listening. `on_fill` is what listens now (the live loop writes
+        them to the trade journal)."""
+        reason = self.position_manager.on_price_update(position_id, price, candle.close_time)
+        if reason is None or self.on_fill is None:
+            return
+        pos = self.position_manager.positions.get(position_id)
+        if pos is None:
+            return
+        self.on_fill(pos, reason, price, candle)
 
     def _maybe_open_trade(self, scenarios, direction: Direction, candle: Candle, index: int, candles: List[Candle]) -> None:
         if self.config.degree not in TRADEABLE_TIMEFRAMES:
@@ -313,8 +335,10 @@ class BacktestEngine:
             return
 
         quantity = self.risk_manager.position_size(wave.label, entry_price, plan.stop_loss)
-        self.position_manager.open_position(
+        position = self.position_manager.open_position(
             signal=signal, symbol=self.config.symbol, side=side, entry_price=entry_price,
             quantity=quantity, stop_loss=plan.stop_loss, take_profits=plan.take_profits,
             wave_label=wave.label, now_ms=candle.close_time,
         )
+        if self.on_fill is not None and position is not None:
+            self.on_fill(position, "ENTRY", entry_price, candle)

@@ -200,3 +200,49 @@ class AnalysisCacheRow(Base):
     model = Column(String, nullable=True)
     created_at = Column(Integer, nullable=False)
     payload = Column(Text, nullable=False)      # the analyst result, as JSON
+
+
+class AiTradeEventRow(Base):
+    """One thing that happened to a paper trade opened from an AI count.
+
+    In-memory positions were enough while a session was a single request.
+    A live session is not: it runs for days, a stop or a take-profit fires
+    hours after the count that planned it, and a restart used to erase
+    every one of them. Worse, the agent had no way to learn that its last
+    count made or lost money - it was asked to label the same instrument
+    again with no idea how the previous label turned out.
+
+    So every fill is written down here as it happens - the entry, each
+    take-profit leg, the stop, the final close - tagged with the count
+    that produced it (`count_fingerprint`, see ai_advisor/ai_trading.py).
+    Two things read it: the dashboard, so partial take-profits stop being
+    invisible, and the analyst's opening brief, so the agent is told what
+    its own previous counts actually did.
+
+    It records what happened, and nothing else. No instruction is derived
+    from it and none is given to the model about it - "your last count
+    lost, so do something different" is how a model is talked into
+    curve-fitting its next answer.
+    """
+
+    __tablename__ = "ai_trade_events"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(String, nullable=False, index=True)
+    symbol = Column(String, nullable=False, index=True)
+    timeframe = Column(String, nullable=False, index=True)
+    position_id = Column(String, nullable=False, index=True)
+    # ENTRY | TP_HIT | STOP_LOSS | CLOSE
+    event = Column(String, nullable=False)
+    label = Column(String, nullable=True)       # "TP1", "TP2", ... for a leg
+    wave_label = Column(String, nullable=True)  # the AI wave this trade is in
+    side = Column(String, nullable=False)
+    price = Column(Float, nullable=False)
+    quantity = Column(Float, nullable=False)
+    # Realized on THIS event, and cumulatively for the position so far.
+    realized_pnl = Column(Float, nullable=False, default=0.0)
+    position_realized_pnl = Column(Float, nullable=False, default=0.0)
+    equity = Column(Float, nullable=True)
+    # Which AI count planned this trade - so "how did that count do" is
+    # answerable rather than inferred.
+    count_fingerprint = Column(String, nullable=True, index=True)
+    at = Column(Integer, nullable=False, index=True)
