@@ -75,9 +75,34 @@ import httpx
 # default because it is what was asked for; it is not authoritative, so the
 # dashboard keeps it editable and surfaces the API's own error verbatim
 # when an id stops resolving.
-DEFAULT_MODEL = "moonshotai/kimi-k3"
-DEFAULT_API_BASE = os.getenv("T3_AI_API_BASE", "https://integrate.api.nvidia.com/v1")
-PROVIDER_NAME = "NVIDIA API Catalog"
+# Back on OpenRouter, which is the fifth provider this module has been
+# pointed at. Every provider-specific value stays a field for that reason;
+# none of them is worth a redeploy.
+DEFAULT_MODEL = os.getenv("T3_AI_MODEL", "nvidia/nemotron-3-ultra-550b-a55b:free")
+DEFAULT_API_BASE = os.getenv("T3_AI_API_BASE", "https://openrouter.ai/api/v1")
+PROVIDER_NAME = "OpenRouter"
+
+# Model families that cannot serve a chat completion at all, matched on the
+# id. This is not a guess about quality - an embedding model returns a
+# vector from /v1/embeddings and has no text output or tool calling, so
+# pointing the analyst at one fails in a way that looks like a broken app
+# rather than like a wrong choice. Catching it by name turns a confusing
+# 400 (or worse, a silent empty answer) into a sentence that says what the
+# model is.
+NON_CHAT_MODEL_MARKERS = ("embed", "embedding", "-rerank", "reranker", "moderation",
+                          "whisper", "tts-", "-tts", "stable-diffusion", "flux")
+
+
+def non_chat_reason(model: str) -> Optional[str]:
+    """Why this model id cannot answer a chat request, or None."""
+    name = (model or "").lower()
+    if any(marker in name for marker in NON_CHAT_MODEL_MARKERS):
+        kind = "an embedding" if "embed" in name else "a non-chat"
+        return (f"'{model}' looks like {kind} model. Those take input and return vectors or scores "
+                "from a different endpoint - they have no text output and no tool calling, so they "
+                "cannot give a second opinion, propose a wave count, or run the analyst. Pick a "
+                "chat model; Diagnose lists the ones in your catalogue that support tool calling.")
+    return None
 
 # A server-side key, so the dashboard works without pasting one into the
 # browser. Read from the environment ONLY - never a literal in this file,
@@ -510,6 +535,15 @@ def _post(api_key: str, model: str, payload: Dict[str, Any],
         raise AIAdvisorError(f"No {PROVIDER_NAME} API key provided "
                              "(get one at https://build.nvidia.com)")
 
+    problem = non_chat_reason(model)
+    if problem:
+        raise AIAdvisorError(problem)
+    if not model:
+        raise AIAdvisorError(
+            "No model id set. Open the AI tab, press Diagnose to list the models your key can reach, "
+            "and paste one that supports tool calling into the Model field."
+        )
+
     url = chat_url(base_url)
     body = {**payload, "model": model, "stream": bool(stream)}
     http_client = client or httpx.Client(timeout=build_timeout(timeout))
@@ -661,7 +695,8 @@ def request_wave_count(api_key: str, pivots: List[Dict[str, Any]], direction: st
 
 
 def check_access(api_key: str, base_url: Optional[str] = None,
-                 client: Optional[httpx.Client] = None, timeout: float = 30.0) -> Dict[str, Any]:
+                 client: Optional[httpx.Client] = None, timeout: float = 30.0,
+                 model: str = "") -> Dict[str, Any]:
     """Verify the key and the endpoint WITHOUT invoking a model.
 
     This is the check that ends the guessing. `GET {base}/models` is an
@@ -709,16 +744,35 @@ def check_access(api_key: str, base_url: Optional[str] = None,
         )
 
     ids: List[str] = []
+    tool_capable: List[str] = []
+    model_supports_tools: Optional[bool] = None
     try:
         payload = resp.json()
         entries = payload.get("data") if isinstance(payload, dict) else None
         for entry in entries or []:
-            name = entry.get("id") if isinstance(entry, dict) else None
-            if name:
-                ids.append(str(name))
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("id")
+            if not name:
+                continue
+            ids.append(str(name))
+            # OpenRouter publishes `supported_parameters` per model. It is
+            # the only authoritative answer to "will the analyst work with
+            # this one", and it beats guessing from the model's name.
+            supported = entry.get("supported_parameters") or []
+            if isinstance(supported, (list, tuple)) and "tools" in supported:
+                tool_capable.append(str(name))
     except (ValueError, AttributeError):
         pass
-    return {"ok": True, "url": url, "seconds": elapsed, "model_count": len(ids), "models": ids}
+
+    if model and ids:
+        model_supports_tools = model in tool_capable if tool_capable else None
+
+    return {"ok": True, "url": url, "seconds": elapsed, "model_count": len(ids),
+            "models": ids, "tool_capable": tool_capable,
+            "tool_capable_count": len(tool_capable),
+            "model_supports_tools": model_supports_tools,
+            "checked_model": model or None}
 
 
 def ping(api_key: str, model: str = DEFAULT_MODEL, base_url: Optional[str] = None,

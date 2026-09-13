@@ -211,12 +211,12 @@ def test_index_ai_tab_is_wired_to_the_current_provider():
     GONE, not merely joined by the new one."""
     resp = client.get("/")
     assert "aiKey" in resp.text
-    assert "integrate.api.nvidia.com" in resp.text
+    assert "openrouter.ai/api/v1" in resp.text
     assert "geminiKey" not in resp.text
     assert "aistudio.google.com" not in resp.text
     assert "openaiKey" not in resp.text
-    assert "openrouter.ai" not in resp.text
     assert "orcarouter" not in resp.text
+    assert "integrate.api.nvidia.com" not in resp.text
 
 
 def test_a_key_saved_for_an_old_provider_is_not_reused_for_the_new_one():
@@ -224,9 +224,9 @@ def test_a_key_saved_for_an_old_provider_is_not_reused_for_the_new_one():
     from the previous provider would fail as "invalid key", which reads as
     "the app is broken" rather than "that key is for the wrong service"."""
     resp = client.get("/")
-    assert "t3_nvidia_key" in resp.text
+    assert "t3_openrouter2_key" in resp.text
     assert "t3_gemini_key" not in resp.text
-    assert "t3_openrouter_key" not in resp.text
+    assert "t3_nvidia_key" not in resp.text
     assert "t3_orcarouter_key" not in resp.text
 
 
@@ -452,7 +452,7 @@ def test_ai_advice_requires_key():
 def test_ai_advice_success_with_a_mocked_model():
     class FakeResponse:
         text = "Looks like a reasonable wave 3 setup, watch for extension risk."
-        model = "moonshotai/kimi-k3"
+        model = "nvidia/nemotron-3-ultra-550b-a55b:free"
         raw = {}
 
     with patch.object(server_module, "request_commentary", return_value=FakeResponse()):
@@ -471,7 +471,7 @@ class _FakeProposal:
     def __init__(self, waves, reasoning="because"):
         self.waves = waves
         self.reasoning = reasoning
-        self.model = "moonshotai/kimi-k3"
+        self.model = "nvidia/nemotron-3-ultra-550b-a55b:free"
         self.raw = {}
 
 
@@ -599,7 +599,7 @@ class _FakeAnalystResult:
         self.summary = "Five waves up look complete."
         self.reasoning = "Wave 3 is the longest."
         self.steps = []
-        self.model = "moonshotai/kimi-k3"
+        self.model = "nvidia/nemotron-3-ultra-550b-a55b:free"
         self.steps_used = 3
         self.finished = True
         self.note = note
@@ -689,8 +689,8 @@ def test_the_api_base_url_reaches_every_ai_endpoint():
     with patch.object(server_module, "run_analyst", side_effect=fake_run):
         client.post("/api/ai/analyst", json={
             "api_key": "sk-test", "source": "synthetic", "cycles": 2,
-            "base_url": "https://integrate.api.nvidia.com/v2"})
-    assert seen["analyst"] == "https://integrate.api.nvidia.com/v2"
+            "base_url": "https://openrouter.ai/v2"})
+    assert seen["analyst"] == "https://openrouter.ai/v2"
 
     def fake_commentary(api_key, context, model=None, base_url=None, timeout=None,
                         reasoning_effort=None, thinking=None):
@@ -699,8 +699,8 @@ def test_the_api_base_url_reaches_every_ai_endpoint():
 
     with patch.object(server_module, "request_commentary", side_effect=fake_commentary):
         client.post("/api/ai/advice", json={
-            "api_key": "sk-test", "context": {}, "base_url": "https://integrate.api.nvidia.com/v2"})
-    assert seen["advice"] == "https://integrate.api.nvidia.com/v2"
+            "api_key": "sk-test", "context": {}, "base_url": "https://openrouter.ai/v2"})
+    assert seen["advice"] == "https://openrouter.ai/v2"
 
 
 def test_a_partial_run_returns_its_transcript_instead_of_nothing():
@@ -745,11 +745,11 @@ def test_ping_passes_the_whole_setup_through_so_it_tests_what_the_real_run_uses(
 
     with patch.object(server_module, "ai_ping", side_effect=fake_ping):
         client.post("/api/ai/ping", json={
-            "api_key": "sk-test", "model": "moonshotai/kimi-k3",
-            "base_url": "https://integrate.api.nvidia.com/v1"})
+            "api_key": "sk-test", "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+            "base_url": "https://openrouter.ai/api/v1"})
     assert seen["key"] == "sk-test"
-    assert seen["model"] == "moonshotai/kimi-k3"
-    assert seen["base_url"] == "https://integrate.api.nvidia.com/v1"
+    assert seen["model"] == "nvidia/nemotron-3-ultra-550b-a55b:free"
+    assert seen["base_url"] == "https://openrouter.ai/api/v1"
 
 
 def test_index_exposes_the_connection_test_and_timeout_controls():
@@ -781,7 +781,7 @@ def test_ai_config_reports_whether_a_server_key_exists_but_never_the_key():
     body = resp.json()
     assert body["server_key"] is True
     assert "nvapi-super-secret" not in resp.text
-    assert body["provider"] == "NVIDIA API Catalog"
+    assert body["provider"] == "OpenRouter"
 
 
 def test_a_request_without_a_key_falls_back_to_the_server_key():
@@ -817,7 +817,7 @@ def test_reasoning_effort_reaches_the_analyst():
 
     with patch.object(server_module, "run_analyst", side_effect=fake_run):
         client.post("/api/ai/analyst", json={
-            "api_key": "nvapi-test", "source": "synthetic", "cycles": 2,
+            "api_key": "sk-or-test", "source": "synthetic", "cycles": 2,
             "reasoning_effort": "max"})
     assert seen["reasoning_effort"] == "max"
 
@@ -860,7 +860,7 @@ def test_the_analyst_returns_the_conversation_so_a_stall_can_be_explained():
     ]
     with patch.object(server_module, "run_analyst", return_value=partial):
         resp = client.post("/api/ai/analyst",
-                           json={"api_key": "nvapi-test", "source": "synthetic", "cycles": 2})
+                           json={"api_key": "sk-or-test", "source": "synthetic", "cycles": 2})
     data = resp.json()
     assert [e["role"] for e in data["transcript"]] == ["assistant", "tool", "system"]
     assert data["transcript"][0]["reasoning"] == "Coarse first."
@@ -896,7 +896,7 @@ def test_diagnose_runs_the_model_free_check_first():
     part."""
     calls = []
 
-    def fake_access(key, base_url=None, timeout=None):
+    def fake_access(key, base_url=None, timeout=None, model=""):
         calls.append("access")
         return {"ok": True, "url": base_url, "seconds": 0.4, "model_count": 3, "models": []}
 
@@ -906,7 +906,7 @@ def test_diagnose_runs_the_model_free_check_first():
 
     with patch.object(server_module, "ai_check_access", side_effect=fake_access), \
          patch.object(server_module, "ai_diagnose", side_effect=fake_diagnose):
-        resp = client.post("/api/ai/diagnose", json={"api_key": "nvapi-test"})
+        resp = client.post("/api/ai/diagnose", json={"api_key": "sk-or-test"})
     assert calls == ["access", "chat"]
     body = resp.json()
     assert body["access"]["model_count"] == 3
@@ -920,7 +920,7 @@ def test_a_failing_access_check_does_not_stop_the_chat_probe():
                       side_effect=server_module.AIAdvisorError("401 invalid key")), \
          patch.object(server_module, "ai_diagnose",
                       return_value={"status": 401, "verdict": "rejected outright"}):
-        resp = client.post("/api/ai/diagnose", json={"api_key": "nvapi-bad"})
+        resp = client.post("/api/ai/diagnose", json={"api_key": "sk-or-bad"})
     body = resp.json()
     assert body["access"]["ok"] is False
     assert body["chat"]["status"] == 401
@@ -953,12 +953,12 @@ def test_thinking_defaults_to_off_on_the_analyst_endpoint():
         return _FakeAnalystResult([])
 
     with patch.object(server_module, "run_analyst", side_effect=fake_run):
-        client.post("/api/ai/analyst", json={"api_key": "nvapi-test", "source": "synthetic",
+        client.post("/api/ai/analyst", json={"api_key": "sk-or-test", "source": "synthetic",
                                              "cycles": 2})
     assert seen["thinking"] is False
 
     with patch.object(server_module, "run_analyst", side_effect=fake_run):
-        client.post("/api/ai/analyst", json={"api_key": "nvapi-test", "source": "synthetic",
+        client.post("/api/ai/analyst", json={"api_key": "sk-or-test", "source": "synthetic",
                                              "cycles": 2, "thinking": "on"})
     assert seen["thinking"] is True
 
@@ -970,7 +970,7 @@ def test_diagnose_runs_the_variant_probe_that_names_the_cause():
          patch.object(server_module, "ai_probe_variants",
                       return_value={"variants": [{"variant": "thinking off, streamed", "ok": True}],
                                     "verdict": "Thinking mode is the cause"}):
-        resp = client.post("/api/ai/diagnose", json={"api_key": "nvapi-test"})
+        resp = client.post("/api/ai/diagnose", json={"api_key": "sk-or-test"})
     assert "Thinking mode is the cause" in resp.json()["probe"]["verdict"]
 
 
@@ -989,7 +989,7 @@ def test_signal_quality_refuses_rather_than_inventing_a_number():
     honest answer is "not enough history" - a 422 with the reason, not a
     probability nobody should trust."""
     resp = client.post("/api/ai/signal-quality",
-                       json={"api_key": "nvapi-test", "source": "synthetic", "cycles": 2})
+                       json={"api_key": "sk-or-test", "source": "synthetic", "cycles": 2})
     assert resp.status_code == 422
     detail = resp.json()["detail"]
     assert "closed trade" in detail or "No signals to score" in detail
@@ -1005,7 +1005,7 @@ def test_signal_quality_returns_the_context_size_with_every_probability():
         context_trades=41, wins_in_context=18, model="kumo-relational")
     with patch.object(server_module, "predict_trade_quality", return_value=fake):
         resp = client.post("/api/ai/signal-quality",
-                           json={"api_key": "nvapi-test", "source": "synthetic", "cycles": 2})
+                           json={"api_key": "sk-or-test", "source": "synthetic", "cycles": 2})
     body = resp.json()
     assert body["context_trades"] == 41
     assert body["wins_in_context"] == 18
@@ -1019,3 +1019,26 @@ def test_signal_quality_uses_the_relational_host_not_the_chat_one():
 
     assert "ai.api.nvidia.com" in DEFAULT_RELATIONAL_URL
     assert "integrate.api.nvidia.com" not in DEFAULT_RELATIONAL_URL
+
+
+def test_diagnose_reports_whether_the_chosen_model_can_run_the_analyst():
+    """The AI Analyst needs tool calling and most free models lack it. The
+    catalogue knows; guessing from the model's name does not."""
+    with patch.object(server_module, "ai_check_access",
+                      return_value={"ok": True, "seconds": 0.2, "model_count": 310,
+                                    "models": [], "tool_capable": ["a/b:free"],
+                                    "tool_capable_count": 1, "model_supports_tools": False,
+                                    "checked_model": "nvidia/nemotron-3-ultra-550b-a55b:free"}), \
+         patch.object(server_module, "ai_diagnose", return_value={"status": 200}), \
+         patch.object(server_module, "ai_probe_variants", return_value={"variants": [], "verdict": ""}):
+        resp = client.post("/api/ai/diagnose", json={
+            "api_key": "sk-or-test", "model": "nvidia/nemotron-3-ultra-550b-a55b:free"})
+    access = resp.json()["access"]
+    assert access["model_supports_tools"] is False
+    assert access["tool_capable_count"] == 1
+
+
+def test_index_shows_the_tool_calling_verdict_where_the_model_is_chosen():
+    resp = client.get("/")
+    assert "model_supports_tools" in resp.text
+    assert "the AI Analyst can run" in resp.text

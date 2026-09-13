@@ -17,7 +17,7 @@
 A modular, testable, mostly-real implementation of the T3 spec: a
 multi-timeframe Elliott Wave analysis and (paper-)trading engine, live
 market data from Bybit USDT perpetuals (see "Mobile app + live Bybit"
-below for why Binance was dropped). 361 automated tests, all passing,
+below for why Binance was dropped). 368 automated tests, all passing,
 cover every module described below.
 
 ## Read this first: what "done" means here
@@ -90,7 +90,7 @@ t3_engine/
                       analyst_tools.py = the tools it may use). Never a decision-maker.
   logger/             JSON-lines decision journal (SIGNAL_ACCEPTED/REJECTED + full context)
 
-tests/                361 tests, one file per module above
+tests/                368 tests, one file per module above
 run_backtest.py        CLI: run a backtest, print a metrics report
 run_paper_trading.py   CLI: run the live pipeline against Bybit in PAPER mode
 run_dashboard.py       CLI: serve the dashboard
@@ -329,8 +329,8 @@ desktop web page:
   import time so every module's logger actually reaches stdout. This is
   exactly what surfaced the Bybit fallback working in production (see the
   first bullet above).
-- **AI tab (NVIDIA API Catalog)**: runs against
-  `integrate.api.nvidia.com/v1`, `moonshotai/kimi-k3` by default. The key
+- **AI tab (OpenRouter)**: runs against `openrouter.ai/api/v1`,
+  `nvidia/nemotron-3-ultra-550b-a55b:free` by default. The key
   can come from the browser (stored only in `localStorage`, forwarded
   per-request, never written to disk server-side) or from `T3_AI_API_KEY`
   on the server, with a request's own key always winning. **A server-side
@@ -427,6 +427,25 @@ desktop web page:
   is reported separately from the observations, so a wrong reading of the
   evidence never hides the evidence.
 
+  The catalogue listing also answers the one question that decides whether
+  the AI Analyst can work at all: **does the chosen model support tool
+  calling?** OpenRouter publishes `supported_parameters` per model, so this
+  is read from the catalogue rather than guessed from the model's name, and
+  absent metadata is reported as *unknown* rather than as "no" - absence of
+  evidence is not evidence of absence, and reporting "no tools" there would
+  send you chasing a problem that may not exist. When the answer is no, the
+  panel says which of the catalogue's models do support it, free ones
+  first: the second opinion and whole-history labelling still work without
+  tools; only the agent loop needs them.
+
+  Models of the **wrong kind** are refused before a request is spent on
+  them. An embedding, rerank, moderation, speech or image model is a real,
+  working model that simply has no text output and no tool calling - it
+  returns vectors or scores from a different endpoint - so pointing the
+  analyst at one fails in a way that reads as a broken app rather than a
+  wrong choice. Matched on the id, and deliberately narrow so it cannot
+  reject a working chat model over a substring.
+
   Third, a **configuration probe**: the same trivial prompt sent under
   several settings, each differing from the previous one by exactly one
   thing, so the first that answers names the cause rather than hinting at
@@ -518,7 +537,7 @@ desktop web page:
   the same count.
 
   Provider history, since this keeps moving: OpenAI → Google Gemini →
-  OrcaRouter → NVIDIA API Catalog. Nothing downstream of `ai_advisor/`
+  OrcaRouter → NVIDIA API Catalog → OpenRouter. Nothing downstream of `ai_advisor/`
   cares which model answered, which is why each swap has been a rewrite of
   one module plus its tests rather than of the engine.
 
@@ -790,7 +809,7 @@ should come up; no changes needed in the Render dashboard.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt   # T3 engine deps only; legacy app.py deps are in requirements-legacy.txt
 
-# Run the automated test suite (361 tests)
+# Run the automated test suite (368 tests)
 pytest tests/ -q
 
 # Run a backtest against the synthetic demo fixture (no network needed)

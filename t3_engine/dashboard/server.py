@@ -45,6 +45,7 @@ from t3_engine.ai_advisor.advisor import (
     DEFAULT_MODEL as DEFAULT_AI_MODEL,
     DEFAULT_READ_TIMEOUT,
     MAX_READ_TIMEOUT,
+    PROVIDER_NAME,
     AIAdvisorError,
     check_access as ai_check_access,
     diagnose as ai_diagnose,
@@ -154,7 +155,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-023"
+BUILD_VERSION = "BUILD-CHECK-024"
 
 
 @app.get("/api/health")
@@ -180,7 +181,7 @@ def ai_config():
         "server_key": bool(SERVER_AI_KEY),
         "model": DEFAULT_AI_MODEL,
         "base_url": DEFAULT_AI_API_BASE,
-        "provider": "NVIDIA API Catalog",
+        "provider": PROVIDER_NAME,
     }
 
 
@@ -640,7 +641,8 @@ def ai_diagnose_endpoint(api_key: str = Body("", embed=True),
     key = resolve_api_key(api_key)
     report: Dict[str, object] = {"model": model, "base_url": base_url}
     try:
-        report["access"] = ai_check_access(key, base_url=base_url, timeout=min(timeout, 30.0))
+        report["access"] = ai_check_access(key, base_url=base_url, timeout=min(timeout, 30.0),
+                                           model=model)
     except AIAdvisorError as exc:
         report["access"] = {"ok": False, "error": str(exc)}
     # The chat probe runs either way: when access is fine it measures the
