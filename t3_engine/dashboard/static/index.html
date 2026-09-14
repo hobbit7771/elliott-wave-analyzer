@@ -1412,9 +1412,17 @@ function renderAnalystStructures(data) {
   wrap.style.display = '';
   const acceptedHtml = accepted.map(st => {
     const labels = (st.waves || []).map(w => w.label).join(' → ');
+    // The readings that were ALSO legal on these swings and lost on
+    // score. Shown because a preference nobody can see is
+    // indistinguishable from a rule, and this one is a preference: the
+    // hard rules accepted every reading listed here, and one was chosen.
+    const others = (st.alternatives || [])
+      .map(a => `${a.structure} ${a.labels}`).join(', ');
     return `<div class="signal accepted"><div class="row"><span class="k">${escapeHtml(st.structure)}</span>`
-      + `<span class="v">${escapeHtml(labels)}</span></div>`
+      + `<span class="v">${escapeHtml(labels)}${st.partial ? ' · still forming' : ''}</span></div>`
       + `<div class="row"><span class="k">Degree</span><span class="v">${st.deviation_pct}% swing</span></div>`
+      + (others ? `<div class="hint">Also legal on these swings: ${escapeHtml(others)} — `
+          + `this reading was preferred.</div>` : '')
       + (st.note ? `<div class="hint">${escapeHtml(st.note)}</div>` : '') + `</div>`;
   }).join('');
   // Rejected structures are shown, not hidden. "The model proposed this and

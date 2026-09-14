@@ -112,20 +112,31 @@ def _score_candidate(structure: str, validated) -> float:
             score += _FLATNESS_WEIGHT * (1.0 - min(1.0, net / travelled))
     return score
 
-# The deviations tried when picking one for a chart. Spanning 0.6% to 6%
-# covers a 5m crypto chart (which swings a fraction of a percent) and a 4h
-# one (which swings whole percentages) with the same ladder.
-_DEVIATION_LADDER: Tuple[float, ...] = (6.0, 4.5, 3.5, 2.5, 2.0, 1.5, 1.2, 1.0, 0.8, 0.6)
+# The deviations tried when picking one for a chart. It has to span the
+# real range: 1500 5m bars is five days of half-percent wiggles, while
+# 1500 4h bars is eight months in which this instrument went from 7.34 to
+# 2.65 and back. A ladder that stopped at 6% counted that 4h chart at
+# minute degree and produced forty-nine structures, twenty-seven of them
+# flats - a correct count of the wrong degree.
+_DEVIATION_LADDER: Tuple[float, ...] = (25.0, 20.0, 16.0, 12.0, 9.0, 6.0, 4.5, 3.5,
+                                        2.5, 2.0, 1.5, 1.2, 1.0, 0.8, 0.6)
 
 # Below this a "count" is a handful of swings and the rules have had
 # nothing to reject. Reported rather than dressed up.
 MIN_PIVOTS_FOR_A_COUNT = 6
 
-# How much labelled span a coarser reading may give up to be preferred.
-# Three points: enough that a cycle-degree count is not rejected for
-# leaving one small stretch unlabelled, not so much that a reading which
-# labels half the chart can win.
-COVERAGE_TOLERANCE = 0.03
+# What a reading has to manage before it is allowed to win on being the
+# coarsest. Coverage rises monotonically as the deviation falls - the
+# finest reading almost always labels the most - so "closest to the best
+# coverage" is just a slow way of always choosing the finest. A FLOOR
+# instead: account for three quarters of the chart, in at least a few
+# separate structures, and then the largest degree that manages it wins.
+MIN_USEFUL_COVERAGE = 0.75
+
+# One structure spanning the whole window is a true statement and an
+# unreadable chart; it is also usually a sign the deviation is coarser
+# than the data supports.
+MIN_STRUCTURES_FOR_A_DEGREE = 3
 
 # Subwaves are by definition smaller moves than the wave holding them, so
 # they are looked for at a fraction of the deviation that found the parent.
@@ -201,12 +212,15 @@ def count_at_deviation(candles: List[Candle], degree: Timeframe,
     while index + 3 < len(pivots):
         placed = None
         best_score = float("-inf")
+        legal: List[Dict[str, Any]] = []
         for structure, legs_wanted in _CANDIDATES:
             validated = _try(pivots, index, structure, legs_wanted, degree,
                              _labels_for(structure))
             if validated is None:
                 continue
             score = _score_candidate(structure, validated)
+            legal.append({"structure": structure, "score": round(score, 3),
+                          "labels": "-".join(w.label.value for w in validated.waves)})
             if score > best_score:
                 best_score, placed = score, (structure, legs_wanted, validated)
         if placed is None:
@@ -220,6 +234,12 @@ def count_at_deviation(candles: List[Candle], degree: Timeframe,
             "structure": structure, "deviation_pct": deviation_pct,
             "valid": True, "broken_rule": None, "reason": validated.notes,
             "score": round(best_score, 3),
+            # The readings that were ALSO legal here and lost on score.
+            # A preference that is never shown is indistinguishable from a
+            # rule, and these are preferences: the hard rules accepted
+            # every one of these, and one of them was chosen.
+            "alternatives": [a for a in legal
+                             if a["structure"] != placed[0]][:3],
             "waves": _wave_dicts(validated), "pivot_indices": validated.pivot_indices,
             "start_pivot_index": index,
         })
@@ -424,16 +444,22 @@ def build_count(candles: List[Candle], degree: Timeframe, symbol: str = "") -> D
     if not scored:
         best = max(attempts, key=lambda a: a["pivots"])
     else:
-        # Coverage first, then the COARSEST deviation that still gets
-        # there. Taking the highest coverage outright rewards the finest
-        # reading, which chops one cycle-degree impulse into a dozen
-        # minute-degree ones and puts eighty structures on a chart nobody
-        # can read. Counting the largest degree the data supports and
+        # The LARGEST degree that still accounts for the chart. Chasing
+        # maximum coverage instead chops one cycle-degree impulse into a
+        # dozen minute-degree ones, because a finer reading always labels
+        # a little more; counting the biggest degree the data supports and
         # subdividing underneath it is the order Elliott is done in, and
         # the subdivision happens below anyway.
-        reachable = max(a["covered_fraction"] for a in scored)
-        close = [a for a in scored if a["covered_fraction"] >= reachable - COVERAGE_TOLERANCE]
-        best = max(close, key=lambda a: a["deviation_pct"])
+        usable = [a for a in scored
+                  if a["covered_fraction"] >= MIN_USEFUL_COVERAGE
+                  and a["structures"] >= MIN_STRUCTURES_FOR_A_DEGREE]
+        if usable:
+            best = max(usable, key=lambda a: a["deviation_pct"])
+        else:
+            # Nothing cleared the floor, so there is no degree to prefer -
+            # take the reading that labels the most and say so through the
+            # coverage figure that travels with it.
+            best = max(scored, key=lambda a: (round(a["covered_fraction"], 3), a["structures"]))
 
     result = best["result"]
     deviation = best["deviation_pct"]

@@ -87,19 +87,24 @@ def test_the_deviation_is_measured_rather_than_assumed(counted):
     """Every rung is tried and the search is reported, so the choice can
     be argued with instead of taken on faith.
 
-    The rule is coverage first, then the COARSEST deviation that still
+    The rule is a coverage FLOOR, then the coarsest deviation that
     reaches it - the largest degree the data supports, which is the order
     Elliott is counted in and also the only reading a chart can show
     without eighty structures on it."""
     _, out = counted
     search = out["deviation_search"]
     assert len(search) == len(deep_count._DEVIATION_LADDER)
-    scored = [a for a in search if a["structures"]]
-    reachable = max(a["covered_fraction"] for a in scored)
-    close = [a for a in scored
-             if a["covered_fraction"] >= reachable - deep_count.COVERAGE_TOLERANCE]
-    assert out["deviation_pct"] == max(a["deviation_pct"] for a in close)
-    assert out["coverage"]["covered_fraction"] >= reachable - deep_count.COVERAGE_TOLERANCE
+    usable = [a for a in search
+              if a["covered_fraction"] >= deep_count.MIN_USEFUL_COVERAGE
+              and a["structures"] >= deep_count.MIN_STRUCTURES_FOR_A_DEGREE]
+    assert usable, "no deviation on the ladder accounted for this chart at all"
+    assert out["deviation_pct"] == max(a["deviation_pct"] for a in usable)
+    assert out["coverage"]["covered_fraction"] >= deep_count.MIN_USEFUL_COVERAGE
+    # ...and nothing coarser managed it, or that one would have won.
+    coarser = [a for a in search if a["deviation_pct"] > out["deviation_pct"]]
+    assert all(a["covered_fraction"] < deep_count.MIN_USEFUL_COVERAGE
+               or a["structures"] < deep_count.MIN_STRUCTURES_FOR_A_DEGREE
+               for a in coarser)
 
 
 def test_a_short_history_is_refused_rather_than_counted():
@@ -184,3 +189,16 @@ def test_a_flat_that_goes_nowhere_outranks_a_flat_that_travels():
     travelling = flat([(100.0, 90.0), (90.0, 130.0), (130.0, 125.0)])
     assert (deep_count._score_candidate("FLAT", sideways)
             > deep_count._score_candidate("FLAT", travelling))
+
+
+def test_the_readings_that_lost_are_recorded_beside_the_one_that_won(counted):
+    """A preference nobody can see is indistinguishable from a rule. Where
+    more than one reading of the same swings was legal, the losers travel
+    with the winner so the choice can be argued with."""
+    _, out = counted
+    contested = [s for s in out["accepted"] if s.get("alternatives")]
+    assert contested, "no stretch of this chart admitted a second legal reading at all"
+    for structure in contested:
+        for alternative in structure["alternatives"]:
+            assert alternative["structure"] != structure["structure"]
+            assert alternative["score"] <= structure["score"]
