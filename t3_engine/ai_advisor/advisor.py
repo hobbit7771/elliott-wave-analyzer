@@ -161,21 +161,30 @@ DEFAULT_THINKING: Optional[bool] = True
 
 # Sampling temperatures, chosen per job rather than one number everywhere.
 #
-# A wave count is not a creative task: the chart either does or does not
-# contain a legal impulse, so the correct temperature is 0. Anything above
-# that is asking the model to sometimes prefer a count it thinks is worse,
-# which for an analysis tool is a defect, not variety. It also makes runs
-# reproducible without needing a seed at all.
+# Set to 0.3 on the project owner's instruction. The argument for 0 is
+# recorded here because it is the reason this was ever 0 and the trade-off
+# is real: a wave count is not a creative task - the chart either does or
+# does not contain a legal impulse - so at 0 the model always returns the
+# count it rates highest, and two runs over the same candles agree.
 #
-# Commentary is the exception and still only mildly warm: a second opinion
-# that is always phrased identically stops being read.
-ANALYSIS_TEMPERATURE = 0.0
+# What 0.3 buys in exchange: the agent loop explores. It works the chart
+# over a dozen-plus steps, and a little sampling lets it try a different
+# degree or a different anchor instead of walking the same path to the same
+# local answer every time. With every structure re-validated server-side,
+# a worse count cannot reach the chart - it is rejected with the rule it
+# broke - so the downside is a wasted step rather than a bad label.
+#
+# The cost is reproducibility: the same chart can now come back with
+# different (still legal) counts. DEFAULT_SEED below is what pins that
+# back down when it matters.
+ANALYSIS_TEMPERATURE = 0.3
 COMMENTARY_TEMPERATURE = 0.3
 
-# Seed is NOT sent by default. At temperature 0 it adds nothing - decoding
-# is already deterministic - while remaining one more parameter a provider
-# can reject with a 400, on an endpoint the user is free to point anywhere.
-# It stays available for anyone deliberately sampling above 0.
+# Seed is NOT sent by default. It stays off because it is one more
+# parameter a provider can reject with a 400, on an endpoint the user is
+# free to point anywhere - but with ANALYSIS_TEMPERATURE above 0 it is now
+# the only way to make a run repeatable, so set it when comparing two
+# configurations against the same chart.
 DEFAULT_SEED = None
 
 # Output-token budgets. Under Gemini these were 400 and 2048, which covered

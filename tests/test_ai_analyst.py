@@ -276,7 +276,8 @@ def test_the_agent_is_given_tools_and_the_playbook_not_a_pre_made_count():
         assert leak not in brief, f"the opening brief leaks {leak!r}"
     assert [t["function"]["name"] for t in payload["tools"]] == [
         "list_pivots", "get_candles", "measure_move", "fibonacci_levels",
-        "fibonacci_confluence", "swing_statistics", "check_count", "submit_count"]
+        "fibonacci_confluence", "swing_statistics", "volume_profile", "momentum",
+        "check_count", "submit_count"]
     assert all(t["type"] == "function" for t in payload["tools"])
     system = payload["messages"][0]["content"]
     assert "Wave 3 is never the shortest" in system
@@ -865,3 +866,72 @@ def test_the_playbook_teaches_confluence_projection_anchors_and_alternation():
     assert "fibonacci_confluence" in ELLIOTT_PLAYBOOK
     assert "ALTERNATION IS A FORECAST" in ELLIOTT_PLAYBOOK
     assert "swing_statistics" in ELLIOTT_PLAYBOOK
+
+
+# ---- volume and momentum, the two things the model kept reaching for ----
+
+def test_volume_profile_measures_one_wave_at_a_time():
+    """Wave 3 normally carries the heaviest volume of an impulse and wave 5
+    makes its higher high on less. That comparison is only possible if each
+    wave can be measured on its own."""
+    toolbox = AnalystToolbox(CANDLES, Timeframe.M5, "TEST")
+    result = toolbox.volume_profile(0, 40)
+    assert result["bars"] == 41
+    assert result["total_volume"] > 0
+    assert result["average_volume_per_bar"] > 0
+    # taker_buy_share is a fraction of the volume that hit the ask
+    assert 0.0 <= result["taker_buy_share"] <= 1.0
+    assert 0 <= result["busiest_bar"]["index"] < len(CANDLES)
+    # ...and the two halves of a chart really do differ
+    other = toolbox.volume_profile(41, 90)
+    assert other["total_volume"] != result["total_volume"]
+
+
+def test_momentum_never_sees_past_the_bar_it_is_asked_about():
+    """The whole no-lookahead guarantee in one tool: indicators are fed the
+    history up to end_index and not one candle further, so what comes back
+    is what was knowable there."""
+    toolbox = AnalystToolbox(CANDLES, Timeframe.M5, "TEST")
+    early = toolbox.momentum(0, 40)
+    late = toolbox.momentum(0, len(CANDLES) - 1)
+    assert early["end_index"] == 40
+    assert early["macd"] != late["macd"], "a later bar must give a different reading"
+    assert early["adx"] is not None and early["ema9"] is not None
+
+
+def test_momentum_reports_the_macd_extreme_inside_the_range():
+    """Divergence is read by comparing one wave's MACD peak against
+    another's - the value at the final bar alone cannot show it."""
+    toolbox = AnalystToolbox(CANDLES, Timeframe.M5, "TEST")
+    result = toolbox.momentum(20, 70)
+    peak = result["macd_peak_in_range"]
+    trough = result["macd_trough_in_range"]
+    assert peak and trough
+    assert 20 <= peak["index"] <= 70 and 20 <= trough["index"] <= 70
+    assert peak["value"] >= trough["value"]
+
+
+def test_both_new_tools_refuse_a_bad_range_with_a_readable_reason():
+    """The model reads tool errors and retries, which is only possible if
+    the error says what was wrong."""
+    toolbox = AnalystToolbox(CANDLES, Timeframe.M5, "TEST")
+    for call in (toolbox.volume_profile, toolbox.momentum):
+        with pytest.raises(ToolError) as exc:
+            call(50, 10)
+        assert "must be before" in str(exc.value)
+        with pytest.raises(ToolError):
+            call(0, len(CANDLES) + 500)
+
+
+def test_the_playbook_tells_the_agent_when_to_use_them():
+    """A tool the model does not know when to reach for is a tool it does
+    not have."""
+    from t3_engine.ai_advisor.playbook import ELLIOTT_PLAYBOOK
+    assert "volume_profile" in ELLIOTT_PLAYBOOK
+    assert "momentum" in ELLIOTT_PLAYBOOK
+    assert "macd_peak_in_range" in ELLIOTT_PLAYBOOK
+    # and that they inform a count rather than overrule the hard rules.
+    # Whitespace is normalised first: the playbook is hard-wrapped prose,
+    # so a phrase that happens to straddle a line break is still present.
+    flowing = " ".join(ELLIOTT_PLAYBOOK.split())
+    assert "never override the hard rules" in flowing

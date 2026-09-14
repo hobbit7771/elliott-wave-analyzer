@@ -105,3 +105,137 @@ def generate_synthetic_series(num_cycles: int = 3, start_price: float = 100.0, s
         price = cycle_candles[-1].close
         t = cycle_candles[-1].close_time + 1
     return all_candles
+
+
+# How many 5m bars one synthetic cycle produces. Asserted by a test rather
+# than trusted: the aggregation below sizes its request from it.
+_CANDLES_PER_CYCLE = 91
+
+# The generator emits 5m bars. Anything coarser is built by AGGREGATING
+# them, exactly the way an exchange builds a 4h bar out of its 5m ones -
+# not by generating a separate, unrelated series at that timeframe.
+_BASE_SECONDS = 300
+
+# A ceiling on how many base bars one request may generate. A 4h series
+# needs 48 base bars per output bar, so without this a large `cycles` asks
+# for hundreds of thousands of candles to be built and thrown away.
+MAX_BASE_CANDLES = 20_000
+
+
+def aggregate_candles(candles: List[Candle], timeframe: Timeframe) -> List[Candle]:
+    """Roll 5m bars up into a coarser timeframe.
+
+    Plain OHLCV aggregation: first open, highest high, lowest low, last
+    close, summed volume. A trailing group that is not yet full is dropped
+    rather than emitted short - a half-formed 4h bar presented as a closed
+    one is the same lookahead the rest of this engine refuses.
+    """
+    per_bar = timeframe.seconds // _BASE_SECONDS
+    if per_bar <= 1:
+        return list(candles)
+
+    out: List[Candle] = []
+    for start in range(0, len(candles) - per_bar + 1, per_bar):
+        group = candles[start:start + per_bar]
+        out.append(Candle(
+            timeframe=timeframe,
+            open_time=group[0].open_time,
+            close_time=group[-1].close_time,
+            open=group[0].open,
+            high=max(c.high for c in group),
+            low=min(c.low for c in group),
+            close=group[-1].close,
+            volume=sum(c.volume for c in group),
+            taker_buy_volume=sum(c.taker_buy_volume for c in group),
+            trades=sum(c.trades for c in group),
+        ))
+    return out
+
+
+def _mirror_cycle(candles: List[Candle], pivot: float, scale: float = 1.0) -> List[Candle]:
+    """Reflect a bull cycle around `pivot` to get the bear one.
+
+    The map is p -> pivot - scale * (p - pivot): it negates every price
+    DIFFERENCE and multiplies them all by the same factor, which leaves the
+    RATIOS between them untouched. So the mirrored cycle is still a
+    hard-rule-valid impulse - wave 3 still the longest, wave 4 still not
+    overlapping wave 1 - pointing down instead of up.
+
+    `scale` is what keeps a long series from drifting. A cycle rises about
+    53%, so a plain reflection of the next one falls 53% of the NEW, higher
+    base and the pair loses ground; repeated fifty times that walks the
+    chart to nearly zero (measured: a 4h series ended at 8.00 having
+    started at 152). Passing scale = pair_start / price_now makes the pair
+    land exactly back where it began.
+
+    High and low swap, because a reflection turns the top of a bar into its
+    bottom."""
+    def flip(price: float) -> float:
+        return pivot - scale * (price - pivot)
+
+    out: List[Candle] = []
+    for candle in candles:
+        out.append(Candle(
+            timeframe=candle.timeframe, open_time=candle.open_time,
+            close_time=candle.close_time,
+            open=flip(candle.open), high=flip(candle.low),
+            low=flip(candle.high), close=flip(candle.close),
+            volume=candle.volume,
+            # Taker pressure follows the bar, so it flips with it.
+            taker_buy_volume=max(0.0, candle.volume - candle.taker_buy_volume),
+            trades=candle.trades, closed=candle.closed,
+        ))
+    return out
+
+
+def generate_alternating_series(num_cycles: int = 3, start_price: float = 100.0,
+                                seed: int = 42) -> List[Candle]:
+    """Base 5m bars whose cycles alternate up, down, up, down.
+
+    `generate_synthetic_series` compounds every cycle off the previous
+    close, and one cycle is about +53%. Over the three cycles it was built
+    for that is fine; over the ~96 a 4h series needs it reaches 3e10 and
+    the "chart" is a vertical line. Alternating the direction keeps the
+    same rule-valid structure while the series oscillates instead of
+    running away."""
+    out: List[Candle] = []
+    price = start_price
+    pair_start = start_price
+    t = 0
+    for cycle in range(max(1, num_cycles)):
+        block = generate_synthetic_impulse_cycle(start_price=price, start_time=t,
+                                                 seed=seed + cycle)
+        if cycle % 2 == 0:
+            pair_start = price          # the up leg of this pair begins here
+        else:
+            # Scaled so the down leg returns exactly to where the up leg
+            # started - see _mirror_cycle for why a plain reflection drifts.
+            block = _mirror_cycle(block, price, scale=pair_start / price if price else 1.0)
+        out.extend(block)
+        price = block[-1].close
+        t = block[-1].close_time + 1
+    return out
+
+
+def generate_synthetic_series_for(timeframe: Timeframe, num_cycles: int = 3,
+                                  start_price: float = 100.0, seed: int = 42) -> List[Candle]:
+    """A synthetic series AT the requested timeframe.
+
+    This exists because of a real defect: the demo source returned the same
+    5m series whatever timeframe was asked for, so a multi-timeframe run
+    analysed one chart four times and then "reconciled" it with itself. The
+    model noticed before anyone else did - it wrote "the supplied data
+    repeats 5m" into its own verdict and refused to call a trend.
+
+    Enough base bars are generated that the aggregated series ends up about
+    as long as the 5m one would have been for the same `num_cycles`, so a
+    4h request gets a 4h-shaped chart rather than three bars.
+    """
+    per_bar = max(1, timeframe.seconds // _BASE_SECONDS)
+    wanted_base = num_cycles * _CANDLES_PER_CYCLE * per_bar
+    cycles = max(1, min(
+        -(-wanted_base // _CANDLES_PER_CYCLE),                 # ceiling division
+        MAX_BASE_CANDLES // _CANDLES_PER_CYCLE,
+    ))
+    base = generate_alternating_series(num_cycles=cycles, start_price=start_price, seed=seed)
+    return aggregate_candles(base, timeframe)

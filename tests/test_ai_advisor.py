@@ -345,8 +345,9 @@ SAMPLE_PIVOTS = [
 def test_request_wave_count_parses_structured_json():
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        # A count is an analysis, not a creative task.
-        assert body["temperature"] <= 0.2
+        # A count is an analysis, not a creative task: mildly warm so the
+        # agent explores, never hot enough to invent.
+        assert body["temperature"] <= 0.4
         assert body["response_format"] == {"type": "json_object"}
         return chat_response(json.dumps({
             "waves": [{"label": "1", "start_pivot_index": 0, "end_pivot_index": 1}],
@@ -519,10 +520,14 @@ def test_seed_is_not_sent_by_default():
     assert seen["seed"] == 42
 
 
-def test_analysis_runs_at_temperature_zero_and_commentary_only_mildly_warm():
-    """A wave count is not a creative task: the chart either does or does
-    not contain a legal impulse. Sampling above 0 asks the model to
-    sometimes prefer a count it thinks is worse."""
+def test_analysis_and_commentary_both_run_only_mildly_warm():
+    """Set to 0.3 on the project owner's instruction, and the reasoning is
+    worth keeping visible: the agent loop EXPLORES over a dozen-plus steps,
+    and a little sampling lets it try a different degree or anchor instead
+    of walking the same path to the same local answer. Every structure is
+    re-validated server-side, so a worse count costs a step, not a bad
+    label. What it must never be is HOT - a labelling run at 0.9 is
+    inventing, not reading."""
     from t3_engine.ai_advisor.advisor import request_wave_count
 
     seen = {}
@@ -532,7 +537,7 @@ def test_analysis_runs_at_temperature_zero_and_commentary_only_mildly_warm():
         return chat_response(json.dumps({"waves": []}))
 
     request_wave_count("sk-test", SAMPLE_PIVOTS, "UP", client=make_client(handler))
-    assert seen["temperature"] == 0.0
+    assert seen["temperature"] == 0.3
 
     seen.clear()
 
