@@ -1743,7 +1743,7 @@ def test_claude_chart_says_what_to_do_when_nothing_is_stored(tmp_path, monkeypat
     body = client.get("/api/claude/chart",
                       params={"symbol": "NOSUCHUSDT", "timeframe": "4h"}).json()
     assert body["candles"] == []
-    assert "Analysis tab" in body["note"] and "no cost" in body["note"]
+    assert "press build" in body["note"].lower() and "costs nothing" in body["note"]
 
 
 def test_claude_counts_are_stored_apart_from_the_analysts(tmp_path, monkeypatch):
@@ -1774,6 +1774,10 @@ def test_claude_timeframes_lists_only_what_has_a_count(tmp_path, monkeypatch):
     body = client.get("/api/claude/timeframes", params={"symbol": "INJUSDT"}).json()
     assert [r["timeframe"] for r in body["timeframes"]] == ["1h", "4h"]   # shortest first
     assert all(r["structures"] == 1 for r in body["timeframes"])
+    # Every timeframe a build covers is advertised even before it has a
+    # count, so the tab can show which degrees are still missing rather
+    # than pretending they do not exist.
+    assert body["known_timeframes"] == list(server_module.CLAUDE_TIMEFRAMES)
 
 
 def test_index_has_a_claude_tab_with_timeframe_switching():
@@ -1782,3 +1786,81 @@ def test_index_has_a_claude_tab_with_timeframe_switching():
     assert "tab-claude" in resp.text
     assert "drawClaudeTimeframe" in resp.text
     assert "data-claude-tf" in resp.text
+
+
+def test_claude_build_fetches_files_and_counts_a_whole_history(tmp_path, monkeypatch):
+    """The end-to-end shape of a Build: real bars in, candles filed, a
+    rule-checked count stored - and not one model call anywhere in it."""
+    from t3_engine.backtest.synthetic_data import generate_synthetic_series_for
+    from t3_engine.database import candle_store
+
+    store = _seed_store(tmp_path, monkeypatch)
+    monkeypatch.setattr(candle_store, "_factory", None)
+
+    fetched = {}
+
+    def fake_load(source, symbol, timeframe, limit, cycles):
+        tf = Timeframe(timeframe)
+        fetched[timeframe] = limit
+        assert source == "bybit", "a Build reads the exchange, never the demo fixture"
+        return generate_synthetic_series_for(tf, num_cycles=9), symbol, tf
+
+    monkeypatch.setattr(server_module, "load_candles", fake_load)
+
+    count = server_module.build_claude_timeframe("INJUSDT", "1h", 1500)
+    assert fetched == {"1h": 1500}
+    assert count["candles_analysed"] > 500
+    assert count["accepted"], "nothing was counted"
+    assert count["summary"]
+
+    # the bars themselves survived, not just the count
+    assert len(candle_store.load("INJUSDT", "1h")) == count["candles_analysed"]
+    stored = store.load(server_module.CLAUDE_SOURCE, "INJUSDT", "1h")
+    assert stored is not None and stored.payload["accepted"]
+
+    body = client.get("/api/claude/chart",
+                      params={"symbol": "INJUSDT", "timeframe": "1h"}).json()
+    assert len(body["candles"]) == count["candles_analysed"]
+    assert body["accepted"] and body["pivots"]
+    assert body["deviation_pct"] == count["deviation_pct"]
+
+
+def test_claude_build_rejects_timeframes_it_cannot_serve():
+    resp = client.post("/api/claude/build", json={"symbol": "INJUSDT", "timeframes": ["3d"]})
+    assert resp.status_code == 400
+    assert "No usable timeframes" in resp.json()["detail"]
+
+
+def test_index_claude_tab_offers_a_build_and_draws_subwaves():
+    """The tab the user was shown drew wave lines over an empty chart. A
+    Build button and a subwave pass are what that was missing."""
+    text = client.get("/").text
+    assert 'id="claudeBuild"' in text
+    assert "drawClaudeSubwaves" in text
+    assert "renderClaudeForecast" in text
+    assert "renderClaudeContext" in text
+
+
+def test_warm_up_skips_a_symbol_whose_count_is_still_fresh(tmp_path, monkeypatch):
+    """A deploy replaces the container and the first person to open the tab
+    should not be the one who discovers it is empty. Restarts come in
+    bursts, though, so a count made in the last hour is left alone."""
+    import time as _time
+
+    store = _seed_store(tmp_path, monkeypatch)
+    now = _time.time()
+    for tf in server_module.CLAUDE_TIMEFRAMES:
+        store.save(server_module.CLAUDE_SOURCE, "INJUSDT", tf, 1000, 1500,
+                   {"accepted": [], "summary": ""}, model="engine-rules")
+    assert server_module.stale_timeframes("INJUSDT", now=now) == []
+    # ...and an hour later every one of them is worth redoing.
+    assert (server_module.stale_timeframes(
+        "INJUSDT", now=now + server_module.WARMUP_MAX_AGE_SECONDS + 1)
+        == list(server_module.CLAUDE_TIMEFRAMES))
+
+
+def test_warm_up_reads_its_symbols_from_the_environment(monkeypatch):
+    monkeypatch.delenv(server_module.WARMUP_SYMBOLS_ENV, raising=False)
+    assert server_module.warmup_symbols() == []
+    monkeypatch.setenv(server_module.WARMUP_SYMBOLS_ENV, "injusdt, BTCUSDT ,")
+    assert server_module.warmup_symbols() == ["INJUSDT", "BTCUSDT"]

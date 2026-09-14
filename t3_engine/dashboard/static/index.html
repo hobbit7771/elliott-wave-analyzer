@@ -382,22 +382,39 @@
     </div>
     <div id="tab-claude" style="display:none;">
       <div class="note">
-        A <strong>second reading</strong> of the same instrument, made outside the analyst loop and
-        stored separately from it — so the two counts sit side by side instead of overwriting each
-        other. Every structure here went through the same server-side rule engine: anything that
-        broke a hard rule is listed as rejected, never drawn.
+        A <strong>full count of the whole history</strong>, every timeframe, made by the rule engine
+        rather than by a model — so it costs nothing to run and nothing to re-run. <strong>Build</strong>
+        pulls 1500 bars each of 5m, 15m, 1h and 4h from Bybit, files them so they survive a deploy,
+        then searches every structure that could start at every swing and keeps only the ones the hard
+        rules accept. Waves 1, 3 and 5 are then subdivided into their own i–ii–iii–iv–v at a finer
+        deviation, by the same rules. The forecast below is the Fibonacci projection of the wave now
+        forming, with the share of THIS chart's own past swings that reached that far.
       </div>
       <div class="field-row">
         <label style="font-size:11px;color:#9aa3b2;display:flex;align-items:center;gap:6px;flex:1;">Symbol
           <input id="claudeSymbol" type="text" value="INJUSDT" style="flex:1;min-width:0;" />
         </label>
+        <label style="font-size:11px;color:#9aa3b2;display:flex;align-items:center;gap:6px;">Bars
+          <input id="claudeLimit" type="number" value="1500" min="200" max="5000" step="100"
+                 style="width:70px;" />
+        </label>
+        <button id="claudeBuild" class="panel-btn">Build</button>
       </div>
       <div class="field-row" id="claudeTfRow"></div>
-      <div class="hint" id="claudeStatus">Pick a timeframe.</div>
+      <div class="hint" id="claudeStatus">Press Build to fetch and count every timeframe.</div>
+      <div id="claudeLog" class="joblog" style="display:none;"></div>
 
+      <div id="claudeForecastWrap" style="display:none;">
+        <h2>Forecast</h2>
+        <div class="signal" id="claudeForecast"></div>
+      </div>
       <div id="claudeReadWrap" style="display:none;">
         <h2>Read</h2>
         <div class="signal" id="claudeRead"></div>
+      </div>
+      <div id="claudeContextWrap" style="display:none;">
+        <h2>Context — every timeframe at once</h2>
+        <div id="claudeContext"></div>
       </div>
       <div id="claudeStructuresWrap" style="display:none;">
         <h2>Structures</h2>
@@ -1631,57 +1648,142 @@ function elapsed(snap) {
   return secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`;
 }
 
-// ---- the Claude tab: a second reading, with its own timeframes -------
-// Deliberately its own tab and its own storage key rather than another
-// row in the analyst's list: two readings of one instrument are only
-// useful if you can hold them side by side, and a shared key means the
-// newer one silently replaces the older.
+// ---- the Claude tab: the whole history, counted -----------------------
+// Its own tab and its own storage key rather than another row in the
+// analyst's list: two readings of one instrument are only useful if you
+// can hold them side by side, and a shared key means the newer one
+// silently replaces the older.
+//
+// The first version of this tab drew wave lines over an empty chart -
+// nothing had ever fetched the candles it was labelling, and the
+// aggregation that was meant to supply them was dividing by the wrong bar
+// length and discarding every bucket. Hence Build: one press fetches,
+// files and counts every timeframe, and the chart is drawn on the bars the
+// count was actually made on.
 let claudeFrames = [];
+let claudeKnown = ['5m', '15m', '1h', '4h'];
 let claudeActive = null;
+let claudeBuilding = false;
 
 function claudeSymbol() {
   return normalizeSymbol(document.getElementById('claudeSymbol').value) || 'INJUSDT';
 }
 
-async function loadClaudeTimeframes() {
+async function loadClaudeTimeframes(preferred) {
   const statusEl = document.getElementById('claudeStatus');
   ensureAnalystChart();
   try {
     const resp = await fetchWithTimeout(
       `/api/claude/timeframes?symbol=${encodeURIComponent(claudeSymbol())}`, {}, 30000);
     if (!resp.ok) { statusEl.textContent = await parseErrorDetail(resp); return; }
-    claudeFrames = (await resp.json()).timeframes || [];
+    const data = await resp.json();
+    claudeFrames = data.timeframes || [];
+    if ((data.known_timeframes || []).length) claudeKnown = data.known_timeframes;
   } catch (e) {
     statusEl.textContent = e.message || 'Could not load the timeframe list.';
     return;
   }
   renderClaudeTimeframes();
+  renderClaudeContext();
+  const want = preferred || claudeActive;
+  const has = tf => claudeFrames.some(f => f.timeframe === tf);
   if (claudeFrames.length) {
-    drawClaudeTimeframe(claudeActive && claudeFrames.some(f => f.timeframe === claudeActive)
-      ? claudeActive : claudeFrames[0].timeframe);
-  } else {
-    statusEl.textContent = `No stored count for ${claudeSymbol()} yet.`;
+    drawClaudeTimeframe(want && has(want) ? want : claudeFrames[0].timeframe);
+  } else if (!claudeBuilding) {
+    statusEl.textContent = `Nothing counted for ${claudeSymbol()} yet — press Build.`;
   }
 }
 
-// One button per timeframe that HAS a count. Timeframes with nothing
-// stored are absent rather than present-and-empty: a button that can only
-// disappoint is worse than no button.
+// Every timeframe a build covers gets a button, whether or not it has a
+// count yet. The old version showed only the ones already stored, which
+// meant the tab offered nothing at all before the first run and gave no
+// way to see which degrees were still missing.
 function renderClaudeTimeframes() {
   const row = document.getElementById('claudeTfRow');
-  row.innerHTML = claudeFrames.map(f =>
-    `<button class="panel-btn" data-claude-tf="${escapeHtml(f.timeframe)}"`
-    + `${f.timeframe === claudeActive ? ' style="outline:1px solid #38bdf8;"' : ''}>`
-    + `${escapeHtml(f.timeframe)}</button>`).join('');
+  const byTf = {};
+  claudeFrames.forEach(f => { byTf[f.timeframe] = f; });
+  const order = claudeKnown.concat(
+    claudeFrames.map(f => f.timeframe).filter(tf => claudeKnown.indexOf(tf) === -1));
+  row.innerHTML = order.map(tf => {
+    const frame = byTf[tf];
+    const bars = frame ? ` <span style="opacity:.6;">${frame.candles}</span>` : '';
+    const style = tf === claudeActive ? ' style="outline:1px solid #38bdf8;"'
+      : (frame ? '' : ' style="opacity:.45;"');
+    return `<button class="panel-btn" data-claude-tf="${escapeHtml(tf)}"${style}>`
+      + `${escapeHtml(tf)}${bars}</button>`;
+  }).join('');
   row.querySelectorAll('[data-claude-tf]').forEach(btn => {
     btn.addEventListener('click', () => drawClaudeTimeframe(btn.dataset.claudeTf));
   });
+}
+
+// The cross-timeframe picture, which is the part a single chart cannot
+// show: a five-wave advance on 5m inside a 4h wave 4 is a bounce, and the
+// only way to see that is to have all four in front of you at once.
+function renderClaudeContext() {
+  const wrap = document.getElementById('claudeContextWrap');
+  const el = document.getElementById('claudeContext');
+  if (!claudeFrames.length) { wrap.style.display = 'none'; return; }
+  wrap.style.display = '';
+  el.innerHTML = claudeFrames.map(f => {
+    const cover = (f.coverage || {}).covered_fraction;
+    return `<div class="signal"${f.timeframe === claudeActive ? ' style="border-color:#38bdf8;"' : ''}>`
+      + `<div class="row"><span class="k">${escapeHtml(f.timeframe)}</span>`
+      + `<span class="v">${f.candles} bars · ${f.structures} structure(s) · `
+      + `${f.subwaves || 0} subwaves${cover !== undefined ? ' · ' + Math.round(cover * 100) + '% labelled' : ''}`
+      + `</span></div>`
+      + (f.next_label
+          ? `<div class="row"><span class="k">Next</span><span class="v" style="color:#f0abfc;">`
+            + `wave ${escapeHtml(String(f.next_label))}`
+            + (f.primary_target !== undefined && f.primary_target !== null
+                ? ` → ${escapeHtml(String(f.primary_target))}` : '')
+            + `</span></div>`
+          : '')
+      + (f.invalidation !== undefined && f.invalidation !== null
+          ? `<div class="row"><span class="k">Fails at</span><span class="v" style="color:#ef5350;">`
+            + `${escapeHtml(String(f.invalidation))}</span></div>` : '')
+      + (f.summary ? `<div class="hint">${escapeHtml(f.summary)}</div>` : '')
+      + `</div>`;
+  }).join('');
+}
+
+// Subwaves in a dimmer shade of their parent's colour and one pixel thin.
+// They have to be visibly SUBORDINATE: drawn at the same weight as the
+// count above them, a chart with 40 of them reads as 40 competing waves.
+const SUBWAVE_COLOR = '#4b6b86';
+
+function drawClaudeSubwaves(subwaves) {
+  if (!subwaves || !subwaves.length) return [];
+  const byParent = {};
+  subwaves.forEach(s => {
+    const key = `${s.parent_label}@${s.parent_start_time}`;
+    (byParent[key] = byParent[key] || []).push(s);
+  });
+  const marks = [];
+  Object.values(byParent).forEach(group => {
+    group.sort((a, b) => a.start_time - b.start_time);
+    const line = analystChart.addLineSeries({
+      color: SUBWAVE_COLOR, lineWidth: 1, lastValueVisible: false,
+      priceLineVisible: false, crosshairMarkerVisible: false,
+    });
+    line.setData([{ time: group[0].start_time, value: group[0].start_price }]
+      .concat(group.map(s => ({ time: s.end_time, value: s.end_price }))));
+    analystOverlays.push(line);
+    group.forEach(s => {
+      marks.push({
+        time: s.end_time, position: s.direction === 'UP' ? 'aboveBar' : 'belowBar',
+        color: SUBWAVE_COLOR, shape: 'circle', text: s.label,
+      });
+    });
+  });
+  return marks;
 }
 
 async function drawClaudeTimeframe(timeframe) {
   const statusEl = document.getElementById('claudeStatus');
   claudeActive = timeframe;
   renderClaudeTimeframes();
+  renderClaudeContext();
   ensureAnalystChart();
   statusEl.textContent = `Loading ${timeframe}…`;
   let data;
@@ -1700,9 +1802,28 @@ async function drawClaudeTimeframe(timeframe) {
     analystFirstTime = data.candles[0].time;
     analystLastTime = data.candles[data.candles.length - 1].time;
   }
+  // drawAnalystCount clears the overlays and sets the top-level markers,
+  // so the subwave markers have to be merged in AFTER it, not before -
+  // setMarkers replaces, it does not append.
   drawAnalystCount(data.accepted);
+  const subMarks = drawClaudeSubwaves(data.subwaves);
+  if (subMarks.length) {
+    const all = [];
+    (data.accepted || []).forEach(st => (st.waves || []).forEach(w => all.push({
+      time: w.end_time, position: w.direction === 'UP' ? 'aboveBar' : 'belowBar',
+      color: structureColor(st.structure), shape: 'circle', text: w.label,
+    })));
+    analystSeries.setMarkers(all.concat(subMarks).sort((a, b) => a.time - b.time));
+  }
   drawAnalystProjection(data.projection);
+  if (data.invalidation !== undefined && data.invalidation !== null) {
+    analystOverlays.push({ __priceLine: analystSeries.createPriceLine({
+      price: data.invalidation, color: '#ef5350', lineWidth: 1, lineStyle: 1,
+      title: 'count fails',
+    }) });
+  }
   analystChart.timeScale().fitContent();
+
   renderAnalystStructures(data);   // shares the analyst tab's renderer
   const wrap = document.getElementById('claudeStructuresWrap');
   wrap.style.display = 'none';     // ...but shown in THIS tab's own panel
@@ -1712,23 +1833,128 @@ async function drawClaudeTimeframe(timeframe) {
 
   const cover = (data.coverage || {}).covered_fraction;
   statusEl.textContent = `${(data.candles || []).length} bars · `
-    + `${(data.accepted || []).length} structure(s)`
+    + `${(data.accepted || []).length} structure(s) · ${(data.subwaves || []).length} subwaves`
     + `${cover !== undefined ? ' · ' + Math.round(cover * 100) + '% labelled' : ''}`
+    + `${data.deviation_pct ? ' · ' + data.deviation_pct + '% swing' : ''}`
     + `${data.note ? ' — ' + data.note : ''}`;
 
-  document.getElementById('claudeReadWrap').style.display = data.summary ? '' : 'none';
+  renderClaudeForecast(data);
+  document.getElementById('claudeReadWrap').style.display =
+    (data.summary || data.reading) ? '' : 'none';
   document.getElementById('claudeRead').innerHTML =
-    (data.analysed_at ? `<div class="row"><span class="k">Analysed</span>`
+    (data.analysed_at ? `<div class="row"><span class="k">Counted</span>`
       + `<span class="v">${fmtTime(data.analysed_at)}</span></div>` : '')
     + (data.summary ? `<div class="row"><span class="k">Where we are</span>`
         + `<span class="v" style="text-align:left;max-width:210px;">${escapeHtml(data.summary)}</span></div>` : '')
-    + (data.reasoning ? `<div class="hint">${escapeHtml(data.reasoning)}</div>` : '')
-    + (data.projection && data.projection.next_label
-        ? `<div class="row"><span class="k">Expects next</span>`
-          + `<span class="v" style="color:#f0abfc;">wave ${escapeHtml(String(data.projection.next_label))}</span></div>`
-        : '');
+    + (data.reading ? `<div class="hint">${escapeHtml(data.reading)}</div>` : '')
+    + (data.reasoning ? `<div class="hint">${escapeHtml(data.reasoning)}</div>` : '');
 }
 
+// The forecast, spelled out. A target with no odds beside it reads as a
+// promise; the odds here are measured off this chart's OWN completed
+// swings - the share of them that travelled at least that far - and say so.
+function renderClaudeForecast(data) {
+  const wrap = document.getElementById('claudeForecastWrap');
+  const el = document.getElementById('claudeForecast');
+  const projection = data.projection;
+  const zone = data.correction_zone;
+  if (!projection && !zone && (data.invalidation === undefined || data.invalidation === null)) {
+    wrap.style.display = 'none';
+    return;
+  }
+  wrap.style.display = '';
+  let html = '';
+  if (!projection || !projection.next_label) {
+    // Said out loud rather than left as a gap. A chart whose newest
+    // structure is a FINISHED correction has no wave being projected -
+    // there is no Fibonacci formula for the first leg of the next one -
+    // and an empty panel reads as a rendering fault instead of as that.
+    html += `<div class="hint">No wave is being projected here: the newest structure on this `
+      + `timeframe is complete, and the first leg of whatever follows it has no Fibonacci `
+      + `formula to project from. The level below is still live.</div>`;
+  }
+  if (projection && projection.next_label) {
+    html += `<div class="row"><span class="k">Wave now forming</span>`
+      + `<span class="v" style="color:#f0abfc;">${escapeHtml(String(projection.next_label))}</span></div>`
+      + `<div class="row"><span class="k">From</span><span class="v">${escapeHtml(String(projection.from_price))}</span></div>`
+      + `<div class="row"><span class="k">Basis</span><span class="v" style="text-align:left;max-width:200px;">`
+      + `${escapeHtml(projection.basis || '')}</span></div>`;
+    (projection.targets || []).forEach(t => {
+      // The base rate is measured off this chart's own completed swings -
+      // the share of them that travelled at least this far - not supplied
+      // by anything that had an opinion about the trade.
+      const odds = t.probability !== undefined && t.probability !== null
+        ? ` <span style="opacity:.7;">${Math.round(t.probability * 100)}% of past swings reached it</span>` : '';
+      html += `<div class="row"><span class="k">${t.primary ? '★ ' : ''}${escapeHtml(String(t.ratio))}</span>`
+        + `<span class="v">${escapeHtml(String(t.price))}${odds}</span></div>`;
+    });
+    if (projection.odds_note) html += `<div class="hint">${escapeHtml(projection.odds_note)}</div>`;
+  }
+  if (zone && (zone.levels || []).length) {
+    html += `<div class="row"><span class="k">Correction zone</span>`
+      + `<span class="v" style="text-align:left;max-width:200px;">${escapeHtml(zone.basis || '')}</span></div>`;
+    zone.levels.forEach(l => {
+      html += `<div class="row"><span class="k">${escapeHtml(String(l.ratio))}</span>`
+        + `<span class="v">${escapeHtml(String(l.price))}</span></div>`;
+    });
+    html += `<div class="row"><span class="k">Wave 4 low</span>`
+      + `<span class="v">${escapeHtml(String(zone.wave_four_low))}</span></div>`;
+  }
+  if (data.invalidation !== undefined && data.invalidation !== null) {
+    html += `<div class="row"><span class="k">Count fails at</span>`
+      + `<span class="v" style="color:#ef5350;">${escapeHtml(String(data.invalidation))}</span></div>`;
+  }
+  el.innerHTML = html;
+}
+
+// Follows a build to the end. Separate from the button handler so a page
+// reload that lands mid-build re-attaches to the same job instead of
+// starting a second one against the same exchange.
+async function watchClaudeJob(jobId) {
+  const statusEl = document.getElementById('claudeStatus');
+  const logEl = document.getElementById('claudeLog');
+  const btn = document.getElementById('claudeBuild');
+  claudeBuilding = true;
+  btn.disabled = true;
+  logEl.style.display = '';
+  try {
+    const result = await followJob('claude', jobId, (snap, lines) => {
+      renderJobLog(logEl, lines);
+      statusEl.textContent = `Building… ${elapsed(snap)}`;
+    });
+    const done = (result.timeframes || []).length;
+    const failed = result.errors || [];
+    statusEl.textContent = `Counted ${done} timeframe(s)`
+      + (failed.length ? ` — ${failed.map(e => e.timeframe + ': ' + e.error).join('; ')}` : '');
+    flagTab('claude');
+    claudeBuilding = false;
+    await loadClaudeTimeframes(claudeActive);
+  } catch (e) {
+    statusEl.textContent = e.message || 'The build failed.';
+  } finally {
+    claudeBuilding = false;
+    btn.disabled = false;
+  }
+}
+
+async function buildClaude() {
+  if (claudeBuilding) return;
+  const statusEl = document.getElementById('claudeStatus');
+  document.getElementById('claudeLog').innerHTML = '';
+  const limit = Math.max(200, Math.min(5000,
+    parseInt(document.getElementById('claudeLimit').value, 10) || 1500));
+  statusEl.textContent = 'Fetching from Bybit and counting…';
+  let started;
+  try {
+    started = await startJob('claude', '/api/claude/build', { symbol: claudeSymbol(), limit });
+  } catch (e) {
+    statusEl.textContent = e.message || 'Could not start the build.';
+    return;
+  }
+  await watchClaudeJob(started.job_id);
+}
+
+document.getElementById('claudeBuild').addEventListener('click', buildClaude);
 document.getElementById('claudeSymbol').addEventListener('change', () => {
   claudeActive = null;
   loadClaudeTimeframes();
@@ -1876,6 +2102,8 @@ function resumeJobs() {
   if (mtf) { mtfShowing = true; watchMtfJob(mtf); }
   const analyst = rememberedJob('analyst');
   if (analyst) watchAnalystJob(analyst);
+  const claude = rememberedJob('claude');
+  if (claude) watchClaudeJob(claude);
 }
 
 document.getElementById('runMtf').addEventListener('click', async () => {
