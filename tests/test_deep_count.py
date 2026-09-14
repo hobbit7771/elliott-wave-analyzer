@@ -101,11 +101,15 @@ def test_the_deviation_is_measured_rather_than_assumed(counted):
 
     usable = [a for a in search if in_band(a)]
     assert usable, "no deviation on the ladder accounted for this chart at all"
-    assert out["deviation_pct"] == max(a["deviation_pct"] for a in usable)
+    chosen = max(usable, key=lambda a: (round(a["mean_score"], 1), a["deviation_pct"]))
+    assert out["deviation_pct"] == chosen["deviation_pct"]
     assert out["coverage"]["covered_fraction"] >= deep_count.MIN_USEFUL_COVERAGE
     # ...and nothing coarser managed it, or that one would have won.
+    # Anything coarser was either out of the band, or the rules recognised
+    # materially less of what was there.
     coarser = [a for a in search if a["deviation_pct"] > out["deviation_pct"]]
-    assert not any(in_band(a) for a in coarser)
+    assert all(not in_band(a) or round(a["mean_score"], 1) < round(chosen["mean_score"], 1)
+               for a in coarser)
     assert (deep_count.MIN_STRUCTURES_FOR_A_DEGREE
             <= len(out["accepted"]) - (1 if out["accepted"][-1].get("partial") else 0)
             <= deep_count.MAX_STRUCTURES_FOR_A_DEGREE)
