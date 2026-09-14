@@ -161,3 +161,85 @@ def test_compute_metrics_by_wave_splits_groups():
     assert "3_LONG" in grouped
     assert "4_SHORT" in grouped
     assert grouped["3_LONG"].trades == 1
+
+
+# ---- the synthetic source has to be a different chart per timeframe ----
+# It returned the same 5m series whatever was asked for, so a
+# multi-timeframe run analysed one chart four times and reconciled it with
+# itself. The model caught it first: it wrote "the supplied data repeats
+# 5m" into its own verdict and refused to call a trend.
+
+def test_each_timeframe_gets_its_own_series():
+    from t3_engine.backtest.synthetic_data import generate_synthetic_series_for
+    from t3_engine.common.types import Timeframe
+
+    series = {tf: generate_synthetic_series_for(tf, num_cycles=2)
+              for tf in (Timeframe.M5, Timeframe.M15, Timeframe.H1, Timeframe.H4)}
+    for tf, candles in series.items():
+        assert candles, f"{tf.value} produced nothing"
+        assert all(c.timeframe == tf for c in candles)
+        bar_seconds = (candles[0].close_time - candles[0].open_time + 1) // 1000
+        assert bar_seconds == tf.seconds, f"{tf.value} bars are {bar_seconds}s"
+    # ...and they are genuinely different charts, not the same closes
+    closes = {tf: tuple(round(c.close, 4) for c in candles[:20])
+              for tf, candles in series.items()}
+    assert len(set(closes.values())) == len(closes)
+
+
+def test_aggregation_is_ordinary_ohlcv_rollup():
+    """A 4h bar is built from its 5m bars the way an exchange builds one -
+    first open, highest high, lowest low, last close, summed volume."""
+    from t3_engine.backtest.synthetic_data import aggregate_candles, generate_synthetic_series
+    from t3_engine.common.types import Timeframe
+
+    base = generate_synthetic_series(num_cycles=2)
+    rolled = aggregate_candles(base, Timeframe.M15)
+    assert rolled[0].open == base[0].open
+    assert rolled[0].close == base[2].close
+    assert rolled[0].high == max(c.high for c in base[:3])
+    assert rolled[0].low == min(c.low for c in base[:3])
+    assert rolled[0].volume == sum(c.volume for c in base[:3])
+
+
+def test_a_trailing_partial_group_is_dropped_not_emitted_short():
+    """A half-formed 4h bar presented as a closed one is the same lookahead
+    the rest of this engine refuses."""
+    from t3_engine.backtest.synthetic_data import aggregate_candles, generate_synthetic_series
+    from t3_engine.common.types import Timeframe
+
+    base = generate_synthetic_series(num_cycles=2)[:10]     # 3 full 15m bars + 1 spare
+    rolled = aggregate_candles(base, Timeframe.M15)
+    assert len(rolled) == 3
+
+
+def test_a_long_series_oscillates_instead_of_running_away():
+    """Cycles compound at about +53% each. The 96 needed for a 4h series
+    took the old generator to 3e10 and the chart became a vertical line;
+    alternating direction keeps the structure and loses the drift."""
+    from t3_engine.backtest.synthetic_data import generate_alternating_series
+
+    candles = generate_alternating_series(num_cycles=40)
+    highest = max(c.high for c in candles)
+    lowest = min(c.low for c in candles)
+    assert highest / lowest < 4, f"range {lowest:.2f}..{highest:.2f} is a runaway, not a chart"
+    # and each up/down pair returns to about where it began
+    assert 0.8 < candles[-1].close / candles[0].open < 1.25
+
+
+def test_a_mirrored_cycle_is_still_a_valid_impulse_pointing_down():
+    """The reflection negates every price difference and scales them all by
+    the same factor, so the RATIOS - and therefore the hard rules - survive."""
+    from t3_engine.backtest.synthetic_data import (
+        _mirror_cycle,
+        generate_synthetic_impulse_cycle,
+    )
+
+    bull = generate_synthetic_impulse_cycle(start_price=100.0)
+    bear = _mirror_cycle(bull, pivot=100.0)
+    assert len(bear) == len(bull)
+    assert bear[-1].close < bear[0].open          # it points down
+    assert all(c.high >= c.low for c in bear)     # high and low swapped correctly
+    # the shape is preserved: the biggest leg is in the same place
+    bull_range = max(c.high for c in bull) - min(c.low for c in bull)
+    bear_range = max(c.high for c in bear) - min(c.low for c in bear)
+    assert abs(bull_range - bear_range) < 1e-6

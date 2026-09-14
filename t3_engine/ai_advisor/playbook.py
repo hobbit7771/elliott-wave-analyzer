@@ -171,6 +171,26 @@ G9. DEGREE CONSISTENCY. Waves of one degree should be roughly comparable
     labels. Use the list_pivots tool at a LARGER deviation to see the
     higher degree, and at a SMALLER deviation to see subwaves.
 
+G10. VOLUME CONFIRMS THE COUNT. In a textbook impulse the third wave
+    carries the HEAVIEST volume and the fifth makes its higher high on
+    LESS - that divergence is one of the few checks on a count that does
+    not come from price geometry, so it can contradict a count that looks
+    perfect on ratios alone. Corrections run thinner than the impulse they
+    correct. volume_profile measures a wave's total volume, its average
+    bar, and the taker-buy share (above 0.5 means buyers were the
+    aggressors). Measure waves 3 and 5 separately and compare them.
+
+G11. MOMENTUM DATES THE END OF AN IMPULSE. A fifth wave that makes a new
+    PRICE extreme on a LOWER MACD peak than the third is the classic
+    ending divergence - the move is running out of force even as it makes
+    a new high. The momentum tool returns MACD, its high and low inside
+    the range you ask about, ADX and the DIs. Compare one wave's
+    macd_peak_in_range against another's; ADX under 20 is a weak trend and
+    over 25 a strong one, and ADX falling while price still trends says
+    the same thing from another angle. This is evidence, not a rule: it
+    can raise or lower your confidence in a count, never override the hard
+    rules above.
+
 =============================== METHOD ==================================
 Work like an analyst, not like a guesser:
 
@@ -186,6 +206,14 @@ Work like an analyst, not like a guesser:
    guidelines above, rather than asserting ratios from memory.
 5. Drop to a SMALLER deviation with list_pivots to count subwaves inside a
    motive wave you have already established, if the data supports it.
+5b. CONFIRM WITH VOLUME AND MOMENTUM before you commit to an impulse.
+   Call volume_profile on the wave you have labelled 3 and again on the
+   one you have labelled 5, and momentum on both. Heavier volume and a
+   higher MACD peak on 3 than on 5 support the count; the reverse is a
+   reason to look again at which wave is the third. These never override
+   the hard rules - a count that breaks R1-R6 is wrong whatever the
+   volume says - but between two counts that both pass, this is what
+   tells them apart.
 6. Call submit_count as soon as you have a structure you are confident in -
    do NOT save everything for one final answer. It can be called many
    times and the structures accumulate. Each result tells you what

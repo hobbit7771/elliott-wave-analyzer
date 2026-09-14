@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from t3_engine.common.models import Candle
+from t3_engine.orderflow.momentum import ADX, EMA, MACD
 from t3_engine.common.types import Direction, Timeframe
 from t3_engine.elliott_engine.external_count import (
     ALL_STRUCTURES,
@@ -503,6 +504,117 @@ class AnalystToolbox:
             "pivot_indices": validated.pivot_indices,
         }
 
+    def _range(self, start_index: Any, end_index: Any) -> tuple:
+        """Validate an index pair against the loaded history.
+
+        Shared by the volume and momentum tools so a bad index is refused
+        the same way everywhere - the model reads the error and retries,
+        which is only possible if the error says what was wrong."""
+        total = len(self.candles)
+        try:
+            first = int(start_index)
+            last = total - 1 if end_index in (None, "", -1) else int(end_index)
+        except (TypeError, ValueError):
+            raise ToolError(f"start_index/end_index must be whole numbers, got "
+                            f"{start_index!r} and {end_index!r}")
+        if not 0 <= first < total:
+            raise ToolError(f"start_index={first} is outside 0..{total - 1}")
+        if not 0 <= last < total:
+            raise ToolError(f"end_index={last} is outside 0..{total - 1}")
+        if first >= last:
+            raise ToolError(f"start_index={first} must be before end_index={last}")
+        return first, last
+
+    def volume_profile(self, start_index: int, end_index: int) -> Dict[str, Any]:
+        """Volume and taker pressure over one stretch of the chart.
+
+        Added because the model kept referring to volume it could not see.
+        It matters for a count in a specific way: in a textbook impulse the
+        third wave carries the HEAVIEST volume and the fifth carries less
+        while price makes a higher high - volume divergence is one of the
+        few independent confirmations that a five is a five and not an
+        extended three. Corrections run on thinner volume than the impulse
+        they correct.
+
+        Everything here is measured off the loaded candles: totals, the
+        average bar, and taker-buy share (what fraction of volume hit the
+        ask). Nothing is interpreted for the model - these are the numbers,
+        the reading is its job.
+        """
+        first, last = self._range(start_index, end_index)
+        window = self.candles[first:last + 1]
+        volume = sum(c.volume for c in window)
+        taker_buy = sum(c.taker_buy_volume for c in window)
+        heaviest = max(window, key=lambda c: c.volume)
+        return {
+            "start_index": first,
+            "end_index": last,
+            "bars": len(window),
+            "total_volume": round_price(volume),
+            "average_volume_per_bar": round_price(volume / len(window)),
+            # Above 0.5 means more volume traded into the ask than the bid
+            # over this stretch: buyers were the aggressors.
+            "taker_buy_share": round(taker_buy / volume, 4) if volume else None,
+            "busiest_bar": {"index": self.candles.index(heaviest),
+                            "volume": round_price(heaviest.volume),
+                            "close": round_price(heaviest.close)},
+            "price_change_pct": round_price(
+                (window[-1].close - window[0].open) / window[0].open * 100) if window[0].open else None,
+        }
+
+    def momentum(self, start_index: int, end_index: int) -> Dict[str, Any]:
+        """MACD, ADX and the moving averages at the end of a stretch.
+
+        The other thing the model kept reaching for. Its Elliott use is
+        concrete: a fifth wave that makes a new price extreme on a LOWER
+        MACD high than the third is the classic momentum divergence that
+        says the impulse is ending, and ADX falling while price still
+        trends is the same warning from a different direction.
+
+        The indicators are the engine's own (orderflow/momentum.py), fed
+        the candles in order from the start of the history up to
+        `end_index` - never beyond it, so what comes back is what was
+        knowable at that bar and nothing later.
+        """
+        first, last = self._range(start_index, end_index)
+        macd, adx = MACD(), ADX()
+        ema9, ema18 = EMA(9), EMA(18)
+        for candle in self.candles[:last + 1]:
+            macd.update(candle.close)
+            adx.update(candle.high, candle.low, candle.close)
+            ema9.update(candle.close)
+            ema18.update(candle.close)
+
+        # The MACD extreme INSIDE the stretch is what a divergence is read
+        # from: comparing one wave's peak against another's.
+        inner = MACD()
+        peak = trough = None
+        for index, candle in enumerate(self.candles[:last + 1]):
+            inner.update(candle.close)
+            if index < first or inner.macd is None:
+                continue
+            if peak is None or inner.macd > peak[1]:
+                peak = (index, inner.macd)
+            if trough is None or inner.macd < trough[1]:
+                trough = (index, inner.macd)
+
+        return {
+            "start_index": first,
+            "end_index": last,
+            "macd": round_price(macd.macd),
+            "macd_signal": round_price(macd.signal_line),
+            "macd_histogram": round_price(macd.histogram),
+            "macd_peak_in_range": {"index": peak[0], "value": round_price(peak[1])} if peak else None,
+            "macd_trough_in_range": {"index": trough[0], "value": round_price(trough[1])} if trough else None,
+            "adx": round_price(adx.value),
+            "plus_di": round_price(adx.plus_di),
+            "minus_di": round_price(adx.minus_di),
+            "ema9": round_price(ema9.value),
+            "ema18": round_price(ema18.value),
+            "note": ("Compare the macd_peak_in_range of one wave against another's to read "
+                     "divergence. ADX below 20 is a weak trend, above 25 a strong one."),
+        }
+
     # ---- dispatch ----
 
     def call(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -516,6 +628,8 @@ class AnalystToolbox:
             "fibonacci_levels": self.fibonacci_levels,
             "fibonacci_confluence": self.fibonacci_confluence,
             "swing_statistics": self.swing_statistics,
+            "volume_profile": self.volume_profile,
+            "momentum": self.momentum,
             "check_count": self.check_count,
             "submit_count": self.submit_count,
         }
@@ -693,6 +807,46 @@ FUNCTION_DECLARATIONS: List[Dict[str, Any]] = [
             "type": "object",
             "properties": {"deviation_pct": {"type": "number"}},
             "required": ["deviation_pct"],
+        },
+    },
+    {
+        "name": "volume_profile",
+        "description": (
+            "Volume and taker pressure over a stretch of bars: total, average per bar, the share "
+            "that hit the ask (taker_buy_share > 0.5 means buyers were the aggressors), the "
+            "busiest bar, and the price change across the stretch. Elliott use: wave 3 normally "
+            "carries the HEAVIEST volume of an impulse and wave 5 makes its higher high on LESS - "
+            "that divergence is one of the few independent checks that a five is a five and not an "
+            "extended three. Corrections run thinner than the impulse they correct. Measure one "
+            "wave at a time and compare."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "start_index": {"type": "integer", "description": "First candle index of the wave"},
+                "end_index": {"type": "integer", "description": "Last candle index of the wave"},
+            },
+            "required": ["start_index", "end_index"],
+        },
+    },
+    {
+        "name": "momentum",
+        "description": (
+            "MACD, ADX, +DI/-DI and the 9/18 EMAs as at the END of a stretch, plus the MACD high "
+            "and low reached INSIDE it. Computed from the start of the history up to end_index and "
+            "never beyond, so it is what was knowable at that bar. Elliott use: compare one wave's "
+            "macd_peak_in_range with another's - a fifth wave that makes a new PRICE extreme on a "
+            "LOWER MACD peak than the third is the classic ending divergence. ADX under 20 is a "
+            "weak trend, over 25 a strong one; ADX falling while price still trends is the same "
+            "warning from another angle."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "start_index": {"type": "integer", "description": "First candle index of the wave"},
+                "end_index": {"type": "integer", "description": "Last candle index of the wave"},
+            },
+            "required": ["start_index", "end_index"],
         },
     },
     {

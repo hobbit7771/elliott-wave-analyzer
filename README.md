@@ -333,6 +333,64 @@ desktop web page:
   the grid of the wave AFTER the one forming (wave A after a developing 5,
   which has no formula here) and returned nothing. `grid_scenario()`
   re-shapes it rather than papering over the empty result.
+- **The synthetic source is a real chart per timeframe now.** It used to
+  return the same 5m series whatever timeframe was asked for, so a
+  multi-timeframe run analysed one chart four times and then "reconciled"
+  it with itself. The model caught it before anyone else did - it wrote
+  *"the supplied data repeats 5m"* into its own verdict and refused to
+  call a trend, and the saved run shows `reused: ["5m","5m","5m"]`.
+  `generate_synthetic_series_for(timeframe, cycles)` now aggregates 5m bars
+  up to the requested timeframe exactly as an exchange builds a 4h bar out
+  of its 5m ones (first open, highest high, lowest low, last close, summed
+  volume; a trailing partial group is dropped rather than emitted short).
+  A 4h series needs ~96 cycles of base data, and cycles compound at about
+  +53% each, which took the generator to 3e10 and turned the "chart" into a
+  vertical line - so the base series now alternates up and down cycles,
+  with the down leg scaled so each pair lands back where it started. The
+  mirrored cycle is still a hard-rule-valid impulse: a reflection negates
+  every price difference and scales them all equally, leaving the ratios
+  (and therefore R1-R6) intact.
+- **Model settings.** Temperature for analysis is **0.3** (project owner's
+  instruction). The case for 0 is recorded in `advisor.py` because the
+  trade-off is real - at 0 two runs over the same candles agree - but the
+  agent loop *explores* over a dozen-plus steps, and a little sampling lets
+  it try a different degree or anchor instead of walking the same path to
+  the same local answer. Every structure is still re-validated
+  server-side, so a worse count costs a step, not a bad label; what it
+  costs is reproducibility, and `DEFAULT_SEED` is what pins that back down.
+  Reasoning effort defaults to **max**: a run is a background job you can
+  close the tab on, so slowness stopped being a reason to hold back.
+  "Not sent" remains an explicit choice for a model that answers `400` to a
+  parameter it has never heard of.
+- **Step budget, set from measurement.** Nine saved analyses of the same
+  charts, read back out of the analysis cache:
+
+  | steps | coverage | validated structures |
+  |---|---|---|
+  | 10 | 40.8 / 89.3 / 93.9 / 98.4 / 98.9 % (mean **84.3**) | 2 / 4 / 4 / 5 / 7 (mean **4.4**) |
+  | 15-16 | 95.3 / 97.0 / 98.1 / 99.5 % (mean **97.5**) | 9 / 10 / 10 / 12 (mean **10.3**) |
+
+  Raising 10 -> 16 roughly **doubled** the validated structures and removed
+  the collapse case (one 10-step run labelled 40.8% of its chart; the worst
+  16-step run managed 95.3%). And every 15/16-step run spent its whole
+  budget - the model never stopped on its own, so the ceiling was still the
+  binding constraint, not the point where it had nothing left to add. The
+  default is **24** with a ceiling of 40, and the run budget went from 600s
+  to 1800s so the wall clock does not quietly become the new cap.
+  `steps_used` comes back with every result, so this can come back down on
+  the same kind of evidence it went up on.
+- **Volume and momentum tools**, added because the model kept referring to
+  both and had neither. `volume_profile(start, end)` returns a stretch's
+  total and average volume, its taker-buy share (above 0.5 means buyers
+  were the aggressors) and its busiest bar; `momentum(start, end)` returns
+  MACD, ADX, the DIs and the 9/18 EMAs **as at** `end_index` - fed the
+  history up to that bar and never beyond - plus the MACD high and low
+  reached inside the range, which is what a divergence is actually read
+  from. Their Elliott use is specific and now in the playbook (G10/G11):
+  wave 3 normally carries the heaviest volume and wave 5 makes its higher
+  high on less, and a fifth wave topping on a lower MACD peak than the
+  third is the classic ending divergence. Both are evidence that separates
+  two counts which each pass the rules - they never override the rules.
 - **Symbol picker**: the symbol field is backed by a custom JS dropdown
   (not the native HTML `<datalist>` element - see below for why) fed by
   `GET /api/symbols` (cached in-process for an hour) - type any letter and

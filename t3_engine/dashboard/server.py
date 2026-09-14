@@ -72,7 +72,7 @@ from t3_engine.ai_advisor.ai_trading import grid_scenario, subwaves_for
 from t3_engine.ai_advisor.analyst_tools import ToolError
 from t3_engine.backtest.engine import BacktestConfig, BacktestEngine
 from t3_engine.backtest.metrics import compute_metrics, compute_metrics_by_wave
-from t3_engine.backtest.synthetic_data import generate_synthetic_series
+from t3_engine.backtest.synthetic_data import generate_synthetic_series_for
 from t3_engine.common.models import Scenario
 from t3_engine.common.types import TRADEABLE_TIMEFRAMES, Direction, Timeframe, WaveLabel
 from t3_engine.elliott_engine.external_count import ExternalCountRejected, validate_external_count
@@ -165,7 +165,13 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # to the title in index.html, so a user and a developer checking Render's
 # logs/this endpoint can confirm they're looking at the same build without
 # any ambiguity from browser/proxy caching.
-BUILD_VERSION = "BUILD-CHECK-036"
+# Maximum reasoning power by default, on the project owner's instruction.
+# An empty string still means "do not send the parameter at all", which is
+# what a model that has never heard of it needs - so the default is a real
+# value here and the UI keeps "Not sent" as an explicit choice.
+DEFAULT_REASONING_EFFORT = "max"
+
+BUILD_VERSION = "BUILD-CHECK-037"
 
 
 @app.get("/api/health")
@@ -263,13 +269,15 @@ def load_candles(source: str, symbol: str, timeframe: str, limit: int, cycles: i
         finally:
             bybit.close()
     else:
-        # The synthetic demo fixture is a fixed-shape 5m series (see
-        # backtest/synthetic_data.py) - the timeframe picker is disabled for
-        # this source in the frontend, and `tf` is only used below to tag
-        # the engine's degree consistently with the candles it's fed.
-        candles = generate_synthetic_series(num_cycles=cycles)
+        # The synthetic demo fixture is generated AT the requested
+        # timeframe now (5m bars aggregated up, exactly as an exchange
+        # builds a 4h bar from its 5m ones). It used to return the same 5m
+        # series whatever was asked for, which made a multi-timeframe run
+        # analyse one chart four times and then reconcile it with itself -
+        # the model spotted it before anyone else and wrote "the supplied
+        # data repeats 5m" into its own verdict.
+        candles = generate_synthetic_series_for(tf, num_cycles=cycles)
         symbol = symbol if symbol != "SYNTHETIC" else "SYNTHETIC-DEMO"
-        tf = Timeframe.M5
 
     return candles, symbol, tf
 
@@ -554,7 +562,7 @@ def ai_advice(context: dict = Body(..., embed=True), api_key: str = Body("", emb
               model: str = Body(DEFAULT_AI_MODEL, embed=True),
               base_url: str = Body(DEFAULT_AI_API_BASE, embed=True),
               timeout: float = Body(DEFAULT_READ_TIMEOUT, embed=True, gt=0, le=MAX_READ_TIMEOUT),
-              reasoning_effort: str = Body("", embed=True),
+              reasoning_effort: str = Body(DEFAULT_REASONING_EFFORT, embed=True),
               thinking: str = Body("on", embed=True)):
     """BYO-key OrcaRouter second opinion. The key is used for exactly one
     outbound request and never written to disk/DB/logs - see
@@ -578,7 +586,7 @@ def ai_label(api_key: str = Body("", embed=True), source: str = Body("synthetic"
              model: str = Body(DEFAULT_AI_MODEL, embed=True),
              base_url: str = Body(DEFAULT_AI_API_BASE, embed=True),
              timeout: float = Body(DEFAULT_READ_TIMEOUT, embed=True, gt=0, le=MAX_READ_TIMEOUT),
-             reasoning_effort: str = Body("", embed=True),
+             reasoning_effort: str = Body(DEFAULT_REASONING_EFFORT, embed=True),
              thinking: str = Body("on", embed=True)):
     """AI wave-labelling mode: the model proposes a count over the WHOLE
     loaded history - the one thing the deterministic engine deliberately
@@ -985,7 +993,7 @@ def ai_analyst_start(api_key: str = Body("", embed=True),
                      model: str = Body(DEFAULT_AI_MODEL, embed=True),
                      base_url: str = Body(DEFAULT_AI_API_BASE, embed=True),
                      timeout: float = Body(DEFAULT_READ_TIMEOUT, embed=True, gt=0, le=MAX_READ_TIMEOUT),
-                     reasoning_effort: str = Body("", embed=True),
+                     reasoning_effort: str = Body(DEFAULT_REASONING_EFFORT, embed=True),
                      thinking: str = Body("on", embed=True),
                      max_steps: int = Body(DEFAULT_MAX_STEPS, embed=True, ge=1, le=MAX_MAX_STEPS)):
     """Start a single-timeframe analyst run and return its job id."""
@@ -1130,7 +1138,7 @@ def ai_analyst(api_key: str = Body("", embed=True), source: str = Body("syntheti
                model: str = Body(DEFAULT_AI_MODEL, embed=True),
                base_url: str = Body(DEFAULT_AI_API_BASE, embed=True),
                timeout: float = Body(DEFAULT_READ_TIMEOUT, embed=True, gt=0, le=MAX_READ_TIMEOUT),
-               reasoning_effort: str = Body("", embed=True),
+               reasoning_effort: str = Body(DEFAULT_REASONING_EFFORT, embed=True),
                thinking: str = Body("on", embed=True),
                max_steps: int = Body(DEFAULT_MAX_STEPS, embed=True, ge=1, le=MAX_MAX_STEPS)):
     """The AI analyst: label a CLEAN chart from scratch, as an agent.

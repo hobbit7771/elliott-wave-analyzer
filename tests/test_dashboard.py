@@ -507,7 +507,23 @@ def test_ai_label_rejects_a_count_that_breaks_a_hard_elliott_rule():
     labelled failure rather than a drawn wave."""
     def label_five_consecutive(api_key, pivots, direction, model=None, base_url=None, timeout=None,
                              reasoning_effort=None, thinking=None):
-        start = _first_index_of_kind(pivots, "HIGH" if direction == "DOWN" else "LOW")
+        # Find a place where the geometry ACTUALLY breaks the wave-2 rule -
+        # five consecutive pivots whose third one has retraced past the
+        # first - rather than trusting the fixture to happen to contain one
+        # at its very first swing. It did until the synthetic source
+        # started alternating direction per timeframe, and then this test
+        # was asserting an accident of the data instead of the rule.
+        anchor = "HIGH" if direction == "DOWN" else "LOW"
+        start = None
+        for i, pivot in enumerate(pivots[:-5]):
+            if pivot["kind"] != anchor:
+                continue
+            retraced_past_start = (pivots[i + 2]["price"] <= pivot["price"]) if anchor == "LOW" \
+                else (pivots[i + 2]["price"] >= pivot["price"])
+            if retraced_past_start:
+                start = i
+                break
+        assert start is not None, "no wave-2-over-100% arrangement in this fixture"
         return _FakeProposal([
             {"label": label, "start_pivot_index": start + i, "end_pivot_index": start + i + 1}
             for i, label in enumerate(["1", "2", "3", "4", "5"])
@@ -1665,3 +1681,20 @@ def test_live_fibonacci_and_subwaves_are_derived_from_the_ai_count(tmp_path, mon
     for sub in body["subwave_history"]:
         assert any(w["start_time"] <= sub["start_time"] <= w["end_time"]
                    for w in body["scenarios"][0]["waves"])
+
+
+def test_multi_timeframe_on_synthetic_analyses_four_different_charts():
+    """The defect this fixes, end to end: /api/run on the synthetic source
+    returned the same 5m series for every timeframe, so a multi-timeframe
+    pass reconciled one chart with itself. The model noticed before anyone
+    else and wrote "the supplied data repeats 5m" into its verdict."""
+    seen = {}
+    for tf in ("5m", "15m", "1h", "4h"):
+        body = client.get("/api/run", params={"source": "synthetic", "cycles": 2,
+                                              "timeframe": tf, "threshold": 60}).json()
+        assert body["timeframe"] == tf, "the requested timeframe must be the one analysed"
+        seen[tf] = tuple(round(c["close"], 4) for c in body["candles"][:20])
+        # bars really are that long
+        gap = body["candles"][1]["time"] - body["candles"][0]["time"]
+        assert gap == {"5m": 300, "15m": 900, "1h": 3600, "4h": 14400}[tf]
+    assert len(set(seen.values())) == 4, "four timeframes, four different charts"

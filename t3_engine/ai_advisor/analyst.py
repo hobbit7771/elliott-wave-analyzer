@@ -65,8 +65,28 @@ from t3_engine.ai_advisor.usage import UsageMeter
 from t3_engine.common.models import Candle
 from t3_engine.common.types import Timeframe
 
-DEFAULT_MAX_STEPS = 14
-MAX_MAX_STEPS = 30
+# Step budget, set from MEASURED runs rather than from a feeling. Nine
+# saved analyses of the same charts, read out of the analysis cache:
+#
+#   10 steps  ->  coverage 40.8 / 89.3 / 93.9 / 98.4 / 98.9 %   (mean 84.3)
+#                 accepted structures 2 / 4 / 4 / 5 / 7         (mean 4.4)
+#   15-16     ->  coverage 95.3 / 97.0 / 98.1 / 99.5 %          (mean 97.5)
+#                 accepted structures 9 / 10 / 10 / 12          (mean 10.3)
+#
+# Two things stand out. Raising 10 -> 16 roughly DOUBLED the number of
+# validated structures and removed the collapse case entirely (one 10-step
+# run labelled 40.8% of its chart; the worst 16-step run managed 95.3%).
+# And every single 15/16-step run spent its whole budget - the model never
+# stopped on its own, so 16 was still the binding constraint, not the point
+# where it had nothing left to add. That is the evidence for the owner's
+# read that the model had not shown its full potential.
+#
+# So the ceiling goes well above where runs currently stop, and the model
+# is left to decide when it is done. `steps_used` keeps coming back with
+# every result, so if runs start converging at 19 this can come back down
+# on the same kind of evidence it went up on.
+DEFAULT_MAX_STEPS = 24
+MAX_MAX_STEPS = 40
 # A whole-run wall clock, separate from the per-request read timeout. The
 # loop makes up to max_steps sequential calls, so without this the worst
 # case is steps x timeout - long enough for a proxy in front of this app to
@@ -75,9 +95,13 @@ MAX_MAX_STEPS = 30
 # Raised from 480s once 429s started being retried rather than fatal: a
 # retry can legitimately sleep half a minute, and a budget that expires
 # during a sanctioned wait would throw away a run that was about to
-# continue. The frontend's own request timeout is set above this so the
-# server is always the side that decides, and always returns a transcript.
-DEFAULT_RUN_BUDGET_SECONDS = 600.0
+# continue. Raised again to 30 minutes when the step budget went to 24 at
+# maximum reasoning effort: 600s would have become the real ceiling and
+# quietly capped the run at whatever fitted, which is the same mistake as
+# a step budget that is too low, only harder to see. Nothing waits on the
+# wall clock any more - a run is a background job (ai_advisor/jobs.py), so
+# the only thing a long run costs is tokens, and those are now measured.
+DEFAULT_RUN_BUDGET_SECONDS = 1800.0
 
 # Told to the model on its LAST allowed step. Without it, a step budget
 # does not end a run - it interrupts one, and an agent that was still
