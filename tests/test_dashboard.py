@@ -1698,3 +1698,87 @@ def test_multi_timeframe_on_synthetic_analyses_four_different_charts():
         gap = body["candles"][1]["time"] - body["candles"][0]["time"]
         assert gap == {"5m": 300, "15m": 900, "1h": 3600, "4h": 14400}[tf]
     assert len(set(seen.values())) == 4, "four timeframes, four different charts"
+
+
+# ---- the Claude tab: a second reading, held beside the first -----------
+
+def test_claude_chart_aggregates_stored_candles_up_to_the_asked_timeframe(tmp_path, monkeypatch):
+    """The count in that tab was made on exactly these bars, so it has to
+    be drawn on exactly these bars - not on a freshly fetched window that
+    has since moved."""
+    from t3_engine.backtest.synthetic_data import generate_synthetic_series
+    from t3_engine.database import candle_store
+    _seed_store(tmp_path, monkeypatch)
+    monkeypatch.setattr(candle_store, "_factory", None)
+    candle_store.save("INJUSDT", "15m", generate_synthetic_series(num_cycles=4))
+
+    body = client.get("/api/claude/chart",
+                      params={"symbol": "INJUSDT", "timeframe": "1h"}).json()
+    assert body["timeframe"] == "1h"
+    assert body["candles"], "1h bars should be built from the stored 15m series"
+    gap = body["candles"][1]["time"] - body["candles"][0]["time"]
+    assert gap == 3600
+    assert "aggregated from the stored 15m" in body["note"]
+
+
+def test_claude_chart_refuses_to_invent_a_finer_timeframe(tmp_path, monkeypatch):
+    """5m does not divide out of 15m. Returning something plausible would
+    be inventing bars that never traded."""
+    from t3_engine.backtest.synthetic_data import generate_synthetic_series
+    from t3_engine.database import candle_store
+    _seed_store(tmp_path, monkeypatch)
+    monkeypatch.setattr(candle_store, "_factory", None)
+    candle_store.save("INJUSDT", "15m", generate_synthetic_series(num_cycles=2))
+
+    body = client.get("/api/claude/chart",
+                      params={"symbol": "INJUSDT", "timeframe": "5m"}).json()
+    assert body["candles"] == []
+    assert "cannot be divided out of" in body["note"]
+
+
+def test_claude_chart_says_what_to_do_when_nothing_is_stored(tmp_path, monkeypatch):
+    from t3_engine.database import candle_store
+    _seed_store(tmp_path, monkeypatch)
+    monkeypatch.setattr(candle_store, "_factory", None)
+    body = client.get("/api/claude/chart",
+                      params={"symbol": "NOSUCHUSDT", "timeframe": "4h"}).json()
+    assert body["candles"] == []
+    assert "Analysis tab" in body["note"] and "no cost" in body["note"]
+
+
+def test_claude_counts_are_stored_apart_from_the_analysts(tmp_path, monkeypatch):
+    """Two readings of one instrument are only useful if you can hold them
+    side by side; a shared key means the newer silently replaces the
+    older."""
+    store = _seed_store(tmp_path, monkeypatch)
+    store.save("bybit", "INJUSDT", "4h", 1000, 500,
+               {"accepted": [{"structure": "IMPULSE", "waves": []}], "summary": "analyst"}, model="m")
+    store.save(server_module.CLAUDE_SOURCE, "INJUSDT", "4h", 1000, 500,
+               {"accepted": [{"structure": "ZIGZAG", "waves": []}], "summary": "second opinion"},
+               model="claude")
+
+    mine = client.get("/api/claude/chart",
+                      params={"symbol": "INJUSDT", "timeframe": "4h"}).json()
+    assert mine["summary"] == "second opinion"
+    theirs = client.get("/api/ai/saved", params={"source": "bybit", "symbol": "INJUSDT"}).json()
+    assert theirs["timeframes"][0]["summary"] == "analyst"
+
+
+def test_claude_timeframes_lists_only_what_has_a_count(tmp_path, monkeypatch):
+    store = _seed_store(tmp_path, monkeypatch)
+    for tf in ("4h", "1h"):
+        store.save(server_module.CLAUDE_SOURCE, "INJUSDT", tf, 1000, 500,
+                   {"accepted": [{"structure": "IMPULSE", "waves": []}],
+                    "coverage": {"covered_fraction": 0.8}, "summary": f"{tf} read"}, model="claude")
+
+    body = client.get("/api/claude/timeframes", params={"symbol": "INJUSDT"}).json()
+    assert [r["timeframe"] for r in body["timeframes"]] == ["1h", "4h"]   # shortest first
+    assert all(r["structures"] == 1 for r in body["timeframes"])
+
+
+def test_index_has_a_claude_tab_with_timeframe_switching():
+    resp = client.get("/")
+    assert 'data-tab="claude"' in resp.text
+    assert "tab-claude" in resp.text
+    assert "drawClaudeTimeframe" in resp.text
+    assert "data-claude-tf" in resp.text
