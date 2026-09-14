@@ -212,6 +212,46 @@ def test_a_trailing_partial_group_is_dropped_not_emitted_short():
     assert len(rolled) == 3
 
 
+def test_aggregation_reads_the_bar_length_from_the_series_itself():
+    """The bug that drew wave labels over an empty chart.
+
+    `aggregate_candles` used to divide the target timeframe by the module's
+    own `_BASE_SECONDS` (300, the synthetic generator's 5m). Handed a
+    STORED 15m series it therefore wanted 48 bars in a 4h bucket, found the
+    16 that are actually there, discarded every bucket as unfinished and
+    returned nothing. The Claude tab rendered "0 bars" with the count drawn
+    on top of it.
+
+    Aggregating in one step and in two must also give the same bars: 15m is
+    a divisor of 1h, so rolling 5m->15m->1h cannot differ from 5m->1h."""
+    from t3_engine.backtest.synthetic_data import aggregate_candles, generate_alternating_series
+    from t3_engine.common.types import Timeframe
+
+    base = generate_alternating_series(num_cycles=4)
+    m15 = aggregate_candles(base, Timeframe.M15)
+    assert m15, "the 5m rollup itself must still work"
+
+    two_step = aggregate_candles(m15, Timeframe.H1)
+    one_step = aggregate_candles(base, Timeframe.H1)
+    assert two_step, "a stored 15m series must roll up, not vanish"
+    assert [c.open_time for c in two_step] == [c.open_time for c in one_step]
+    assert [c.high for c in two_step] == [c.high for c in one_step]
+    assert [c.low for c in two_step] == [c.low for c in one_step]
+    assert aggregate_candles(m15, Timeframe.H4), "4h from 15m must not come back empty"
+
+
+def test_aggregation_never_pretends_to_refine_a_coarse_series():
+    """Asked for a FINER timeframe than the data, there is nothing to do: a
+    1h bar cannot be split back into twelve 5m ones. Returning the series
+    unchanged is honest; returning [] would blank the chart again."""
+    from t3_engine.backtest.synthetic_data import aggregate_candles, generate_alternating_series
+    from t3_engine.common.types import Timeframe
+
+    h1 = aggregate_candles(generate_alternating_series(num_cycles=4), Timeframe.H1)
+    assert [c.open_time for c in aggregate_candles(h1, Timeframe.M5)] == [c.open_time for c in h1]
+    assert [c.open_time for c in aggregate_candles(h1, Timeframe.H1)] == [c.open_time for c in h1]
+
+
 def test_a_long_series_oscillates_instead_of_running_away():
     """Cycles compound at about +53% each. The 96 needed for a 4h series
     took the old generator to 3e10 and the chart became a vertical line;

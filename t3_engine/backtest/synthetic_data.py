@@ -122,15 +122,52 @@ _BASE_SECONDS = 300
 MAX_BASE_CANDLES = 20_000
 
 
+def base_seconds_of(candles: List[Candle]) -> int:
+    """How long one bar of THIS series is, in seconds.
+
+    Taken from the candles themselves rather than assumed. The function
+    below used to divide by the module-level `_BASE_SECONDS` (300, because
+    the synthetic generator emits 5m bars), which is right only when the
+    input really is 5m. Fed a stored 15m series it computed 48 base bars
+    per 4h bar, found 16 in every bucket, discarded all of them and
+    returned an empty chart - wave labels drawn over no candles.
+
+    The declared timeframe is trusted first, because it is what every
+    producer in this codebase sets. The spacing between opens is the
+    fallback, for a series assembled without one.
+    """
+    if not candles:
+        return _BASE_SECONDS
+    declared = getattr(candles[0].timeframe, "seconds", 0) or 0
+    if declared > 0:
+        return int(declared)
+    gaps = sorted(b.open_time - a.open_time for a, b in zip(candles, candles[1:])
+                  if b.open_time > a.open_time)
+    if gaps:
+        return max(1, gaps[len(gaps) // 2] // 1000)
+    return _BASE_SECONDS
+
+
 def aggregate_candles(candles: List[Candle], timeframe: Timeframe) -> List[Candle]:
-    """Roll 5m bars up into a coarser timeframe.
+    """Roll bars up into a coarser timeframe.
 
     Plain OHLCV aggregation: first open, highest high, lowest low, last
     close, summed volume. A trailing group that is not yet full is dropped
     rather than emitted short - a half-formed 4h bar presented as a closed
     one is the same lookahead the rest of this engine refuses.
+
+    The input's own bar length decides how many bars a full bucket holds,
+    so this works on any series, not only the 5m one the synthetic
+    generator produces.
     """
-    per_bar = timeframe.seconds // _BASE_SECONDS
+    if not candles:
+        return []
+    base = base_seconds_of(candles)
+    if timeframe.seconds <= base:
+        # Same degree, or finer than what we have. Aggregation cannot
+        # invent a shorter bar, so the series is returned as it is.
+        return list(candles)
+    per_bar = timeframe.seconds // base
     if per_bar <= 1:
         return list(candles)
 

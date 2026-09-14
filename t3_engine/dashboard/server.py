@@ -57,7 +57,7 @@ from t3_engine.ai_advisor.advisor import (
     resolve_api_key,
 )
 from t3_engine.ai_advisor.analyst import DEFAULT_MAX_STEPS, MAX_MAX_STEPS, run_analyst
-from t3_engine.ai_advisor import analysis_store, jobs, trade_journal
+from t3_engine.ai_advisor import analysis_store, deep_count, jobs, trade_journal
 from t3_engine.ai_advisor.multi_timeframe import run_multi_timeframe
 from t3_engine.ai_advisor.target_odds import annotate_projection
 from t3_engine.ai_advisor.usage import UsageMeter, cost_of, fetch_pricing, monthly_estimate
@@ -174,7 +174,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # value here and the UI keeps "Not sent" as an explicit choice.
 DEFAULT_REASONING_EFFORT = "max"
 
-BUILD_VERSION = "BUILD-CHECK-040"
+BUILD_VERSION = "BUILD-CHECK-041"
 
 
 @app.get("/api/health")
@@ -1047,11 +1047,205 @@ def ai_job(job_id: str = Query(...), since: int = Query(0, ge=0)):
 CLAUDE_SOURCE = "claude"
 
 
+# Which timeframes a full pass covers, shortest first. Four degrees is
+# what makes a count checkable against itself: a 4h wave 3 that the 1h
+# chart cannot subdivide into five is a 4h wave 3 worth doubting.
+CLAUDE_TIMEFRAMES = ("5m", "15m", "1h", "4h")
+
+# 1500 bars per timeframe. Not a round number for its own sake: Bybit
+# serves 1000 rows per request, so this is two pages, and 1500 4h bars is
+# eight months - long enough that a cycle-degree count has something to
+# count, which a 200-bar window does not.
+CLAUDE_DEFAULT_LIMIT = 1500
+
+
+def build_claude_timeframe(symbol: str, timeframe: str, limit: int,
+                           on_progress=None) -> Dict:
+    """Fetch a full history for one degree, file it, and count it.
+
+    No model is called anywhere in here, so this costs nothing but a
+    couple of Bybit requests - which is the point. The expensive analyst
+    run is for a second opinion on a chart; getting the chart itself
+    labelled end to end is arithmetic and should not be billed."""
+    def note(line: str) -> None:
+        if on_progress:
+            on_progress(line)
+
+    candles, resolved, degree = load_candles("bybit", symbol, timeframe, limit, 2)
+    note(f"{degree.value}: fetched {len(candles)} candles from Bybit")
+    # File them first. A count is only re-checkable against the exact bars
+    # it was made on, and those bars are gone from the exchange's window
+    # by tomorrow.
+    stored = candle_store.save(resolved, degree.value, candles)
+    note(f"{degree.value}: filed {stored} candles")
+
+    count = deep_count.build_count(candles, degree, resolved)
+    note(f"{degree.value}: deviation {count.get('deviation_pct')}% -> "
+         f"{len(count.get('accepted') or [])} structures, "
+         f"{len(count.get('subwaves') or [])} subwaves, "
+         f"{round(100 * (count.get('coverage') or {}).get('covered_fraction', 0))}% labelled")
+
+    # Base rates measured at the SAME deviation the count was made at, so
+    # "past swings that reached this far" means swings of the degree the
+    # count is about, not of some other one.
+    count["projection"] = annotate_projection(count.get("projection"), candles,
+                                              float(count.get("deviation_pct") or 1.0))
+    count["summary"] = claude_summary(count)
+    if candles:
+        try:
+            analysis_store.save(CLAUDE_SOURCE, resolved, degree.value,
+                                candles[-1].open_time, len(candles), count,
+                                model="engine-rules")
+        except SQLAlchemyError as exc:
+            logger.warning("could not store claude count for %s %s: %s",
+                           resolved, degree.value, exc)
+    return count
+
+
+def claude_summary(count: Dict) -> str:
+    """One factual paragraph about what was found. Every number in it comes
+    from the count itself - nothing here is a view."""
+    accepted = count.get("accepted") or []
+    if not accepted:
+        return (f"No structure on {count.get('candles_analysed', 0)} {count.get('timeframe', '')} "
+                "bars survived the hard rules at any deviation tried.")
+    kinds: Dict[str, int] = {}
+    for structure in accepted:
+        kinds[structure.get("structure", "?")] = kinds.get(structure.get("structure", "?"), 0) + 1
+    newest = accepted[-1]
+    labels = "-".join(str(w.get("label")) for w in (newest.get("waves") or []))
+    covered = round(100 * (count.get("coverage") or {}).get("covered_fraction", 0))
+    parts = [
+        f"{count.get('candles_analysed', 0)} {count.get('timeframe', '')} bars, "
+        f"{covered}% of the span labelled at {count.get('deviation_pct')}% deviation.",
+        ", ".join(f"{n}x {kind}" for kind, n in sorted(kinds.items())) + ".",
+        f"The newest structure is a {newest.get('structure')} counted {labels}"
+        + (" and still forming." if newest.get("partial") else " and complete."),
+    ]
+    projection = count.get("projection") or {}
+    if projection.get("next_label"):
+        parts.append(f"Wave {projection['next_label']} is the one now expected, "
+                     f"{projection.get('basis', '')}, primary target "
+                     f"{projection.get('primary_target')}.")
+    if count.get("invalidation") is not None:
+        parts.append(f"The count fails at {round(float(count['invalidation']), 6):g}.")
+    return " ".join(parts)
+
+
+@app.post("/api/claude/build")
+def claude_build(symbol: str = Body("INJUSDT", embed=True),
+                 timeframes: Optional[List[str]] = Body(None, embed=True),
+                 limit: int = Body(CLAUDE_DEFAULT_LIMIT, embed=True, ge=200, le=5000)):
+    """Fetch and count a full history on every timeframe. Free.
+
+    Runs as a background job because four Bybit fetches plus four counts
+    take longer than a browser is willing to hold a request open - the
+    same reason the analyst runs were moved off the request thread."""
+    symbol = normalize_symbol(symbol)
+    wanted = [t for t in (timeframes or CLAUDE_TIMEFRAMES) if t in TIMEFRAME_ORDER]
+    if not wanted:
+        raise HTTPException(400, f"No usable timeframes; expected some of {', '.join(TIMEFRAME_ORDER)}")
+    wanted.sort(key=lambda t: TIMEFRAME_ORDER[t])
+
+    existing = jobs.find_running("claude-build", symbol)
+    if existing is not None:
+        return {**existing.snapshot(), "joined": True}
+
+    def work(note):
+        results, errors = [], []
+        for timeframe in wanted:
+            try:
+                count = build_claude_timeframe(symbol, timeframe, limit, on_progress=note)
+                results.append({"timeframe": timeframe,
+                                "candles": count.get("candles_analysed", 0),
+                                "structures": len(count.get("accepted") or []),
+                                "subwaves": len(count.get("subwaves") or []),
+                                "coverage": count.get("coverage", {}),
+                                "summary": count.get("summary", "")})
+            except HTTPException as exc:
+                # One timeframe failing must not lose the three that
+                # worked - each is saved as it finishes.
+                note(f"{timeframe}: {exc.detail}")
+                errors.append({"timeframe": timeframe, "error": str(exc.detail)})
+            except Exception as exc:            # noqa: BLE001
+                note(f"{timeframe}: {exc}")
+                errors.append({"timeframe": timeframe, "error": str(exc)})
+        return {"symbol": symbol, "timeframes": results, "errors": errors}
+
+    return {**jobs.start("claude-build", symbol, work).snapshot(), "joined": False}
+
+
+# Symbols whose full count is rebuilt when the process starts, comma
+# separated (T3_WARMUP_SYMBOLS=INJUSDT,BTCUSDT). Left unset, nothing
+# happens at startup at all.
+#
+# Why this exists: a deploy replaces the container, and the first person to
+# open the tab after one should not be the one who has to notice it is
+# empty and press a button. It is free - Bybit klines cost nothing and no
+# model is called - so the only thing to be careful about is doing it too
+# OFTEN, which the freshness guard below handles.
+WARMUP_SYMBOLS_ENV = "T3_WARMUP_SYMBOLS"
+
+# A count younger than this is left alone. Restarts happen in bursts
+# (a deploy, a crash loop, a scale event) and refetching four timeframes
+# on each one is pointless traffic.
+WARMUP_MAX_AGE_SECONDS = 3600.0
+
+
+def warmup_symbols() -> List[str]:
+    raw = os.getenv(WARMUP_SYMBOLS_ENV, "")
+    return [normalize_symbol(part) for part in raw.split(",") if part.strip()]
+
+
+def stale_timeframes(symbol: str, now: Optional[float] = None) -> List[str]:
+    """Which degrees have no count, or one old enough to be worth redoing."""
+    now = time.time() if now is None else now
+    fresh = set()
+    try:
+        for cached in analysis_store.list_for(CLAUDE_SOURCE, symbol):
+            if now - (cached.created_at or 0) < WARMUP_MAX_AGE_SECONDS:
+                fresh.add(cached.timeframe)
+    except Exception:                       # noqa: BLE001 - a warm-up must
+        return list(CLAUDE_TIMEFRAMES)      # never take the process down
+    return [t for t in CLAUDE_TIMEFRAMES if t not in fresh]
+
+
+@app.on_event("startup")
+def warm_up_counts() -> None:
+    for symbol in warmup_symbols():
+        wanted = stale_timeframes(symbol)
+        if not wanted:
+            logger.info("warm-up: %s is already counted and fresh", symbol)
+            continue
+        if jobs.find_running("claude-build", symbol) is not None:
+            continue
+
+        def work(note, symbol=symbol, wanted=wanted):
+            done, failed = [], []
+            for timeframe in wanted:
+                try:
+                    count = build_claude_timeframe(symbol, timeframe,
+                                                   CLAUDE_DEFAULT_LIMIT, on_progress=note)
+                    done.append({"timeframe": timeframe,
+                                 "candles": count.get("candles_analysed", 0),
+                                 "structures": len(count.get("accepted") or []),
+                                 "subwaves": len(count.get("subwaves") or []),
+                                 "coverage": count.get("coverage", {}),
+                                 "summary": count.get("summary", "")})
+                except Exception as exc:    # noqa: BLE001
+                    note(f"{timeframe}: {exc}")
+                    failed.append({"timeframe": timeframe, "error": str(exc)})
+            return {"symbol": symbol, "timeframes": done, "errors": failed}
+
+        logger.info("warm-up: counting %s on %s", symbol, ", ".join(wanted))
+        jobs.start("claude-build", symbol, work)
+
+
 @app.get("/api/claude/chart")
 def claude_chart(symbol: str = Query("INJUSDT"), timeframe: str = Query("4h")):
     """The chart and the count for the second-opinion tab.
 
-    The candles come from whatever series the app last analysed and filed
+    The candles come from whatever series was last fetched and filed
     (database/candle_store.py), aggregated up to the requested timeframe
     the way an exchange builds a coarser bar out of finer ones. That
     matters for honesty as much as convenience: the count in this tab was
@@ -1077,8 +1271,9 @@ def claude_chart(symbol: str = Query("INJUSDT"), timeframe: str = Query("4h")):
 
     note = ""
     if not stored:
-        note = (f"No candles stored for {symbol}. Open this symbol on the Analysis tab with "
-                "Bybit as the source - viewing a chart files its candles, at no cost.")
+        note = (f"No candles stored for {symbol} yet. Press Build to fetch "
+                f"{CLAUDE_DEFAULT_LIMIT} bars of every timeframe from Bybit and count them - "
+                "no model is called, so it costs nothing.")
         candles = []
     elif base == degree:
         candles = stored
@@ -1088,11 +1283,14 @@ def claude_chart(symbol: str = Query("INJUSDT"), timeframe: str = Query("4h")):
     else:
         candles = []
         note = (f"Only {base.value} candles are stored for {symbol}, and {degree.value} is finer - "
-                f"a {degree.value} bar cannot be divided out of a {base.value} one. Open the "
-                f"{degree.value} chart on the Analysis tab once and it will be filed.")
+                f"a {degree.value} bar cannot be divided out of a {base.value} one. Press Build to "
+                f"fetch {degree.value} directly.")
 
     cached = analysis_store.load(CLAUDE_SOURCE, symbol, degree.value)
-    payload = cached.payload if cached else None
+    payload = cached.payload if cached else {}
+    if not payload and candles:
+        note = (note + " " if note else "") + \
+            f"No count stored for {degree.value} yet - press Build."
     return {
         "symbol": symbol,
         "timeframe": degree.value,
@@ -1100,12 +1298,23 @@ def claude_chart(symbol: str = Query("INJUSDT"), timeframe: str = Query("4h")):
         "note": note,
         "analysed_at": cached.created_at if cached else None,
         "model": cached.model if cached else "",
-        "accepted": (payload or {}).get("accepted", []),
-        "rejected": (payload or {}).get("rejected", []),
-        "projection": (payload or {}).get("projection"),
-        "coverage": (payload or {}).get("coverage", {}),
-        "summary": (payload or {}).get("summary", ""),
-        "reasoning": (payload or {}).get("reasoning", ""),
+        "accepted": payload.get("accepted", []),
+        "rejected": payload.get("rejected", []),
+        # The swing skeleton the count was built on, so the chart can show
+        # what was labelled AND what was there to label.
+        "pivots": payload.get("pivots", []),
+        # i-ii-iii-iv-v inside each wave 1, 3 and 5 - the detail whose
+        # absence made the first version of this tab useless.
+        "subwaves": payload.get("subwaves", []),
+        "projection": payload.get("projection"),
+        "invalidation": payload.get("invalidation"),
+        "correction_zone": payload.get("correction_zone"),
+        "deviation_pct": payload.get("deviation_pct"),
+        "candles_analysed": payload.get("candles_analysed"),
+        "coverage": payload.get("coverage", {}),
+        "summary": payload.get("summary", ""),
+        "reading": payload.get("reading", ""),
+        "reasoning": payload.get("reasoning", ""),
     }
 
 
@@ -1118,16 +1327,22 @@ def claude_timeframes(symbol: str = Query("INJUSDT")):
         if cached.timeframe == MTF_CACHE_KEY:
             continue
         payload = cached.payload
+        projection = payload.get("projection") or {}
         rows.append({
             "timeframe": cached.timeframe,
             "analysed_at": cached.created_at,
             "candles": cached.candle_count,
             "structures": len(payload.get("accepted") or []),
+            "subwaves": len(payload.get("subwaves") or []),
             "coverage": payload.get("coverage", {}),
+            "next_label": projection.get("next_label"),
+            "primary_target": projection.get("primary_target"),
+            "invalidation": payload.get("invalidation"),
             "summary": payload.get("summary", ""),
         })
     rows.sort(key=lambda r: TIMEFRAME_ORDER.get(r["timeframe"], 99))
-    return {"symbol": symbol, "timeframes": rows}
+    return {"symbol": symbol, "known_timeframes": list(CLAUDE_TIMEFRAMES),
+            "default_limit": CLAUDE_DEFAULT_LIMIT, "timeframes": rows}
 
 
 @app.get("/api/ai/saved")
