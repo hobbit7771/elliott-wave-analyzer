@@ -94,7 +94,7 @@ from t3_engine.fibonacci.calculator import (
     wave5_targets,
     wave_c_targets,
 )
-from t3_engine.database import supabase_rest
+from t3_engine.database import candle_store, supabase_rest
 from t3_engine.database.session import is_durable
 from t3_engine.market_data.bybit_rest_client import BybitAPIError, BybitFuturesREST
 from t3_engine.market_data.fallback_symbols import FALLBACK_USDT_PERPETUAL_SYMBOLS
@@ -171,7 +171,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # value here and the UI keeps "Not sent" as an explicit choice.
 DEFAULT_REASONING_EFFORT = "max"
 
-BUILD_VERSION = "BUILD-CHECK-038"
+BUILD_VERSION = "BUILD-CHECK-039"
 
 
 @app.get("/api/health")
@@ -843,6 +843,12 @@ def run_analyst_work(api_key: str, source: str, symbol: str, timeframe: str, lim
                      on_progress=None) -> Dict:
     """One analyst run, as a plain function - see run_multi_work."""
     candles, symbol, tf = load_candles(source, symbol, timeframe, limit, cycles)
+    # File the series BEFORE the run, not after. A run that fails still
+    # leaves behind the exact chart it failed on, which is the difference
+    # between being able to look at what happened and having to re-fetch a
+    # window that is no longer the same one. Non-fatal by construction -
+    # see database/candle_store.py.
+    candle_store.save(symbol, tf.value, candles)
 
     # What the paper trades opened from previous counts of THIS chart
     # actually did. Stated to the agent as history, never as a steer - see
