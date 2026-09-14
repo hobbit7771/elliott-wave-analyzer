@@ -72,7 +72,10 @@ from t3_engine.ai_advisor.ai_trading import grid_scenario, subwaves_for
 from t3_engine.ai_advisor.analyst_tools import ToolError
 from t3_engine.backtest.engine import BacktestConfig, BacktestEngine
 from t3_engine.backtest.metrics import compute_metrics, compute_metrics_by_wave
-from t3_engine.backtest.synthetic_data import generate_synthetic_series_for
+from t3_engine.backtest.synthetic_data import (
+    aggregate_candles,
+    generate_synthetic_series_for,
+)
 from t3_engine.common.models import Scenario
 from t3_engine.common.types import TRADEABLE_TIMEFRAMES, Direction, Timeframe, WaveLabel
 from t3_engine.elliott_engine.external_count import ExternalCountRejected, validate_external_count
@@ -171,7 +174,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # value here and the UI keeps "Not sent" as an explicit choice.
 DEFAULT_REASONING_EFFORT = "max"
 
-BUILD_VERSION = "BUILD-CHECK-039"
+BUILD_VERSION = "BUILD-CHECK-040"
 
 
 @app.get("/api/health")
@@ -1036,6 +1039,95 @@ def ai_job(job_id: str = Query(...), since: int = Query(0, ge=0)):
     snapshot["progress"] = snapshot["progress"][since:]
     snapshot["progress_total"] = len(job.progress)
     return snapshot
+
+
+# The source under which a count made OUTSIDE the analyst loop is stored.
+# Kept apart from "bybit" on purpose: two readings of the same instrument
+# must be comparable side by side, not overwriting each other.
+CLAUDE_SOURCE = "claude"
+
+
+@app.get("/api/claude/chart")
+def claude_chart(symbol: str = Query("INJUSDT"), timeframe: str = Query("4h")):
+    """The chart and the count for the second-opinion tab.
+
+    The candles come from whatever series the app last analysed and filed
+    (database/candle_store.py), aggregated up to the requested timeframe
+    the way an exchange builds a coarser bar out of finer ones. That
+    matters for honesty as much as convenience: the count in this tab was
+    made on exactly these bars, so it is drawn on exactly these bars
+    rather than on a freshly fetched window that has since moved.
+
+    A timeframe FINER than what is stored cannot be invented - 5m does not
+    divide out of 15m - and says so rather than returning something
+    plausible."""
+    symbol = normalize_symbol(symbol)
+    try:
+        degree = Timeframe(timeframe)
+    except ValueError:
+        raise HTTPException(400, f"Unsupported timeframe {timeframe}")
+
+    stored: List = []
+    base: Optional[Timeframe] = None
+    for candidate in (degree, Timeframe.M15, Timeframe.M5, Timeframe.M1):
+        rows = candle_store.load(symbol, candidate.value)
+        if rows:
+            stored, base = rows, candidate
+            break
+
+    note = ""
+    if not stored:
+        note = (f"No candles stored for {symbol}. Open this symbol on the Analysis tab with "
+                "Bybit as the source - viewing a chart files its candles, at no cost.")
+        candles = []
+    elif base == degree:
+        candles = stored
+    elif base.seconds < degree.seconds:
+        candles = aggregate_candles(stored, degree)
+        note = f"{degree.value} bars aggregated from the stored {base.value} series."
+    else:
+        candles = []
+        note = (f"Only {base.value} candles are stored for {symbol}, and {degree.value} is finer - "
+                f"a {degree.value} bar cannot be divided out of a {base.value} one. Open the "
+                f"{degree.value} chart on the Analysis tab once and it will be filed.")
+
+    cached = analysis_store.load(CLAUDE_SOURCE, symbol, degree.value)
+    payload = cached.payload if cached else None
+    return {
+        "symbol": symbol,
+        "timeframe": degree.value,
+        "candles": [candle_to_dict(c) for c in candles],
+        "note": note,
+        "analysed_at": cached.created_at if cached else None,
+        "model": cached.model if cached else "",
+        "accepted": (payload or {}).get("accepted", []),
+        "rejected": (payload or {}).get("rejected", []),
+        "projection": (payload or {}).get("projection"),
+        "coverage": (payload or {}).get("coverage", {}),
+        "summary": (payload or {}).get("summary", ""),
+        "reasoning": (payload or {}).get("reasoning", ""),
+    }
+
+
+@app.get("/api/claude/timeframes")
+def claude_timeframes(symbol: str = Query("INJUSDT")):
+    """Which timeframes this tab has a count for, shortest first."""
+    symbol = normalize_symbol(symbol)
+    rows = []
+    for cached in analysis_store.list_for(CLAUDE_SOURCE, symbol):
+        if cached.timeframe == MTF_CACHE_KEY:
+            continue
+        payload = cached.payload
+        rows.append({
+            "timeframe": cached.timeframe,
+            "analysed_at": cached.created_at,
+            "candles": cached.candle_count,
+            "structures": len(payload.get("accepted") or []),
+            "coverage": payload.get("coverage", {}),
+            "summary": payload.get("summary", ""),
+        })
+    rows.sort(key=lambda r: TIMEFRAME_ORDER.get(r["timeframe"], 99))
+    return {"symbol": symbol, "timeframes": rows}
 
 
 @app.get("/api/ai/saved")

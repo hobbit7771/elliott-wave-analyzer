@@ -24,7 +24,7 @@ generator to do that.
 from __future__ import annotations
 
 import random
-from typing import List
+from typing import Dict, List
 
 from t3_engine.common.models import Candle
 from t3_engine.common.types import Timeframe
@@ -134,9 +134,25 @@ def aggregate_candles(candles: List[Candle], timeframe: Timeframe) -> List[Candl
     if per_bar <= 1:
         return list(candles)
 
+    # Group by ABSOLUTE time bucket, not by position in the list. An
+    # exchange's 4h bar starts at 00:00, 04:00, 08:00 UTC - it does not
+    # start wherever the data happens to begin. Chunking positionally
+    # gives bars that are the right LENGTH at the wrong OFFSET, and a wave
+    # labelled on one alignment does not line up with a chart drawn on the
+    # other. (Identical to positional chunking for the synthetic fixture,
+    # which starts at t=0.)
+    bucket_ms = timeframe.seconds * 1000
+    groups: Dict[int, List[Candle]] = {}
+    for candle in candles:
+        groups.setdefault(candle.open_time // bucket_ms, []).append(candle)
+
     out: List[Candle] = []
-    for start in range(0, len(candles) - per_bar + 1, per_bar):
-        group = candles[start:start + per_bar]
+    for bucket in sorted(groups):
+        group = groups[bucket]
+        # A bucket that is not full is a bar still forming (or a gap in the
+        # data): emitting it as closed is the lookahead this engine refuses.
+        if len(group) < per_bar:
+            continue
         out.append(Candle(
             timeframe=timeframe,
             open_time=group[0].open_time,

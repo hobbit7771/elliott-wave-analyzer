@@ -391,6 +391,25 @@ desktop web page:
   high on less, and a fifth wave topping on a lower MACD peak than the
   third is the classic ending divergence. Both are evidence that separates
   two counts which each pass the rules - they never override the rules.
+- **A "Claude" tab: a second reading, held beside the first.** Counts made
+  outside the analyst loop are stored under their own source
+  (`CLAUDE_SOURCE`) rather than sharing the analyst's key, because two
+  readings of one instrument are only useful if you can hold them side by
+  side - a shared key means the newer one silently replaces the older.
+  `GET /api/claude/timeframes` lists the timeframes that have a count
+  (shortest first, and a timeframe with nothing stored is absent rather
+  than present-and-empty), and `GET /api/claude/chart` returns the bars
+  and the count together. The bars come from the stored series
+  (`candle_store`) aggregated up to the requested timeframe, so the count
+  is drawn on exactly the bars it was made on rather than on a freshly
+  fetched window that has since moved. A timeframe FINER than what is
+  stored is refused with the reason - 5m does not divide out of 15m, and
+  returning something plausible would be inventing bars that never traded.
+- **Aggregation aligns to absolute time buckets.** An exchange's 4h bar
+  starts at 00:00, 04:00, 08:00 UTC; it does not start wherever the data
+  happens to begin. Chunking positionally gives bars of the right LENGTH
+  at the wrong OFFSET, and a wave labelled on one alignment does not line
+  up with a chart drawn on the other.
 - **Symbol picker**: the symbol field is backed by a custom JS dropdown
   (not the native HTML `<datalist>` element - see below for why) fed by
   `GET /api/symbols` (cached in-process for an hour) - type any letter and
