@@ -94,17 +94,21 @@ def test_the_deviation_is_measured_rather_than_assumed(counted):
     _, out = counted
     search = out["deviation_search"]
     assert len(search) == len(deep_count._DEVIATION_LADDER)
-    usable = [a for a in search
-              if a["covered_fraction"] >= deep_count.MIN_USEFUL_COVERAGE
-              and a["structures"] >= deep_count.MIN_STRUCTURES_FOR_A_DEGREE]
+    def in_band(a):
+        return (a["covered_fraction"] >= deep_count.MIN_USEFUL_COVERAGE
+                and deep_count.MIN_STRUCTURES_FOR_A_DEGREE <= a["structures"]
+                <= deep_count.MAX_STRUCTURES_FOR_A_DEGREE)
+
+    usable = [a for a in search if in_band(a)]
     assert usable, "no deviation on the ladder accounted for this chart at all"
     assert out["deviation_pct"] == max(a["deviation_pct"] for a in usable)
     assert out["coverage"]["covered_fraction"] >= deep_count.MIN_USEFUL_COVERAGE
     # ...and nothing coarser managed it, or that one would have won.
     coarser = [a for a in search if a["deviation_pct"] > out["deviation_pct"]]
-    assert all(a["covered_fraction"] < deep_count.MIN_USEFUL_COVERAGE
-               or a["structures"] < deep_count.MIN_STRUCTURES_FOR_A_DEGREE
-               for a in coarser)
+    assert not any(in_band(a) for a in coarser)
+    assert (deep_count.MIN_STRUCTURES_FOR_A_DEGREE
+            <= len(out["accepted"]) - (1 if out["accepted"][-1].get("partial") else 0)
+            <= deep_count.MAX_STRUCTURES_FOR_A_DEGREE)
 
 
 def test_a_short_history_is_refused_rather_than_counted():
