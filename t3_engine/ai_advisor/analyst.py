@@ -126,10 +126,28 @@ FINAL_STEP_NUDGE = (
     "even if that is a single structure or a partial count, and say in `reasoning` what you did not "
     "get to check. A small verified count is worth far more than nothing. Do not call any other tool."
 )
+# Sent once, halfway through the budget, if nothing has been submitted
+# yet. Not a demand to stop - an instruction to SAVE progress, because
+# submit_count accumulates and a run that banks nothing loses everything
+# to the first upstream error.
+BANK_PARTIAL_NUDGE = (
+    "Before you go further: call submit_count now with the structures you have already verified, "
+    "even if that is one, and with complete=false. It is additive - you will keep working "
+    "afterwards and can submit more. This exists because a run that has submitted nothing loses "
+    "all of its work if the connection drops, and that has really happened. Bank what you have, "
+    "then carry on."
+)
 # Generous on purpose. The failure this replaces was a count truncated
 # mid-JSON because 2048 tokens covered the model's thinking but not its
 # answer; a labelling run that reasons across a whole history needs room.
-ANALYST_MAX_OUTPUT_TOKENS = 16384
+#
+# Raised again when reasoning effort went to `max`. Thinking tokens are
+# billed and counted against THIS ceiling, so at maximum effort the model
+# can spend the whole budget reasoning and emit nothing - which the
+# provider then reports as "empty response", and which is exactly what
+# ended a nine-step run on a 15m chart after $0.61 of work. Room for the
+# thinking AND the answer is the fix; the retry above is the safety net.
+ANALYST_MAX_OUTPUT_TOKENS = 32768
 
 
 @dataclass
@@ -335,6 +353,22 @@ def run_analyst(api_key: str, candles: List[Candle], degree: Timeframe, symbol: 
             note = (f"Stopped after {step} step(s): the run passed its {run_budget_seconds:.0f}s "
                     "budget. Everything the analyst did up to that point is below.")
             break
+
+        # BANK SOMETHING EARLY. A run that has submitted nothing is worth
+        # nothing the moment anything goes wrong - and something does go
+        # wrong: a real 15m run spent nine paid steps, hit one upstream
+        # hiccup on the tenth, and left the chart blank for $0.61. The
+        # playbook already asks for early submission and the model does not
+        # always comply, so it is asked directly, once, at the halfway
+        # mark. submit_count is additive, so banking a partial count costs
+        # nothing - the run carries on adding to it.
+        # Never on the last step: that one carries FINAL_STEP_NUDGE, and
+        # "bank this and carry on" next to "this is your last step" is two
+        # contradictory instructions in one turn.
+        if step == max_steps // 2 and step < max_steps - 1 and toolbox.submitted is None:
+            messages.append({"role": "user", "content": BANK_PARTIAL_NUDGE})
+            transcript.append({"role": "system", "step": step + 1, "text": BANK_PARTIAL_NUDGE})
+            report(f"Step {step + 1}: asked to bank what it has so far.")
 
         # On the final step, stop exploring and answer. A budget that just
         # cuts the model off mid-thought produces nothing; a budget the

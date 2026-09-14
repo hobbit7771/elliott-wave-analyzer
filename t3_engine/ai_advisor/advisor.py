@@ -220,7 +220,16 @@ COUNT_MAX_OUTPUT_TOKENS = 16384
 # a 502 depending on where it failed.
 TRANSIENT_UPSTREAM_MARKERS = ("overload", "temporarily", "capacity", "try again",
                               "unavailable", "timeout", "timed out", "busy",
-                              "no instances", "queue is full")
+                              "no instances", "queue is full",
+                              # "Provider returned an empty response" - the
+                              # upstream answered with nothing at all. Seen on
+                              # a real run: nine paid steps of work, then this
+                              # on the tenth, and the whole run was discarded
+                              # for what is a one-off upstream hiccup. It
+                              # belongs with the other retryables: the next
+                              # attempt on the same conversation normally
+                              # succeeds.
+                              "empty response", "empty completion")
 
 MAX_RATE_LIMIT_RETRIES = 3
 RATE_LIMIT_BACKOFF_SECONDS = (4.0, 12.0, 30.0)

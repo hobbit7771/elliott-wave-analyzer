@@ -935,3 +935,73 @@ def test_the_playbook_tells_the_agent_when_to_use_them():
     # so a phrase that happens to straddle a line break is still present.
     flowing = " ".join(ELLIOTT_PLAYBOOK.split())
     assert "never override the hard rules" in flowing
+
+
+# ---- a run must not lose everything to one upstream hiccup -------------
+# Measured failure: a 15m run made nine paid calls, the tenth came back
+# "Provider returned an empty response", and the chart stayed blank. The
+# work was real, the money was spent, and nothing survived.
+
+def test_the_model_is_asked_to_bank_a_partial_count_halfway_through():
+    """submit_count is additive, so banking early costs nothing and is the
+    difference between a partial count and no count at all."""
+    from t3_engine.ai_advisor.analyst import BANK_PARTIAL_NUDGE
+    client, _ = scripted_client([function_call_turn("list_pivots", {"deviation_pct": 1.0})])
+    result = run_analyst("sk-test", CANDLES, DEGREE, client=client, max_steps=8)
+
+    nudges = [e for e in result.transcript
+              if e["role"] == "system" and e["text"] == BANK_PARTIAL_NUDGE]
+    assert len(nudges) == 1, "asked exactly once, not every step"
+    assert nudges[0]["step"] == 5          # halfway (8 // 2) + 1
+    assert "complete=false" in BANK_PARTIAL_NUDGE
+    assert "keep working" in BANK_PARTIAL_NUDGE
+
+
+def test_a_run_that_has_already_submitted_is_not_nudged_to_bank():
+    """The nudge exists to protect unsaved work. There is none to protect
+    once the model has submitted."""
+    from t3_engine.ai_advisor.analyst import BANK_PARTIAL_NUDGE
+    client, _ = scripted_client([function_call_turn("submit_count", {
+        "structures": [{"structure": "IMPULSE", "deviation_pct": 1.0,
+                        "direction": "UP", "waves": GOOD_IMPULSE}],
+        "summary": "s", "reasoning": "r", "complete": False})])
+    result = run_analyst("sk-test", CANDLES, DEGREE, client=client, max_steps=8)
+
+    assert not [e for e in result.transcript
+                if e["role"] == "system" and e["text"] == BANK_PARTIAL_NUDGE]
+
+
+def test_the_two_nudges_never_land_in_the_same_turn():
+    """"Bank this and carry on" next to "this is your LAST step" is two
+    contradictory instructions in one turn."""
+    from t3_engine.ai_advisor.analyst import BANK_PARTIAL_NUDGE, FINAL_STEP_NUDGE
+    for budget in (1, 2, 3, 8, 24):
+        client, _ = scripted_client([function_call_turn("list_pivots", {"deviation_pct": 1.0})])
+        result = run_analyst("sk-test", CANDLES, DEGREE, client=client, max_steps=budget)
+        by_step = {}
+        for entry in result.transcript:
+            if entry["role"] == "system":
+                by_step.setdefault(entry["step"], []).append(entry["text"])
+        for texts in by_step.values():
+            assert not (BANK_PARTIAL_NUDGE in texts and FINAL_STEP_NUDGE in texts), \
+                f"both nudges in one turn at max_steps={budget}"
+
+
+def test_an_empty_upstream_response_is_retried_rather_than_fatal():
+    """"Provider returned an empty response" is the upstream answering with
+    nothing - a one-off hiccup, not a verdict on the request. It used to
+    discard nine steps of paid work."""
+    from t3_engine.ai_advisor.advisor import is_transient
+    assert is_transient("Provider returned an empty response")
+    assert is_transient("upstream returned an empty completion")
+    # ...while a real refusal still is not retried
+    assert not is_transient("invalid api key")
+    assert not is_transient("this model does not support tools")
+
+
+def test_the_output_budget_leaves_room_for_thinking_and_the_answer():
+    """Reasoning tokens count against max_tokens, so at `max` effort the
+    model can spend the entire budget thinking and emit nothing - which the
+    provider reports as an empty response."""
+    from t3_engine.ai_advisor.analyst import ANALYST_MAX_OUTPUT_TOKENS
+    assert ANALYST_MAX_OUTPUT_TOKENS >= 32768

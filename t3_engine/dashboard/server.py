@@ -171,7 +171,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # value here and the UI keeps "Not sent" as an explicit choice.
 DEFAULT_REASONING_EFFORT = "max"
 
-BUILD_VERSION = "BUILD-CHECK-037"
+BUILD_VERSION = "BUILD-CHECK-038"
 
 
 @app.get("/api/health")
