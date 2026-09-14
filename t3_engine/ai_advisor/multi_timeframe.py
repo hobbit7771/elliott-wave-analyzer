@@ -35,6 +35,7 @@ from typing import Any, Callable, Dict, List, Optional
 import httpx
 
 from t3_engine.ai_advisor import analysis_store, trade_journal
+from t3_engine.database import candle_store
 from t3_engine.ai_advisor.advisor import (
     ANALYSIS_TEMPERATURE,
     DEFAULT_MODEL,
@@ -156,6 +157,11 @@ def _analyse_timeframe(api_key: str, load_candles: Callable, source: str, symbol
         return TimeframeAnalysis(timeframe=timeframe.value, reused=False, candles=0,
                                  last_candle_time=0, error="No candles for this timeframe.")
     newest = candles[-1].open_time
+    # The chart this timeframe's count is about, kept with it. See
+    # database/candle_store.py - a saved count whose candles are gone can
+    # only be re-checked against a re-fetched window, which is a different
+    # window and therefore a different claim.
+    candle_store.save(resolved_symbol, degree.value, candles, database_url=database_url)
 
     if not force:
         cached = analysis_store.load(source, resolved_symbol, degree.value, database_url)
