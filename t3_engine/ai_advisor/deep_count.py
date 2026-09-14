@@ -439,11 +439,19 @@ def build_count(candles: List[Candle], degree: Timeframe, symbol: str = "") -> D
         result = count_at_deviation(candles, degree, deviation)
         structures = result["accepted"] + ([result["developing"]] if result["developing"] else [])
         cover = coverage_of(candles, structures)
+        scores = [a.get("score") or 0.0 for a in result["accepted"]]
         attempts.append({
             "deviation_pct": deviation,
             "pivots": len(result["pivots"]),
             "structures": len(result["accepted"]),
             "covered_fraction": cover["covered_fraction"],
+            # How well the rules RECOGNISED what is here, averaged over the
+            # structures placed. A reading that comes back as a chain of
+            # flats scores low for a reason: a flat is what the search
+            # falls back to when nothing stronger fits, so a low mean is
+            # the measurement of "this degree is not where the structure
+            # is" - see _score_candidate for the weights.
+            "mean_score": (sum(scores) / len(scores)) if scores else 0.0,
             "result": result,
             "coverage": cover,
         })
@@ -463,7 +471,14 @@ def build_count(candles: List[Candle], degree: Timeframe, symbol: str = "") -> D
                   and MIN_STRUCTURES_FOR_A_DEGREE <= a["structures"]
                   <= MAX_STRUCTURES_FOR_A_DEGREE]
         if usable:
-            best = max(usable, key=lambda a: a["deviation_pct"])
+            # Best-recognised first, coarsest to break a tie. Rounding the
+            # mean to one decimal is what makes it a tie-break rather than
+            # an override: two readings of comparable quality defer to the
+            # higher degree, and only a materially better-recognised count
+            # pulls the choice finer. Taking the coarsest outright put 7
+            # flats and 1 impulse on the 4h chart when one rung down had
+            # ten structures the rules could actually name.
+            best = max(usable, key=lambda a: (round(a["mean_score"], 1), a["deviation_pct"]))
         else:
             # Nothing cleared the floor, so there is no degree to prefer -
             # take the reading that labels the most and say so through the
@@ -501,6 +516,7 @@ def build_count(candles: List[Candle], degree: Timeframe, symbol: str = "") -> D
         "developing_label": (projection or {}).get("next_label"),
         "deviation_search": [{"deviation_pct": a["deviation_pct"], "pivots": a["pivots"],
                               "structures": a["structures"],
-                              "covered_fraction": round(a["covered_fraction"], 4)}
+                              "covered_fraction": round(a["covered_fraction"], 4),
+                              "mean_score": round(a["mean_score"], 3)}
                              for a in attempts],
     }
