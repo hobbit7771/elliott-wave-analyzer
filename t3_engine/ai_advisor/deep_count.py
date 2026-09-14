@@ -133,10 +133,18 @@ MIN_PIVOTS_FOR_A_COUNT = 6
 # separate structures, and then the largest degree that manages it wins.
 MIN_USEFUL_COVERAGE = 0.75
 
-# One structure spanning the whole window is a true statement and an
-# unreadable chart; it is also usually a sign the deviation is coarser
-# than the data supports.
-MIN_STRUCTURES_FOR_A_DEGREE = 3
+# How many structures a top-level count of this window should come to.
+# Expressed as a band because both ends are real failures, and the first
+# two attempts at this rule hit one each: maximising coverage gave 49
+# structures on the 4h chart (minute degree, unreadable), and then taking
+# the coarsest that cleared a floor of three gave 3 structures and no
+# subwaves at all (one degree too high, nothing left to subdivide).
+#
+# The band says a structure at the top level should span somewhere between
+# a twentieth and a quarter of the window - big enough to be the chart's
+# own shape, small enough that several of them tell a story.
+MIN_STRUCTURES_FOR_A_DEGREE = 4
+MAX_STRUCTURES_FOR_A_DEGREE = 20
 
 # Subwaves are by definition smaller moves than the wave holding them, so
 # they are looked for at a fraction of the deviation that found the parent.
@@ -452,7 +460,8 @@ def build_count(candles: List[Candle], degree: Timeframe, symbol: str = "") -> D
         # the subdivision happens below anyway.
         usable = [a for a in scored
                   if a["covered_fraction"] >= MIN_USEFUL_COVERAGE
-                  and a["structures"] >= MIN_STRUCTURES_FOR_A_DEGREE]
+                  and MIN_STRUCTURES_FOR_A_DEGREE <= a["structures"]
+                  <= MAX_STRUCTURES_FOR_A_DEGREE]
         if usable:
             best = max(usable, key=lambda a: a["deviation_pct"])
         else:
