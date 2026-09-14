@@ -1091,6 +1091,17 @@ def build_claude_timeframe(symbol: str, timeframe: str, limit: int,
     count["projection"] = annotate_projection(count.get("projection"), candles,
                                               float(count.get("deviation_pct") or 1.0))
     count["summary"] = claude_summary(count)
+
+    # A reading written about this chart survives the recount. The count
+    # itself is derived - rerun it and you get it back - but the prose
+    # beside it is not, and a warm-up on every restart would quietly erase
+    # it. Same rule as the labelled history: a rebuild must not be a way
+    # of losing something that cannot be rebuilt.
+    previous = analysis_store.load(CLAUDE_SOURCE, resolved, degree.value)
+    carried = (previous.payload or {}).get("reading") if previous else ""
+    if carried and not count.get("reading"):
+        count["reading"] = carried
+
     if candles:
         try:
             analysis_store.save(CLAUDE_SOURCE, resolved, degree.value,

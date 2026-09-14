@@ -1864,3 +1864,29 @@ def test_warm_up_reads_its_symbols_from_the_environment(monkeypatch):
     assert server_module.warmup_symbols() == []
     monkeypatch.setenv(server_module.WARMUP_SYMBOLS_ENV, "injusdt, BTCUSDT ,")
     assert server_module.warmup_symbols() == ["INJUSDT", "BTCUSDT"]
+
+
+def test_a_rebuild_keeps_the_reading_written_beside_the_count(tmp_path, monkeypatch):
+    """The count is derived - rerun it and you get it back. The prose
+    beside it is not, and the warm-up runs on every restart."""
+    from t3_engine.backtest.synthetic_data import generate_synthetic_series_for
+    from t3_engine.database import candle_store
+
+    store = _seed_store(tmp_path, monkeypatch)
+    monkeypatch.setattr(candle_store, "_factory", None)
+    monkeypatch.setattr(server_module, "load_candles",
+                        lambda source, symbol, timeframe, limit, cycles: (
+                            generate_synthetic_series_for(Timeframe(timeframe), num_cycles=9),
+                            symbol, Timeframe(timeframe)))
+
+    server_module.build_claude_timeframe("INJUSDT", "1h", 1500)
+    stored = store.load(server_module.CLAUDE_SOURCE, "INJUSDT", "1h")
+    payload = dict(stored.payload)
+    payload["reading"] = "Wave 1 down from 6.714; above 6.224 this reading is finished."
+    store.save(server_module.CLAUDE_SOURCE, "INJUSDT", "1h", stored.last_candle_time,
+               stored.candle_count, payload, model=stored.model)
+
+    server_module.build_claude_timeframe("INJUSDT", "1h", 1500)
+    again = store.load(server_module.CLAUDE_SOURCE, "INJUSDT", "1h")
+    assert again.payload["reading"] == payload["reading"]
+    assert again.payload["accepted"], "and the count itself was still rebuilt"
