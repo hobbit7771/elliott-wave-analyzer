@@ -117,17 +117,40 @@ def find_swings(candles: List[Candle], width: int = FRACTAL_WIDTH) -> List[Swing
 
     A candidate needs `width` bars on each side, so the last `width` bars
     can never produce a swing. That delay is the no-lookahead property,
-    not a limitation to be tuned away."""
+    not a limitation to be tuned away.
+
+    TIES ARE ALLOWED ON THE LEFT and not on the right. The first version
+    demanded the candidate be strictly beyond every neighbour on both
+    sides, and the consequence is worth stating plainly: a DOUBLE BOTTOM
+    never confirmed. Two tests of the same support to the tick - the most
+    watched support pattern there is - cancelled each other out and the
+    level did not exist as far as this engine was concerned. Found by
+    feeding the tracker a clean zigzag: six swing highs, zero supports.
+
+    Requiring strictness on the right keeps the confirmation honest: the
+    swing is only a swing because of what came AFTER it, and that part
+    still has to be decisive.
+
+    Highs and lows are tested independently rather than as an if/elif,
+    because the first version silently preferred highs whenever a bar
+    could be read as either."""
     closed = [c for c in candles if c.closed]
     out: List[Swing] = []
     for i in range(width, len(closed) - width):
-        window = closed[i - width:i + width + 1]
+        left = closed[i - width:i]
+        right = closed[i + 1:i + width + 1]
         candle = closed[i]
-        if candle.high == max(c.high for c in window) and \
-                all(candle.high > c.high for c in window if c is not candle):
+
+        is_high = (all(candle.high >= c.high for c in left)
+                   and all(candle.high > c.high for c in right))
+        is_low = (all(candle.low <= c.low for c in left)
+                  and all(candle.low < c.low for c in right))
+        # A flat window reads as both, and neither reading means anything.
+        if is_high and is_low:
+            continue
+        if is_high:
             out.append(Swing(i, candle.start_ms, candle.high, "high"))
-        elif candle.low == min(c.low for c in window) and \
-                all(candle.low < c.low for c in window if c is not candle):
+        elif is_low:
             out.append(Swing(i, candle.start_ms, candle.low, "low"))
     return out
 

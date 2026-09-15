@@ -188,12 +188,25 @@ def market_snapshot(engine, symbol: str) -> Dict[str, Any]:
 
 
 def _levels_from(prebreak: Dict[str, Any], side: str) -> List[Dict[str, Any]]:
+    """The level under stress on this side, or an entry that says why
+    there is none.
+
+    An empty list is not an answer - it cannot be told apart from a bug,
+    and "no resistance identified below visible swings" was exactly that
+    ambiguity shipped as a message."""
+    kind = "support" if side == "short" else "resistance"
     block = prebreak.get(side) or {}
-    if not block.get("level"):
+    if block.get("level"):
+        return [{"price": block["level"], "tests": block.get("tests"),
+                 "break_score": block.get("break_score"), "kind": kind}]
+    diagnosis = prebreak.get("levels") or {}
+    note = diagnosis.get(f"{kind}_note") or ""
+    if not note:
         return []
-    return [{"price": block["level"], "tests": block.get("tests"),
-             "break_score": block.get("break_score"),
-             "kind": "support" if side == "short" else "resistance"}]
+    return [{"price": None, "kind": kind, "available": False, "reason": note,
+             "closed_bars": diagnosis.get("closed_bars"),
+             "swings_found": diagnosis.get("swings_found"),
+             "levels_known": diagnosis.get("levels")}]
 
 
 def timeframe_context(symbol: str, timeframe: str, base_url: str,

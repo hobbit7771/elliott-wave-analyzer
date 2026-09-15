@@ -39,7 +39,7 @@ from typing import Dict, List, Optional, Tuple
 from t3_engine.lead_engine.config import Thresholds
 from t3_engine.lead_engine.orderbook_engine import OrderBookMetrics
 from t3_engine.lead_engine.rolling import TimeSeries, clamp, scale_to_unit
-from t3_engine.lead_engine.smc_engine import Candle, find_swings
+from t3_engine.lead_engine.smc_engine import FRACTAL_WIDTH, Candle, find_swings
 
 LONG = "long"
 SHORT = "short"
@@ -96,9 +96,18 @@ class LevelTracker:
     def __init__(self, thresholds: Optional[Thresholds] = None) -> None:
         self.thresholds = thresholds or Thresholds()
         self.levels: List[Level] = []
+        # What the last rebuild actually had to work with. Kept so that
+        # "no level" can say WHY rather than just being absent - see
+        # `diagnose`.
+        self.candles_seen = 0
+        self.closed_seen = 0
+        self.swings_found = 0
 
     def rebuild(self, candles: List[Candle]) -> None:
+        self.candles_seen = len(candles)
+        self.closed_seen = sum(1 for c in candles if c.closed)
         swings = find_swings(candles)
+        self.swings_found = len(swings)
         if not swings:
             return
         tolerance = self.thresholds.compression_pct
@@ -172,6 +181,59 @@ class LevelTracker:
             return max(below, key=lambda lv: lv.price) if below else None
         above = [lv for lv in candidates if lv.price >= price]
         return min(above, key=lambda lv: lv.price) if above else None
+
+    def diagnose(self, price: float, kind: str) -> str:
+        """Why there is no level of this kind near this price.
+
+        "No resistance identified below visible swings" was the old
+        output and it is not a diagnosis - it does not say whether the
+        history was too short, whether no swing confirmed, or whether
+        every level found happens to sit on the wrong side of the current
+        price. Those are three different problems with three different
+        answers, and the first two are ours.
+
+        Returns "" when a level exists. Nothing here changes what the
+        engine does; it changes what it is able to tell you."""
+        if self.nearest(price, kind) is not None:
+            return ""
+
+        width = FRACTAL_WIDTH
+        if self.candles_seen == 0:
+            return "no candles yet: the level tracker has not been fed"
+        if self.closed_seen < (2 * width + 1):
+            return (f"only {self.closed_seen} closed bars - a confirmed swing "
+                    f"needs {2 * width + 1} (with {width} on each side)")
+        if self.swings_found == 0:
+            return (f"{self.closed_seen} closed bars and no confirmed swing yet - "
+                    f"the range is too tight for a fractal high or low")
+        same_kind = [lv for lv in self.levels if lv.kind == kind]
+        if not same_kind:
+            wanted = "high" if kind == "resistance" else "low"
+            return (f"{self.swings_found} confirmed swings, but not one swing "
+                    f"{wanted} - every swing so far is the other kind")
+        side = "below" if kind == "support" else "above"
+        nearest_wrong = (max(lv.price for lv in same_kind) if kind == "support"
+                         else min(lv.price for lv in same_kind))
+        return (f"{len(same_kind)} {kind} level(s) known but none {side} "
+                f"{price:.6g} - the nearest is {nearest_wrong:.6g}, which price "
+                f"has already passed")
+
+    def as_dict(self, price: float) -> Dict[str, object]:
+        """The tracker's own account of itself, for the health block."""
+        support = self.nearest(price, "support")
+        resistance = self.nearest(price, "resistance")
+        return {
+            "candles_seen": self.candles_seen,
+            "closed_bars": self.closed_seen,
+            "swings_found": self.swings_found,
+            "levels": len(self.levels),
+            "supports": sum(1 for lv in self.levels if lv.kind == "support"),
+            "resistances": sum(1 for lv in self.levels if lv.kind == "resistance"),
+            "nearest_support": support.price if support else None,
+            "nearest_resistance": resistance.price if resistance else None,
+            "support_note": self.diagnose(price, "support"),
+            "resistance_note": self.diagnose(price, "resistance"),
+        }
 
 
 @dataclass

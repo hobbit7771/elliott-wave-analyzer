@@ -363,6 +363,10 @@ class SymbolState:
             "prebreak": {
                 "long": {**long_break.as_dict(), "calibration": long_label},
                 "short": {**short_break.as_dict(), "calibration": short_label},
+                # What the level tracker had to work with, and why it
+                # found nothing when it found nothing. "No resistance
+                # identified below visible swings" was not a diagnosis.
+                "levels": self.prebreak.levels.as_dict(price),
             },
             "calibration": self.calibrator.summary(),
             "signal": signal.as_dict(),
