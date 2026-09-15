@@ -246,7 +246,30 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # value here and the UI keeps "Not sent" as an explicit choice.
 DEFAULT_REASONING_EFFORT = "max"
 
-BUILD_VERSION = "BUILD-CHECK-043"
+def _build_version() -> str:
+    """What is actually running, not what someone last typed.
+
+    A hardcoded badge is worse than no badge: it said BUILD-CHECK-043 for
+    days while four different builds were deployed, so the one question it
+    exists to answer - "am I looking at the new code?" - was the one
+    question it could not answer. Render sets RENDER_GIT_COMMIT; locally
+    the git checkout knows. Either way the badge is derived, never
+    remembered."""
+    commit = (os.getenv("RENDER_GIT_COMMIT") or "").strip()
+    if not commit:
+        try:
+            import subprocess
+
+            commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"], capture_output=True, text=True,
+                cwd=os.path.dirname(os.path.dirname(os.path.dirname(
+                    os.path.abspath(__file__)))), timeout=3).stdout.strip()
+        except Exception:                    # noqa: BLE001 - a missing git
+            commit = ""                      # is not a reason to fail startup
+    return f"build {commit[:7]}" if commit else "build unknown"
+
+
+BUILD_VERSION = _build_version()
 
 
 @app.get("/api/health")
@@ -1319,6 +1342,79 @@ def stop_lead_engine() -> None:
         get_lead_engine().stop()
     except Exception:                       # noqa: BLE001
         logger.exception("lead engine did not stop cleanly")
+
+
+# ---- trading on launch --------------------------------------------------
+#
+# PAPER ONLY, and that is not a placeholder to be removed later. There is
+# a live execution adapter in t3_engine/execution/, but nothing here
+# reaches it and nothing here holds an exchange credential: the engine
+# subscribes to Bybit's PUBLIC stream, which is market data, not account
+# access. Turning this into real order flow is a deliberate decision that
+# needs keys with trade permission, a risk review and a human pressing
+# something - it is not a config flag, and it should not become one by
+# accident.
+
+LIVE_AUTOSTART_ENV = "LIVE_AUTOSTART_SYMBOLS"
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("live autostart: %s=%r is not a number; using %s",
+                       name, raw, default)
+        return default
+
+
+def live_autostart_symbols() -> List[str]:
+    raw = (os.getenv(LIVE_AUTOSTART_ENV) or "").strip()
+    if not raw:
+        return []
+    return [normalize_symbol(part) for part in raw.split(",") if part.strip()]
+
+
+@app.on_event("startup")
+async def start_live_on_boot() -> None:
+    """Begin paper trading the configured symbols as the process starts.
+
+    Without this the pipeline only ran when someone opened the page and
+    pressed a button, which makes "the algorithm trades" conditional on a
+    browser being open - the same defect the Lead Engine's recorder thread
+    was added to fix.
+
+    Each symbol is started independently and its failure is contained: a
+    backfill that cannot reach Bybit must leave the other symbols, and the
+    dashboard, running."""
+    symbols = live_autostart_symbols()
+    if not symbols:
+        logger.info("live autostart: nothing configured (%s is empty)",
+                    LIVE_AUTOSTART_ENV)
+        return
+    equity = _env_float("LIVE_AUTOSTART_EQUITY", 10_000.0)
+    threshold = _env_float("LIVE_AUTOSTART_THRESHOLD", 75.0)
+    backfill = int(_env_float("LIVE_AUTOSTART_BACKFILL", 1_000.0))
+    for symbol in symbols:
+        if not symbol or symbol in _live_engines:
+            continue
+        try:
+            engine = LiveTradingEngine(symbol=symbol, initial_equity=equity,
+                                       entry_confidence_threshold=threshold)
+            filled = seed_live_history(engine, symbol, backfill)
+            _live_engines[symbol] = engine
+            _live_errors.pop(symbol, None)
+            _live_tasks[symbol] = asyncio.create_task(
+                _run_live_guarded(symbol, engine))
+            _live_started_at[symbol] = int(time.time() * 1000)
+            logger.info("live autostart: %s trading on paper "
+                        "(equity %.0f, threshold %.0f, backfilled %s)",
+                        symbol, equity, threshold, filled)
+        except Exception as exc:             # noqa: BLE001 - see docstring
+            _live_errors[symbol] = f"{type(exc).__name__}: {exc}"
+            logger.exception("live autostart: %s did not start", symbol)
 
 
 @app.on_event("startup")

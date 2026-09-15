@@ -120,6 +120,60 @@ def mcp_hello(request: Request):
     }
 
 
+@router.get("/openapi.json")
+def lead_engine_openapi(request: Request):
+    """An OpenAPI document covering THIS namespace only.
+
+    ChatGPT's Actions import a schema and then offer every operation in
+    it to the model. The application's own `/openapi.json` describes the
+    whole dashboard - wave counts, AI jobs, the live trading controls -
+    and handing that to an assistant would be both confusing and wrong:
+    the point of this namespace is that it is the read-only surface.
+
+    So the document is filtered to `/api/v1/lead-engine/*`, given the
+    public server URL and a bearer scheme, and nothing else is in it. It
+    is generated from the live routes rather than written by hand, so it
+    cannot drift from what the API actually does."""
+    blocked = _guard(request)
+    if blocked:
+        return blocked
+
+    from fastapi.openapi.utils import get_openapi
+
+    app = request.app
+    full = get_openapi(title="Lead Engine (read-only)", version="1.0.0",
+                       description=(
+                           "Live Bybit market microstructure. Read only: no "
+                           "order can be placed, closed or modified through "
+                           "any operation here. Check `signals_valid` and "
+                           "`quality` before acting on anything; treat "
+                           "pressure and break scores as MODEL SCORES unless "
+                           "a response's calibration.kind says PROBABILITY."),
+                       routes=app.routes)
+    prefix = "/api/v1/lead-engine"
+    # `/mcp` and `/openapi.json` are how a client CONNECTS, not things a
+    # model should be offered as operations. Leaving the MCP transport in
+    # an Actions schema invites an assistant to POST JSON-RPC through a
+    # REST tool, which works about as well as it sounds.
+    skip = {f"{prefix}/openapi.json", f"{prefix}/mcp"}
+    paths = {path: item for path, item in (full.get("paths") or {}).items()
+             if path.startswith(prefix) and path not in skip}
+    base = str(request.base_url).rstrip("/")
+    return {
+        "openapi": full.get("openapi", "3.1.0"),
+        "info": full["info"],
+        "servers": [{"url": base}],
+        "paths": paths,
+        "components": {
+            **(full.get("components") or {}),
+            "securitySchemes": {
+                "bearerAuth": {"type": "http", "scheme": "bearer"},
+            },
+        },
+        "security": [{"bearerAuth": []}],
+    }
+
+
 @router.get("/connect")
 def connect(request: Request):
     """How to point an AI at this engine.
