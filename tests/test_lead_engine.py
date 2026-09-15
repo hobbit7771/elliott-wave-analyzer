@@ -520,13 +520,42 @@ def test_missing_liquidations_do_not_degrade_the_feed():
     assert assess(health, _T(), now_ms).status == "OK"
 
 
-def test_a_stale_order_book_does_degrade_it():
+def test_a_stale_order_book_reports_stale_not_merely_degraded():
+    """Old data and a dead socket are different failures and now have
+    different names, so the header can no longer print "feed OK" beside a
+    nine-second book age."""
+    from t3_engine.lead_engine.health import DEGRADED, STALE_DATA
+
     now_ms = int(time.time() * 1000)
     health = StreamHealth("TESTUSDT", ws_connected=True, orderbook_synced=True,
                           last_book_ms=now_ms - 20_000, last_trade_ms=now_ms - 500,
                           last_ticker_ms=now_ms - 500)
     verdict = assess(health, _T(), now_ms)
-    assert verdict.status == "DEGRADED" and verdict.signals_enabled is False
+    assert verdict.status == STALE_DATA and verdict.signals_enabled is False
+
+    # A socket that is down is DEGRADED, not STALE: nothing is old, there
+    # is simply nothing.
+    down = StreamHealth("TESTUSDT", ws_connected=False, orderbook_synced=True,
+                        last_book_ms=now_ms - 100, last_trade_ms=now_ms - 100,
+                        last_ticker_ms=now_ms - 100)
+    assert assess(down, _T(), now_ms).status == DEGRADED
+
+
+def test_the_four_clocks_measure_four_different_things():
+    """The defect this replaces: one number printed under two names, so
+    "latency 3334ms" and "book 3.3s" in the header were the same
+    staleness twice. The case that hid is a FAST link carrying OLD data."""
+    now_ms = int(time.time() * 1000)
+    health = StreamHealth("TESTUSDT", ws_connected=True, orderbook_synced=True,
+                          last_book_ms=now_ms - 9_000, last_trade_ms=now_ms - 400,
+                          last_ticker_ms=now_ms - 400, ws_latency_ms=40.0,
+                          processing_ms=0.6)
+    payload = health.as_dict(now_ms)
+    assert payload["ws_latency_ms"] == 40.0
+    assert payload["book_age_ms"] == pytest.approx(9000, abs=50)
+    assert payload["trade_age_ms"] == pytest.approx(400, abs=50)
+    assert payload["processing_ms"] == 0.6
+    assert payload["ws_latency_ms"] < payload["book_age_ms"] / 100
 
 
 # ---- bus and storage ----------------------------------------------------

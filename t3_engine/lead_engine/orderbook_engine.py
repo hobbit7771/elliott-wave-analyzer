@@ -293,6 +293,13 @@ class OrderBook:
             self.synced = True
             self.updated_at_ms = stamp or self.updated_at_ms
             self._pending_exec = {"bid": 0.0, "ask": 0.0}
+            # Walls are registered from the snapshot too, not only from
+            # deltas. Found by a test: a book that synced and then received
+            # few updates had no walls at all, because the only call site
+            # was in the delta branch - so a large resting order sitting
+            # untouched, which is exactly the interesting case, was
+            # invisible until something else moved.
+            self._track_walls(stamp)
             return True
 
         if kind != "delta":
@@ -444,6 +451,7 @@ class OrderBook:
                     else:
                         existing.observe(size, stamp)
                         live[key] = existing
+        self._touch_walls()
         for key, wall in self._walls.items():
             if key in live:
                 continue
@@ -455,12 +463,35 @@ class OrderBook:
                 self._spoofs.add(stamp, wall)
         self._walls = live
 
+    def _touch_walls(self) -> None:
+        """Record whether the market has actually come to each wall.
+
+        A bid wall is reached when the OFFER falls to it - when someone is
+        willing to sell at its price. Checked on every update and latched,
+        because by the time a wall disappears the book has already moved
+        and the question "did price ever get there" cannot be answered
+        from the current state."""
+        best_bid, best_ask = self.best_bid(), self.best_ask()
+        for wall in self._walls.values():
+            if wall.reached:
+                continue
+            if wall.side == "bid" and best_ask is not None and best_ask <= wall.price:
+                wall.reached = True
+            elif wall.side == "ask" and best_bid is not None and best_bid >= wall.price:
+                wall.reached = True
+
     def _price_reached(self, wall: Wall) -> bool:
-        if wall.side == "bid":
-            best = self.best_bid()
-            return best is not None and best <= wall.price
-        best = self.best_ask()
-        return best is not None and best >= wall.price
+        """Whether the market ever came to this wall.
+
+        The first version asked whether the best bid was at or below a bid
+        wall's price - which is true the instant the wall is PULLED, since
+        the touch then drops below it. So every pull looked like a wall
+        that had been traded to, and no spoof was ever counted. Found by
+        the test that expected one.
+
+        The question is answered from the latch above and from executed
+        volume, both of which are recorded while the wall still exists."""
+        return wall.reached or wall.executed > 0
 
     # ---- views ----
 

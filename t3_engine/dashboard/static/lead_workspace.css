@@ -1,0 +1,119 @@
+/* Market Workspace layout. Its own file, its own ids - it renders on its
+   own page and cannot affect the dashboard's tabs. */
+
+:root { color-scheme: dark; }
+body.le-root {
+  margin: 0; background: #0e1117; color: #c7cbd3;
+  font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-variant-numeric: tabular-nums;
+  -webkit-text-size-adjust: 100%;
+}
+#wsRoot { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+
+#wsHead {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 12px; border-bottom: 1px solid #1b1f29; background: #11151d;
+  flex-wrap: wrap; flex: 0 0 auto;
+  padding-top: max(8px, env(safe-area-inset-top));
+}
+.wsHeadLeft, .wsHeadRight { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.wsSymbol { font-size: 15px; font-weight: 700; letter-spacing: .04em; color: #e6e9ef; }
+.wsPrice { font-size: 17px; font-weight: 600; color: #e6e9ef; min-width: 96px; }
+
+.wsTf { display: flex; gap: 2px; }
+.wsTf button {
+  background: #161b25; border: 1px solid #232733; color: #9aa3b2;
+  padding: 4px 9px; font-size: 11px; cursor: pointer; border-radius: 3px;
+}
+.wsTf button.active { background: #1d2635; color: #7dd3fc; border-color: #2c4a63; }
+
+.panel-btn {
+  background: #161b25; border: 1px solid #232733; color: #c7cbd3;
+  padding: 5px 10px; font-size: 11px; cursor: pointer; border-radius: 3px;
+  text-decoration: none; display: inline-block;
+}
+.panel-btn:hover { border-color: #38bdf8; color: #7dd3fc; }
+.panel-btn.active { background: #1d2635; color: #7dd3fc; border-color: #2c4a63; }
+
+.wsMenu {
+  position: absolute; z-index: 40; top: 46px; right: 12px; background: #11151d;
+  border: 1px solid #232733; border-radius: 6px; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 6px; min-width: 210px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.5);
+}
+.wsMenu[hidden] { display: none; }
+.wsMenu label { display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; }
+.wsMenu hr { border: none; border-top: 1px solid #1b1f29; margin: 4px 0; width: 100%; }
+.wsMenuTitle { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: #7c869a; }
+.wsMenuRow { display: flex; gap: 6px; flex-wrap: wrap; }
+.wsRatios { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+.wsRatios label { font-size: 11px; }
+
+#wsMain { display: flex; flex: 1 1 auto; min-height: 0; }
+#wsChartPane { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+#wsChart { flex: 1 1 auto; min-height: 260px; touch-action: none; }
+#wsChartNote { padding: 4px 12px; flex: 0 0 auto; }
+
+#wsPanel {
+  width: 360px; flex: 0 0 360px; border-left: 1px solid #1b1f29;
+  overflow-y: auto; background: #0e1117; padding: 8px;
+  -webkit-overflow-scrolling: touch;
+}
+#wsPanel .le-grid { grid-template-columns: 1fr; gap: 8px; }
+#wsPanel .le-card { border: 1px solid #232733; border-radius: 6px; background: #11151d;
+                    padding: 8px 10px; }
+#wsPanel .le-card h3 { margin: 0 0 6px; font-size: 10px; letter-spacing: .08em;
+                       text-transform: uppercase; color: #7c869a; font-weight: 600; }
+#wsPanel .le-row { display: flex; justify-content: space-between; gap: 10px;
+                   padding: 2px 0; border-bottom: 1px solid #1a1f29; }
+#wsPanel .le-row:last-child { border-bottom: none; }
+#wsPanel .le-row .k { color: #8a93a5; white-space: nowrap; }
+#wsPanel .le-row .v { color: #d7dbe3; text-align: right; }
+#wsPanel .le-row .v.up { color: #34d399; }
+#wsPanel .le-row .v.down { color: #f87171; }
+#wsPanel .le-row .v.dim { color: #6b7488; }
+#wsPanel .le-note { color: #7c869a; font-size: 11px; line-height: 1.5; margin: 5px 0; }
+#wsPanel .le-meter { margin: 6px 0; }
+#wsPanel .le-meter .lbl { display: flex; justify-content: space-between; font-size: 10px;
+                          color: #8a93a5; margin-bottom: 3px; }
+#wsPanel .le-meter .track { height: 10px; background: #1a1f29; border-radius: 5px;
+                            overflow: hidden; }
+#wsPanel .le-meter .fill { height: 100%; width: 0; }
+#wsPanel .le-meter.long .fill { background: linear-gradient(90deg, #12614e, #34d399); }
+#wsPanel .le-meter.short .fill { background: linear-gradient(90deg, #6b2222, #f87171); }
+#wsPanel .le-meter.break .fill { background: linear-gradient(90deg, #4c3a86, #a78bfa); }
+#wsPanel .le-feature { display: grid; grid-template-columns: 118px 1fr 40px; gap: 6px;
+                       align-items: center; padding: 2px 0; font-size: 11px; }
+#wsPanel .le-feature .bar { height: 6px; background: #1a1f29; border-radius: 3px; }
+#wsPanel .le-feature .bar > i { display: block; height: 100%; border-radius: 3px;
+                                background: #7c8cf8; width: 0; }
+#wsPanel .le-feature .num { text-align: right; color: #9aa3b2; }
+
+#wsMobileTabs { display: none; }
+
+/* Fullscreen: the chart and the minimum that makes it usable. */
+body.ws-fullscreen #wsPanel,
+body.ws-fullscreen #wsMobileTabs { display: none !important; }
+body.ws-fullscreen #wsBack { display: none; }
+body.ws-fullscreen #wsChartPane { flex: 1 1 100%; }
+
+@media (max-width: 860px) {
+  #wsMain { flex-direction: column; }
+  #wsPanel { width: auto; flex: 1 1 auto; border-left: none; border-top: 1px solid #1b1f29; }
+  /* On a phone the chart gets the screen and the panel is a second view,
+     not a half-screen sidebar - the brief's requirement that the chart be
+     analysable without panels eating half the display. */
+  #wsChartPane { flex: 1 1 auto; }
+  #wsChartPane.hidden, #wsPanel.hidden { display: none; }
+  #wsMobileTabs {
+    display: flex; flex: 0 0 auto; border-top: 1px solid #1b1f29; background: #11151d;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  #wsMobileTabs button {
+    flex: 1; background: none; border: none; color: #8a93a5; padding: 11px;
+    font-size: 12px; cursor: pointer;
+  }
+  #wsMobileTabs button.active { color: #7dd3fc; box-shadow: inset 0 2px 0 #38bdf8; }
+  .wsMenu { left: 12px; right: 12px; top: auto; bottom: 58px; }
+  .wsHeadRight { width: 100%; justify-content: space-between; }
+}
