@@ -99,3 +99,8 @@ Recorded because each one is now a test:
   bars built from trades.
 * **Direction reported as "long" on a short market.** Chosen from the
   pre-break probabilities alone, and zero is not less than zero.
+* **Nothing persisted unless a browser asked.** `api.state()` filed a
+  feature row and nothing else wrote at all, so a signal that fired
+  overnight left no trace and `lead_engine_liquidations` could never fill.
+  Found after the first live deploy, by looking for rows that were not
+  there. `storage.Recorder` now writes on the engine's own clock.

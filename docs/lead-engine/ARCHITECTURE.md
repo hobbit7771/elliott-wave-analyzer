@@ -62,6 +62,7 @@ import across the line.
 | web worker | the existing app | serves HTTP, including `/api/lead-engine/*` |
 | `lead-engine-ws` | `bybit_ws.BybitLeadStream` | its own asyncio loop, the socket, reconnects |
 | `lead-engine-oi` | `oi_engine.OpenInterestPoller` | REST polling for open interest |
+| `lead-engine-recorder` | `storage.Recorder` | files features, signal transitions and liquidations on its own clock |
 
 The socket has its **own event loop on its own thread**. The web process's
 loop is never used, so a stall in the stream cannot stall a request, and

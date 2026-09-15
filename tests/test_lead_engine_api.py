@@ -314,3 +314,86 @@ def test_the_replay_endpoint_scores_a_capture(switched_on):
     for key in ("precision_pct", "recall_pct", "false_positives",
                 "median_lead_seconds", "mfe", "mae", "expected_value"):
         assert key in body, f"{key} missing from the replay report"
+
+
+# ---- persistence without a browser --------------------------------------
+
+def _engine_with_events():
+    import time as _time
+
+    from t3_engine.lead_engine.storage import Storage
+
+    config = LeadEngineConfig(enabled=True, symbols=["INJUSDT"])
+    engine = LeadEngine(config, storage=Storage())
+    now = int(_time.time() * 1000)
+    engine.handle_message("orderbook.50.INJUSDT", {
+        "topic": "orderbook.50.INJUSDT", "type": "snapshot", "ts": now,
+        "data": {"u": 1, "b": [["5.70", "100"]], "a": [["5.702", "60"]]}})
+    for i in range(20):
+        stamp = now + i * 100
+        engine.handle_message("publicTrade.INJUSDT", {
+            "topic": "publicTrade.INJUSDT", "ts": stamp,
+            "data": [{"T": stamp, "S": "Sell", "v": "5", "p": "5.70"}]})
+    for i in range(3):
+        stamp = now + 5_000 + i * 10
+        engine.handle_message("allLiquidation.INJUSDT", {
+            "topic": "allLiquidation.INJUSDT", "ts": stamp,
+            "data": [{"T": stamp, "S": "Sell", "v": "500", "p": "5.70"}]})
+    return engine
+
+
+def test_the_engine_files_what_it_sees_without_a_browser_asking():
+    """Before this, nothing was persisted unless someone opened the tab:
+    a signal that fired at 03:00 left no trace and the liquidation table
+    stayed permanently empty. A monitor has to write on its own clock."""
+    from t3_engine.lead_engine.storage import Recorder
+
+    engine = _engine_with_events()
+    recorder = Recorder(engine, engine.storage)
+    assert recorder.sweep_once() > 0
+    buffered = engine.storage.stats()["buffered"]
+    assert buffered["lead_engine_features"] == 1
+    assert buffered["lead_engine_signals"] == 1
+    assert buffered["lead_engine_liquidations"] == 3
+
+
+def test_a_signal_is_filed_once_per_transition_not_once_per_tick():
+    """`changed_at` does not move while a state persists, which is exactly
+    the marker that makes this possible."""
+    from t3_engine.lead_engine.storage import Recorder
+
+    engine = _engine_with_events()
+    recorder = Recorder(engine, engine.storage)
+    recorder.sweep_once()
+    recorder.sweep_once()
+    recorder.sweep_once()
+    buffered = engine.storage.stats()["buffered"]
+    assert buffered["lead_engine_signals"] == 1, "one transition, one row"
+    assert buffered["lead_engine_liquidations"] == 3, "each event filed once"
+    assert buffered["lead_engine_features"] == 3, "a feature row per sweep"
+
+
+def test_the_recorder_never_raises_out_of_a_sweep(monkeypatch):
+    from t3_engine.lead_engine.storage import Recorder
+
+    engine = _engine_with_events()
+    recorder = Recorder(engine, engine.storage)
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("storage is on fire")
+
+    monkeypatch.setattr(engine.storage, "record_features", explode)
+    recorder.sweep_once()          # must not raise
+
+
+def test_starting_the_engine_starts_the_recorder_and_files_a_session():
+    config = LeadEngineConfig(enabled=True, symbols=["INJUSDT"])
+    engine = LeadEngine(config, connect_fn=lambda url: None,
+                        oi_fetcher=lambda s, b: None)
+    assert engine.start() is True
+    try:
+        assert engine.recorder is not None and engine.recorder.running()
+        assert engine.storage.stats()["buffered"].get("lead_engine_sessions", 0) >= 1
+        assert engine.status()["recorder"]["running"] is True
+    finally:
+        engine.stop()
