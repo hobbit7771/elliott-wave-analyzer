@@ -29,7 +29,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # The single permitted shared-infrastructure import. See the docstring.
 from t3_engine.database import supabase_rest
@@ -301,6 +301,7 @@ class Recorder:
         self._last_liquidation: Dict[str, int] = {}
         self.sweeps = 0
         self.rows = 0
+        self._last_heartbeat: Optional[Tuple[float, int]] = None
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -338,7 +339,41 @@ class Recorder:
             except Exception:                    # noqa: BLE001 - storage
                 logger.debug("lead_engine recorder: %s not filed", symbol, exc_info=True)
         self.rows += written
+        self._heartbeat()
         return written
+
+    def _heartbeat(self) -> None:
+        """One line a sweep with the socket's own counters.
+
+        The ingest rate is otherwise only visible to whoever can reach
+        `/api/lead-engine/status` in a browser, which is no help when the
+        question is "what was it doing an hour ago". Rate is computed
+        between sweeps rather than since start, so a quiet patch shows as
+        a quiet patch instead of being averaged away."""
+        stream = getattr(self.engine, "stream", None)
+        if stream is None:
+            return
+        stats = stream.stats
+        now = time.time()
+        messages = int(getattr(stats, "messages", 0) or 0)
+        rate = None
+        if self._last_heartbeat is not None:
+            previous_time, previous_messages = self._last_heartbeat
+            elapsed = now - previous_time
+            if elapsed > 0:
+                rate = (messages - previous_messages) / elapsed
+        self._last_heartbeat = (now, messages)
+        snapshot = stats.as_dict()
+        logger.info(
+            "lead_engine feed: connected=%s messages=%d rate=%s/s "
+            "latency=%.1fms connects=%d reconnects=%d topics=%d symbols=%d",
+            bool(snapshot.get("connected")), messages,
+            "?" if rate is None else f"{rate:.1f}",
+            float(snapshot.get("latency_ms") or 0.0),
+            int(snapshot.get("connects") or 0),
+            int(snapshot.get("reconnects") or 0),
+            int(snapshot.get("subscribed_topics") or 0),
+            len(self.engine.states))
 
     def _record_transition(self, symbol: str, state) -> int:
         """Only when the state actually CHANGED.
