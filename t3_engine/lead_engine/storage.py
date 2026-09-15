@@ -261,3 +261,131 @@ alter table lead_engine_signals      enable row level security;
 alter table lead_engine_liquidations enable row level security;
 alter table lead_engine_backtests    enable row level security;
 """
+
+
+class Recorder:
+    """Files what the engine sees, whether or not anyone is looking.
+
+    Without this the engine is only persisted when a browser asks for a
+    frame: `api.state()` files a feature row, and nothing else writes at
+    all. That is fine for a dashboard and wrong for a monitor. A signal
+    that fired at 03:00 with the tab closed left no trace, the
+    liquidation tables stayed permanently empty, and a replay could only
+    ever be built from a capture somebody remembered to take.
+
+    So a thread walks the symbols on its own clock and writes three
+    things: a feature row per symbol per interval, every signal
+    TRANSITION as it happens (not the state each tick - that would be the
+    same row several times a second), and liquidation events once each.
+
+    It never touches the stream thread and never raises into it: the
+    engine's snapshot is read through the same facade any other caller
+    uses, and every failure is swallowed into the storage buffer's own
+    accounting.
+    """
+
+    # How often a feature row is written per symbol. Fifteen seconds is
+    # about the granularity a pre-break setup develops at; a row per
+    # frame would be four a second per symbol and would tell no one
+    # anything more.
+    DEFAULT_INTERVAL_SECONDS = 15.0
+
+    def __init__(self, engine, storage: "Storage",
+                 interval_seconds: float = DEFAULT_INTERVAL_SECONDS) -> None:
+        self.engine = engine
+        self.storage = storage
+        self.interval_seconds = max(2.0, float(interval_seconds))
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._last_signal: Dict[str, float] = {}
+        self._last_liquidation: Dict[str, int] = {}
+        self.sweeps = 0
+        self.rows = 0
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="lead-engine-recorder",
+                                        daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self.storage.flush()
+
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def sweep_once(self) -> int:
+        """One pass over every symbol. Exposed so a test can drive it
+        without a thread or a clock. Returns rows written to the buffer."""
+        written = 0
+        self.sweeps += 1
+        for symbol in list(self.engine.states):
+            state = self.engine.states.get(symbol)
+            if state is None:
+                continue
+            try:
+                frame = state.snapshot()
+            except Exception:                    # noqa: BLE001 - a symbol
+                continue                         # that cannot be read is skipped
+            try:
+                self.storage.record_features(symbol, frame)
+                written += 1
+                written += self._record_transition(symbol, state)
+                written += self._record_liquidations(symbol, state)
+            except Exception:                    # noqa: BLE001 - storage
+                logger.debug("lead_engine recorder: %s not filed", symbol, exc_info=True)
+        self.rows += written
+        return written
+
+    def _record_transition(self, symbol: str, state) -> int:
+        """Only when the state actually CHANGED.
+
+        `SignalMachine.current.changed_at` does not move while a state
+        persists (deliberately - see signal_machine), which is exactly the
+        marker needed here: one row per transition, not one per tick."""
+        current = state.signals.current
+        stamp = float(current.changed_at or 0.0)
+        if not stamp or self._last_signal.get(symbol) == stamp:
+            return 0
+        self._last_signal[symbol] = stamp
+        self.storage.record_signal(symbol, current.as_dict())
+        return 1
+
+    def _record_liquidations(self, symbol: str, state) -> int:
+        """Events newer than the last one filed, so a restart does not
+        re-file the window the engine is still holding in memory."""
+        since = self._last_liquidation.get(symbol, 0)
+        newest = since
+        written = 0
+        for item in state.liquidations.events.all():
+            stamp = int(getattr(item, "timestamp_ms", 0))
+            if stamp <= since:
+                continue
+            self.storage.record_liquidation(symbol, {
+                "at": stamp,
+                "side": "long" if getattr(item, "is_long", False) else "short",
+                "price": float(getattr(item, "price", 0.0)),
+                "quantity": float(getattr(item, "quantity", 0.0)),
+                "notional": float(getattr(item, "notional", 0.0)),
+            })
+            written += 1
+            newest = max(newest, stamp)
+        self._last_liquidation[symbol] = newest
+        return written
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.sweep_once()
+                self.storage.flush()
+            except Exception:                    # noqa: BLE001 - a recorder
+                logger.exception("lead_engine recorder sweep failed")   # that dies
+            self._stop.wait(self.interval_seconds)                      # is worse
+
+    def stats(self) -> Dict[str, Any]:
+        return {"running": self.running(), "sweeps": self.sweeps,
+                "rows_buffered": self.rows,
+                "interval_seconds": self.interval_seconds}

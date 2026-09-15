@@ -38,6 +38,7 @@ from t3_engine.lead_engine.config import BTC_SYMBOL, LeadEngineConfig
 from t3_engine.lead_engine.liquidation_engine import liquidation_from_message
 from t3_engine.lead_engine.oi_engine import OpenInterestPoller
 from t3_engine.lead_engine.smc_engine import candle_from_kline
+from t3_engine.lead_engine.storage import Recorder, Storage
 from t3_engine.lead_engine.state import SymbolState
 from t3_engine.lead_engine.trade_flow import Trade
 
@@ -70,6 +71,8 @@ class LeadEngine:
         self._storage = storage
         self.stream: Optional[BybitLeadStream] = None
         self.oi_poller: Optional[OpenInterestPoller] = None
+        self.storage: Storage = storage or Storage()
+        self.recorder: Optional[Recorder] = None
         for symbol in self.config.symbols:
             self._ensure(symbol)
 
@@ -114,6 +117,19 @@ class LeadEngine:
                 fetcher=self._oi_fetcher,
             )
             self.oi_poller.start()
+            # Persist what the engine sees whether or not a browser is
+            # open. Without this the tables only fill when someone looks
+            # at the tab, which makes a 24/7 monitor into a dashboard.
+            self.recorder = Recorder(self, self.storage)
+            self.recorder.start()
+            self.storage.record_session({
+                "started_at": int(time.time() * 1000),
+                "symbols": ",".join(self.config.symbols),
+                "config": {"weights": self.config.weights.as_dict(),
+                           "orderbook_depth": self.config.orderbook_depth,
+                           "kline_intervals": list(self.config.kline_intervals)},
+                "note": "lead engine start",
+            })
             self.started_at = time.time()
             self.start_error = ""
             logger.info("lead_engine: started on %d symbols", len(self.config.symbols))
@@ -128,6 +144,10 @@ class LeadEngine:
             self.stream.stop()
         if self.oi_poller is not None:
             self.oi_poller.stop()
+        if self.recorder is not None:
+            # Flushes what is buffered on the way out, so a clean shutdown
+            # does not throw away the last interval's rows.
+            self.recorder.stop()
         self.started_at = None
 
     def running(self) -> bool:
@@ -324,6 +344,8 @@ class LeadEngine:
             "start_error": self.start_error,
             "stream": stream,
             "oi_polling": bool(self.oi_poller and self.oi_poller.running()),
+            "recorder": self.recorder.stats() if self.recorder else None,
+            "storage": self.storage.stats(),
             "symbols": rows,
             "weights": self.config.weights.as_dict(),
             "bus_published": self.bus.published,

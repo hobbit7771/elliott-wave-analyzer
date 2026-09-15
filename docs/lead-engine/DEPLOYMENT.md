@@ -51,6 +51,14 @@ reaches nothing.
 **Without them the engine still runs.** Storage degrades to a bounded
 in-memory buffer and `/status` reports `storage.configured: false`.
 
+Writing happens on the engine's **own clock**, not when a browser asks:
+`storage.Recorder` walks every symbol every 15 seconds and files a feature
+row per symbol, every signal **transition** as it happens, and each
+liquidation once. Before that existed nothing was persisted unless someone
+had the tab open — a signal that fired at 03:00 left no trace and the
+liquidation table stayed permanently empty. `/status` carries
+`recorder.sweeps` and `storage.written` so it can be checked.
+
 ## Dependencies
 
 `t3_engine/lead_engine/requirements.txt`. Every package there is already a
