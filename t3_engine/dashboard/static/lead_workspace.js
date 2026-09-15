@@ -171,6 +171,12 @@
         ws.uiLatencyMs = performance.now() - began;
         ws.fetches += 1;
         return data;
+      }, function (e) {
+        // Marked, so a caller can tell a dropped poll (ignorable) from a
+        // bug in its own success path (not ignorable).
+        var err = e instanceof Error ? e : new Error(String(e));
+        err.__fetch = true;
+        throw err;
       });
   }
 
@@ -285,7 +291,13 @@
   function mountPanel() {
     var body = el('wsPanelBody');
     if (ws.panel) return;
-    ws.panel = new LP().Panel(body, { refreshMs: REFRESH_MS });
+    // Parenthesised deliberately: `new LP().Panel(...)` parses as
+    // `(new LP()).Panel(...)`, which calls Panel as a method instead of a
+    // constructor and quietly yields undefined.
+    ws.panel = new (LP().Panel)(body, { refreshMs: REFRESH_MS });
+    ws.panel.paint = function (frame) {
+      global.LeadBlocks.applyFrame(ws.panel, frame, { uiLatencyMs: ws.uiLatencyMs });
+    };
     body.innerHTML = global.LeadBlocks.buildBlocks(ws.panel);
     ws.panel.collect();
   }
@@ -300,12 +312,19 @@
         ws.frame = data;
         mountPanel();
         ws.panel.push(data);
-        global.LeadBlocks.applyFrame(ws.panel, data, { uiLatencyMs: ws.uiLatencyMs });
         renderHeader(data);
         applyTick(Number(data.price), null);
         updateMarkers(data);
       })
-      .catch(function () { /* one dropped poll is not an error worth shouting */ });
+      .catch(function (e) {
+        // A dropped poll is not worth shouting about, but a THROW inside
+        // the success path is - swallowing it leaves the page sitting at
+        // "—" with no clue why.
+        if (e && e.__fetch) return;
+        if (global.console) console.error('lead workspace frame failed', e);
+        var note = el('wsChartNote');
+        if (note) note.textContent = 'Frame update failed: ' + (e && e.message || e);
+      });
   }
 
   function renderHeader(frame) {

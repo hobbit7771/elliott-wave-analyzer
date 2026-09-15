@@ -47,6 +47,10 @@
     var body = el('leBody');
     if (!body || store.panel) return;
     store.panel = new global.LeadPanel.Panel(body, { refreshMs: REFRESH_MS });
+    store.panel.paint = function (frame) {
+      global.LeadBlocks.applyFrame(store.panel, frame,
+                                   { uiLatencyMs: store.uiLatencyMs });
+    };
     body.innerHTML = global.LeadBlocks.buildBlocks(store.panel);
     store.panel.collect();
   }
@@ -170,7 +174,6 @@
         // Coalesced: the newest frame replaces any pending one, and the
         // panel paints at most every REFRESH_MS.
         store.panel.push(data);
-        global.LeadBlocks.applyFrame(store.panel, data, { uiLatencyMs: store.uiLatencyMs });
       })
       .catch(function (e) { store.error = e.message || 'state failed'; });
   }

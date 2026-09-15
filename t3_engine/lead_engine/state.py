@@ -22,6 +22,7 @@ Two details are load-bearing:
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -103,6 +104,12 @@ class SymbolState:
         # already bounded is scaled against this instrument's own recent
         # history rather than a constant - see normalize.py.
         self.normalizer = Normalizer(self.symbol)
+        # snapshot() is not a read. It pushes normalisation samples,
+        # opens calibration observations and advances the signal machine,
+        # and it is called from the request thread, the recorder thread
+        # and replay. One at a time, or two callers double-count the same
+        # tick and race each other's deques.
+        self._snapshot_lock = threading.RLock()
         self.calibrator = Calibrator(self.symbol)
         self.last_price: Optional[float] = None
         self.ticker: Dict[str, Any] = {}
@@ -208,11 +215,22 @@ class SymbolState:
         price = self.last_price or self.book.midpoint()
 
         # BTC's own flow and book, for the lead layer to carry across.
+        #
+        # Read from BTC's LAST COMPUTED frame rather than re-scored here.
+        # Re-scoring would push a sample into BTC's rolling normaliser
+        # once per tracked symbol per tick - seven symbols, seven copies
+        # of the same observation, which corrupts BTC's own z-scores -
+        # and it would do it from whichever thread happened to be asking,
+        # racing BTC's own snapshot. Using what BTC reported is both
+        # cheaper and the number BTC actually stands behind.
         btc_flow = btc_book = None
         if btc_state is not None and btc_state is not self:
-            if len(btc_state.flow.trades):
-                btc_flow = score_flow(btc_state.flow, btc_state.cvd,
-                                      btc_state.normalizer).score
+            btc_frame = btc_state.cached_snapshot()
+            if btc_frame:
+                layers_block = (btc_frame.get("pressure") or {}).get("layers") or {}
+                flow_block = layers_block.get("flow") or {}
+                if flow_block.get("score") is not None:
+                    btc_flow = float(flow_block["score"])
             if btc_state.book.synced:
                 btc_book = btc_state.book.pressure_component()
 
@@ -226,13 +244,27 @@ class SymbolState:
                                        is_btc=self.symbol == BTC_SYMBOL),
         }
 
+    def cached_snapshot(self) -> Optional[Dict[str, Any]]:
+        """The last computed frame, or None. Never recomputes - callers
+        that need one computed call `snapshot()`."""
+        return self._snapshot
+
     def snapshot(self, force: bool = False, now: Optional[float] = None,
                  btc_state: Optional["SymbolState"] = None) -> Dict[str, Any]:
         now = time.time() if now is None else now
+        # Checked before taking the lock as well as after: a cache hit is
+        # the common case and should not queue behind a recompute.
         if not force and self._snapshot is not None and \
                 (now - self._snapshot_at) < self.config.recompute_interval_seconds:
             return self._snapshot
+        with self._snapshot_lock:
+            if not force and self._snapshot is not None and \
+                    (now - self._snapshot_at) < self.config.recompute_interval_seconds:
+                return self._snapshot
+            return self._compute_snapshot(force, now, btc_state)
 
+    def _compute_snapshot(self, force: bool, now: float,
+                          btc_state: Optional["SymbolState"]) -> Dict[str, Any]:
         now_ms = int(now * 1000)
         book_metrics = self.book.metrics()
         layers = self.layer_scores(btc_state)

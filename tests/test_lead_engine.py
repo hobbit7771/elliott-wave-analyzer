@@ -599,3 +599,96 @@ def test_microprice_deltas_cover_the_four_horizons():
                            "microprice_delta_3s", "microprice_delta_5s"}
     assert state.bias() == "bullish"
     assert state.pressure_component() > 0
+
+
+# ---- concurrency: the socket thread and a request thread at once --------
+
+def test_reading_state_while_the_tape_runs_never_raises():
+    """The failure this pins down was a 500 under load, not a crash in a
+    test: the socket thread appends to a TimeSeries deque while a request
+    thread walks the same deque to answer /state, and CPython raises
+    `RuntimeError: deque mutated during iteration`. Intermittent, load
+    dependent, and invisible until a browser is actually polling."""
+    import threading
+
+    from t3_engine.lead_engine.config import LeadEngineConfig
+    from t3_engine.lead_engine.engine import LeadEngine
+
+    engine = LeadEngine(LeadEngineConfig(enabled=True, symbols=["BTCUSDT", "INJUSDT"]))
+    now = int(time.time() * 1000)
+    tick = 0.001
+    price = 5.70
+    engine.handle_message("orderbook.50.INJUSDT", {
+        "topic": "orderbook.50.INJUSDT", "type": "snapshot", "ts": now,
+        "data": {"u": 1,
+                 "b": [[f"{price - (i + 1) * tick:.4f}", "100"] for i in range(50)],
+                 "a": [[f"{price + (i + 1) * tick:.4f}", "60"] for i in range(50)]}})
+
+    stop = threading.Event()
+    failures = []
+
+    def ingest():
+        update_id = 1
+        index = 0
+        try:
+            while not stop.is_set():
+                stamp = int(time.time() * 1000)
+                update_id += 1
+                index += 1
+                engine.handle_message("publicTrade.INJUSDT", {
+                    "topic": "publicTrade.INJUSDT", "ts": stamp,
+                    "data": [{"T": stamp, "S": "Buy" if index % 2 else "Sell",
+                              "v": "3", "p": f"{price:.4f}"}]})
+                engine.handle_message("orderbook.50.INJUSDT", {
+                    "topic": "orderbook.50.INJUSDT", "type": "delta", "ts": stamp,
+                    "data": {"u": update_id,
+                             "b": [[f"{price - tick:.4f}", f"{100 + index % 7}"]],
+                             "a": [[f"{price + tick:.4f}", f"{60 + index % 5}"]]}})
+        except Exception as exc:                      # noqa: BLE001
+            failures.append(("ingest", exc))
+
+    def read():
+        try:
+            for _ in range(200):
+                engine.get_state("INJUSDT", force=True)
+        except Exception as exc:                      # noqa: BLE001
+            failures.append(("read", exc))
+
+    writer = threading.Thread(target=ingest, daemon=True)
+    writer.start()
+    readers = [threading.Thread(target=read) for _ in range(3)]
+    for reader in readers:
+        reader.start()
+    for reader in readers:
+        reader.join(timeout=60)
+    stop.set()
+    writer.join(timeout=5)
+
+    assert not failures, failures
+
+
+def test_btc_flow_is_read_from_btcs_own_frame_not_rescored():
+    """Re-scoring BTC's flow for every tracked symbol pushed the same
+    observation into BTC's rolling normaliser once per symbol per tick,
+    which corrupts BTC's own z-scores."""
+    from t3_engine.lead_engine.config import LeadEngineConfig
+    from t3_engine.lead_engine.engine import LeadEngine
+
+    engine = LeadEngine(LeadEngineConfig(
+        enabled=True, symbols=["BTCUSDT", "INJUSDT", "SOLUSDT"]))
+    now = int(time.time() * 1000)
+    for index in range(40):
+        stamp = now + index * 100
+        engine.handle_message("publicTrade.BTCUSDT", {
+            "topic": "publicTrade.BTCUSDT", "ts": stamp,
+            "data": [{"T": stamp, "S": "Buy", "v": "1", "p": "64000"}]})
+
+    btc = engine.states["BTCUSDT"]
+    feature = btc.normalizer.feature("cvd_slope_60s")
+    engine.get_state("BTCUSDT", force=True)
+    after_own = len(feature.samples)
+    # Two OTHER symbols each take a snapshot. Neither may add a sample to
+    # BTC's history.
+    engine.get_state("INJUSDT", force=True)
+    engine.get_state("SOLUSDT", force=True)
+    assert len(feature.samples) == after_own

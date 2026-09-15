@@ -86,6 +86,11 @@
     this.writes = 0;
     this.skipped = 0;
     this.mounted = false;
+    /* What a scheduled repaint actually does. The panel owns the timing
+       and the diffing; the caller owns what a frame means. Assignable
+       after construction too, because the block renderer needs the panel
+       it is painting into. */
+    this.paint = this.options.paint || function () {};
   }
 
   /* Register a value cell and return its HTML. The element is looked up
