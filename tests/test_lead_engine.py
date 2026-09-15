@@ -786,3 +786,10 @@ def test_the_recorder_reports_the_feed_rate_between_sweeps(caplog):
     assert len(lines) == 2
     assert "rate=?/s" in lines[0], lines[0]
     assert "messages=900" in lines[1] and "rate=?/s" not in lines[1], lines[1]
+    # Everything BUILD-CHECK-044 item 11 measures has to be readable from
+    # the deployment's own logs, because that is the only place a
+    # thirty-minute live run can be checked from.
+    for field in ("book_age_median=", "book_age_p95=", "gaps=", "resyncs=",
+                  "data_failure=", "queue=", "dropped=", "net_latency=",
+                  "queue_wait="):
+        assert field in lines[1], f"{field} missing from {lines[1]}"
