@@ -30,7 +30,7 @@ feature was computed.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from t3_engine.lead_engine.rolling import clamp
 
@@ -210,6 +210,11 @@ class SmcEngine:
         self.interval = interval
         self.candles: List[Candle] = []
         self._trend = RANGING
+        # The memoised state and the bar it belongs to. See `state()`:
+        # the computation advances `_trend`, so without this a second
+        # read of the same bar turns CHoCH into BOS.
+        self._state_key: Optional[Tuple[int, int]] = None
+        self._state: Optional[SmcState] = None
         self._last_bos_level: Optional[float] = None
 
     def update(self, candle: Candle) -> None:
@@ -224,14 +229,48 @@ class SmcEngine:
             self.candles.append(candle)
         if len(self.candles) > MAX_CANDLES:
             self.candles = self.candles[-MAX_CANDLES:]
+        # A trimmed series changes how many closed bars there are, which
+        # is half the memo key - but say it out loud rather than relying
+        # on that.
+        self._state_key = None
 
     def state(self) -> SmcState:
-        out = SmcState(symbol=self.symbol, interval=self.interval)
+        """The structure, as of the newest CLOSED bar.
+
+        MEMOISED, and that is a correctness fix rather than a speed one.
+        The computation advances `self._trend`, and `state()` is called
+        several times per snapshot - by the structure layer, by the frame
+        assembler, by the multi-timeframe block. So the FIRST caller saw a
+        break against the prevailing trend and got CHoCH, which committed
+        the new trend; every caller after it saw the same break WITH the
+        now-current trend and got BOS. The same bar, the same data, a
+        different answer depending on who asked first.
+
+        A change of character is the single most consequential label this
+        module produces - it is what `pressure_component` weighs most
+        heavily - so it cannot depend on call order.
+
+        The key is the newest closed bar and how many closed bars there
+        are, so the answer changes exactly when a bar closes and not
+        before. The forming bar deliberately does not invalidate it:
+        everything here is defined over closed bars, and letting a tick
+        move BOS/CHoCH would be the lookahead this module exists to
+        avoid."""
         closed = [c for c in self.candles if c.closed]
+        key = (closed[-1].start_ms if closed else 0, len(closed))
+        if self._state_key == key and self._state is not None:
+            return self._state
+        out = self._compute_state(closed)
+        self._state_key = key
+        self._state = out
+        return out
+
+    def _compute_state(self, closed: List[Candle]) -> SmcState:
+        out = SmcState(symbol=self.symbol, interval=self.interval)
         if len(closed) < FRACTAL_WIDTH * 2 + 3:
             return out
 
-        swings = find_swings(self.candles)
+        swings = find_swings(closed)
         highs = [s for s in swings if s.kind == "high"]
         lows = [s for s in swings if s.kind == "low"]
         out.swing_high = highs[-1].price if highs else None
@@ -282,9 +321,9 @@ class SmcEngine:
         out.fair_value_gaps = [
             {"direction": g.direction, "top": g.top, "bottom": g.bottom,
              "timestamp_ms": float(g.timestamp_ms)}
-            for g in find_fair_value_gaps(self.candles)
+            for g in find_fair_value_gaps(closed)
         ]
-        out.order_block = find_order_block(self.candles, new_trend)
+        out.order_block = find_order_block(closed, new_trend)
 
         if out.swing_high is not None and out.swing_low is not None and \
                 out.swing_high > out.swing_low:

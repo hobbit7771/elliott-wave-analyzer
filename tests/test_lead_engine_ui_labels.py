@@ -75,3 +75,45 @@ def test_both_pages_refuse_automatic_translation():
         assert 'translate="no"' in html, f"{name} does not refuse translation"
         assert 'content="notranslate"' in html, f"{name} has no notranslate meta"
         assert 'lang="ru"' in html, f"{name} still declares itself English"
+
+
+# ---- saved drawings are not destroyed by opening the page --------------
+
+FIB = (STATIC / "lead_fib.js").read_text(encoding="utf-8")
+WORKSPACE = (STATIC / "lead_workspace.js").read_text(encoding="utf-8")
+
+
+def test_an_unloaded_fib_tool_can_never_write():
+    """The defect: `setChart` called `save()` before anything had been
+    read, and on page open `start()` calls it with the SAME symbol and
+    timeframe the tool was constructed with - so an empty `drawings`
+    array was written over the very key it was about to load. Every saved
+    retracement was destroyed by opening the page.
+
+    Two guards hold it, and both are checked here because either alone
+    would leave a path open: `save()` refuses while `loaded` is false,
+    and `setChart` only saves when the key is genuinely changing."""
+    assert "FibTool.prototype.save = function () {\n    if (!this.loaded) return;" in FIB, \
+        "save() no longer refuses to write before a load"
+
+    set_chart = FIB[FIB.index("FibTool.prototype.setChart"):]
+    set_chart = set_chart[:set_chart.index("FibTool.prototype._point")]
+    assert "if (this.loaded && changing) this.save();" in set_chart, \
+        "setChart saves unconditionally again"
+    assert set_chart.index("var changing =") < set_chart.index("this.save()"), \
+        "setChart decides whether the key is changing AFTER saving"
+
+
+def test_the_load_marks_the_tool_loaded():
+    """`loaded` is what separates "the user has no drawings" from "we
+    have not looked yet", and every guard above depends on it."""
+    load = FIB[FIB.index("FibTool.prototype.load"):]
+    load = load[:load.index("FibTool.prototype.redraw")] if "FibTool.prototype.redraw" in load else load[:2000]
+    assert "this.loaded = true;" in load
+
+
+def test_the_workspace_builds_the_fib_tool_once():
+    """A second FibTool would start with `loaded` false over a key that
+    already has drawings, which is the same failure by another route."""
+    assert WORKSPACE.count("new global.LeadFib.FibTool(") == 1
+    assert WORKSPACE.count("buildChart();") == 1
