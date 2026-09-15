@@ -440,3 +440,80 @@ def test_every_flow_window_reports_a_bounded_delta(external_on):
     for label, window in windows.items():
         assert -1.0 <= window["normalized_delta"] <= 1.0, (label, window)
         assert window["delta_ratio"] <= RATIO_DISPLAY_CAP, (label, window)
+
+
+# ---- MCP over HTTP, so a hosted assistant can connect -------------------
+
+def test_mcp_over_http_answers_the_same_as_over_stdio(external_on):
+    """ChatGPT cannot launch a subprocess, so stdio is not a transport it
+    can use. The HTTP endpoint exists for that - and it hands every
+    message to the SAME `handle` the stdio server uses, so the two cannot
+    drift apart."""
+    headers = {"x-api-key": TOKEN}
+    hello = client.post(f"{V1}/mcp", headers=headers,
+                        json={"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                              "params": {}})
+    assert hello.status_code == 200
+    direct = mcp_server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                "params": {}})
+    assert hello.json()["result"]["serverInfo"] == direct["result"]["serverInfo"]
+    assert hello.json()["result"]["protocolVersion"] == direct["result"]["protocolVersion"]
+
+    listed = client.post(f"{V1}/mcp", headers=headers,
+                         json={"jsonrpc": "2.0", "id": 2, "method": "tools/list",
+                               "params": {}})
+    names = [tool["name"] for tool in listed.json()["result"]["tools"]]
+    assert names == [tool["name"] for tool in tool_list()]
+    assert len(names) == 16
+
+
+def test_mcp_over_http_needs_the_same_token_as_everything_else(external_on):
+    reply = client.post(f"{V1}/mcp",
+                        json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+    assert reply.status_code == 401
+
+
+def test_mcp_over_http_answers_rubbish_with_an_error_not_a_crash(external_on):
+    headers = {"x-api-key": TOKEN}
+    bad = client.post(f"{V1}/mcp", headers=headers, content=b"{not json")
+    assert bad.status_code == 400
+    assert bad.json()["error"]["code"] == -32700
+
+    unknown = client.post(f"{V1}/mcp", headers=headers,
+                          json={"jsonrpc": "2.0", "id": 9, "method": "nope"})
+    assert unknown.json()["error"]["code"] == -32601
+
+
+def test_the_connection_page_never_reveals_the_key(external_on):
+    """Whether a key is CONFIGURED and what it IS are different questions.
+    Only the first is answered anywhere in this application - a page that
+    prints a key is a page that leaks it into a screenshot."""
+    body = client.get(f"{V1}/connect").json()
+    assert body["api_key_configured"] is True
+    assert TOKEN not in json.dumps(body)
+    assert body["api_key_env"] == auth.API_KEY_ENV
+    assert body["mcp_http_url"].endswith("/api/v1/lead-engine/mcp")
+
+    page = client.get("/ai-connect")
+    assert page.status_code == 200
+    assert TOKEN not in page.text
+
+    script = client.get("/static/lead_connect.js")
+    assert script.status_code == 200
+    assert TOKEN not in script.text
+
+
+def test_the_connection_page_is_readable_without_a_token(external_on):
+    """The first thing someone needs to know is whether the deployment is
+    configured at all, and that question must not itself need a
+    credential."""
+    assert client.get(f"{V1}/connect").status_code == 200
+
+
+def test_the_connection_page_says_what_is_missing(monkeypatch):
+    monkeypatch.setenv(auth.EXTERNAL_ENV, "true")
+    monkeypatch.delenv(auth.API_KEY_ENV, raising=False)
+    monkeypatch.delenv(auth.API_KEY_ENV_PREFIXED, raising=False)
+    body = client.get(f"{V1}/connect").json()
+    assert body["external_access_enabled"] is True
+    assert body["api_key_configured"] is False
