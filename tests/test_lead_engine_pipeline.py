@@ -277,3 +277,81 @@ def test_routing_a_book_delta_costs_far_less_than_the_feed_allows():
     # Generous: it measures at about 0.05ms here, and CI is slower than a
     # laptop. The number that matters is that it is nowhere near 1ms.
     assert per_frame_ms < 0.5, f"{per_frame_ms:.3f}ms per book frame"
+
+
+# ---- the forming bar comes from the exchange ----------------------------
+
+def test_the_forming_bar_is_aggregated_from_bybits_own_klines():
+    """The chart used to build this from a price polled every 500ms and
+    the browser's clock, which loses every high and low between two polls
+    and reports a volume of zero. Bybit sends the real thing on kline.1."""
+    from t3_engine.lead_engine.config import LeadEngineConfig
+    from t3_engine.lead_engine.engine import LeadEngine
+
+    engine = LeadEngine(LeadEngineConfig(enabled=True, symbols=["INJUSDT"]))
+    now = int(time.time() * 1000)
+    bar = (now // 300_000) * 300_000          # the current five-minute bar
+
+    minutes = [
+        {"start": bar, "open": "5.70", "high": "5.72", "low": "5.69",
+         "close": "5.71", "volume": "100", "confirm": True},
+        # A wick a 500ms poll would never see, and the volume behind it.
+        {"start": bar + 60_000, "open": "5.71", "high": "5.88", "low": "5.60",
+         "close": "5.75", "volume": "250", "confirm": True},
+        {"start": bar + 120_000, "open": "5.75", "high": "5.77", "low": "5.74",
+         "close": "5.76", "volume": "40", "confirm": False},
+    ]
+    for minute in minutes:
+        engine.handle_message("kline.1.INJUSDT", {
+            "topic": "kline.1.INJUSDT", "ts": now, "data": [minute]})
+
+    candle = engine.states["INJUSDT"].live_candle(300, now_ms=bar + 150_000)
+    assert candle is not None
+    assert candle["open"] == 5.70 and candle["close"] == 5.76
+    assert candle["high"] == 5.88, "the spike must survive"
+    assert candle["low"] == 5.60, "so must the low"
+    assert candle["volume"] == 390.0, "volume is the exchange's, summed"
+    assert candle["closed"] is False
+    assert candle["source"] == "bybit_kline_1m"
+    assert candle["minutes_used"] == 3
+    assert candle["minutes_confirmed"] == 2
+    assert candle["last_minute_confirmed"] is False
+
+
+def test_a_coarser_timeframe_is_an_exact_sum_of_its_minutes():
+    """Aggregating from kline.1 rather than subscribing to every chart
+    timeframe is what keeps the topic count at 35. It is only correct
+    because a coarser bar IS the sum of its minutes."""
+    from t3_engine.lead_engine.config import LeadEngineConfig
+    from t3_engine.lead_engine.engine import LeadEngine
+
+    engine = LeadEngine(LeadEngineConfig(enabled=True, symbols=["INJUSDT"]))
+    now = int(time.time() * 1000)
+    bar = (now // 3_600_000) * 3_600_000      # the current hour
+    highs, lows, volumes = [], [], []
+    for index in range(12):
+        high = 5.70 + index * 0.01
+        low = 5.60 - index * 0.005
+        highs.append(high)
+        lows.append(low)
+        volumes.append(10.0 + index)
+        engine.handle_message("kline.1.INJUSDT", {
+            "topic": "kline.1.INJUSDT", "ts": now, "data": [{
+                "start": bar + index * 60_000, "open": "5.65",
+                "high": str(high), "low": str(low), "close": "5.66",
+                "volume": str(10.0 + index), "confirm": index < 11}]})
+
+    candle = engine.states["INJUSDT"].live_candle(3600, now_ms=bar + 12 * 60_000)
+    assert candle["high"] == max(highs)
+    assert candle["low"] == min(lows)
+    assert candle["volume"] == pytest.approx(sum(volumes))
+    assert candle["minutes_used"] == 12
+
+
+def test_no_kline_data_yields_nothing_rather_than_a_guess():
+    from t3_engine.lead_engine.config import LeadEngineConfig
+    from t3_engine.lead_engine.engine import LeadEngine
+
+    engine = LeadEngine(LeadEngineConfig(enabled=True, symbols=["INJUSDT"]))
+    engine._ensure("INJUSDT")
+    assert engine.states["INJUSDT"].live_candle(300) is None

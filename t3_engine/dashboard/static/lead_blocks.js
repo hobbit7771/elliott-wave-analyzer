@@ -18,8 +18,124 @@
 
   var LAYERS = ['flow', 'book', 'structure', 'derivatives', 'btc_lead'];
 
+  /* ---- labels -------------------------------------------------------
+
+     A HAND-WRITTEN dictionary, and the page is marked `translate="no"`
+     so a browser never runs its own over the top.
+
+     The reason is not tidiness. Machine translation of a trading panel
+     produces confident nonsense: "Order book" becomes a book you read,
+     "Bid pulling" becomes something being dragged, "Sweep" becomes
+     sweeping the floor. Acronyms fare worse - OBI, CVD, BOS, CHoCH, FVG
+     and Microprice are names, not words, and a translator that renders
+     them has changed what the panel says.
+
+     So every label is written once, here, by hand. Terms that ARE names
+     stay in the Latin alphabet on purpose. */
+
+  var LABELS = {
+      "Order book": "Стакан",
+      "Wall persistence": "Время жизни стенки",
+      "Wall cancellations": "Снятые стенки",
+      "Bid pulling": "Снятие bid-ликвидности",
+      "Ask pulling": "Снятие ask-ликвидности",
+      "Bid replenishment": "Пополнение bid",
+      "Ask replenishment": "Пополнение ask",
+      "CVD": "CVD",
+      "Open interest": "Открытый интерес",
+      "Microprice": "Microprice",
+      "Active signal": "Активный сигнал",
+      "Direction": "Направление",
+      "Level": "Уровень",
+      "Break score": "Break score",
+      "Calibrated probability": "Калиброванная вероятность",
+      "Pressure": "Давление",
+      "Net": "Нетто",
+      "Confidence": "Confidence",
+      "Layers": "Слои",
+      "Best bid / ask": "Лучшие bid / ask",
+      "Spread": "Спред",
+      "OBI 1": "OBI 1",
+      "OBI 5": "OBI 5",
+      "OBI 10": "OBI 10",
+      "OBI 25": "OBI 25",
+      "OBI 50": "OBI 50",
+      "Weighted OBI": "Взвешенный OBI",
+      "Top book score": "Top book score",
+      "Deep book score": "Deep book score",
+      "Book consistency": "Согласованность стакана",
+      "BOOK_ALIGNMENT": "BOOK_ALIGNMENT",
+      "Bid absorption score": "Поглощение на bid",
+      "Ask absorption score": "Поглощение на ask",
+      "Walls (persistent/total)": "Стенки (устойчивые/всего)",
+      "Wall bias": "Перевес стенок",
+      "Spoofs (60s)": "Спуфинг (60с)",
+      "Bias": "Смещение",
+      "Offset from mid (bps)": "Отклонение от mid (bps)",
+      "Normalised delta 5s": "Нормализованная дельта 5с",
+      "Normalised delta 60s": "Нормализованная дельта 60с",
+      "Taker buy (5s)": "Тейкер-покупки (5с)",
+      "Taker sell (5s)": "Тейкер-продажи (5с)",
+      "Delta (5s)": "Дельта (5с)",
+      "Raw ratio (diagnostic)": "Сырое отношение (диагностика)",
+      "Trade flow": "Поток сделок",
+      "Trades/sec": "Сделок/с",
+      "Volume/sec": "Объём/с",
+      "Acceleration": "Ускорение",
+      "Velocity z-score": "Velocity z-score",
+      "Velocity state": "Состояние скорости",
+      "Large trades (60s)": "Крупные сделки (60с)",
+      "CVD divergence": "Дивергенция CVD",
+      "Derivatives": "Деривативы",
+      "OI delta": "OI delta",
+      "OI delta %": "OI delta %",
+      "OI trend": "Тренд OI",
+      "Interpretation": "Интерпретация",
+      "Funding rate": "Funding rate",
+      "Long liquidations (60s)": "Ликвидации лонгов (60с)",
+      "Short liquidations (60s)": "Ликвидации шортов (60с)",
+      "Liquidation velocity": "Скорость ликвидаций",
+      "Liquidation state": "Состояние ликвидаций",
+      "BTC lead": "Лидерство BTC",
+      "BTC direction": "Направление BTC",
+      "BTC impulse": "Импульс BTC",
+      "Correlation": "Корреляция",
+      "Estimated lag": "Оценка лага",
+      "Lead score": "Lead score",
+      "State": "Состояние",
+      "Structure": "Структура",
+      "SMC trend": "Тренд SMC",
+      "Last swing": "Последний swing",
+      "BOS": "BOS",
+      "CHoCH": "CHoCH",
+      "Sweep": "Sweep",
+      "FVGs": "FVG",
+      "Order block": "Order block",
+      "Premium / discount": "Premium / discount",
+      "Elliott candidate": "Кандидат волны Эллиотта",
+      "Elliott phase": "Фаза Эллиотта",
+      "Nearest support": "Ближайшая поддержка",
+      "Nearest resistance": "Ближайшее сопротивление",
+      "Tests": "Тестов",
+      "Feed health": "Состояние данных",
+      "Pre-break long": "Pre-break лонг",
+      "Pre-break short": "Pre-break шорт",
+      "Engine status": "Статус движка",
+      "Signals": "Сигналы",
+      "WS connected": "WS подключён",
+      "Book synced": "Стакан синхронизирован",
+      "Dropped messages": "Потеряно сообщений",
+      "Reconnects": "Переподключений"
+  };
+
+  function label(text) {
+    // An untranslated label is a bug to notice, not one to hide, so the
+    // English falls through visibly rather than silently.
+    return Object.prototype.hasOwnProperty.call(LABELS, text) ? LABELS[text] : text;
+  }
+
   function card(title, inner) {
-    return '<div class="le-card"><h3>' + esc(title) + '</h3>' + inner + '</div>';
+    return '<div class="le-card"><h3>' + esc(label(title)) + '</h3>' + inner + '</div>';
   }
 
   function meter(panel, id, label) {
@@ -58,10 +174,10 @@
     html += card('Active signal',
       '<div style="margin:4px 0 8px;"><span class="le-state" data-le="sig:state">IDLE</span>' +
       ' <span class="le-badge-score" data-le="sig:kind">MODEL SCORE</span></div>' +
-      p.row('sig:direction', 'Direction') +
-      p.row('sig:level', 'Level') +
-      p.row('sig:score', 'Break score') +
-      p.row('sig:prob', 'Calibrated probability') +
+      p.row('sig:direction', label('Direction')) +
+      p.row('sig:level', label('Level')) +
+      p.row('sig:score', label('Break score')) +
+      p.row('sig:prob', label('Calibrated probability')) +
       '<div class="le-note" data-le="sig:reason"></div>' +
       '<div class="le-note" data-le="sig:calnote"></div>');
 
@@ -70,8 +186,8 @@
       meter(p, 'pr:short', 'SHORT_PRESSURE') +
       meter(p, 'pb:long', 'BREAK_SCORE long') +
       meter(p, 'pb:short', 'BREAK_SCORE short') +
-      p.row('pr:net', 'Net') +
-      p.row('pr:conf', 'Confidence') +
+      p.row('pr:net', label('Net')) +
+      p.row('pr:conf', label('Confidence')) +
       '<div class="le-note" data-le="pr:explain"></div>' +
       '<div class="le-conflict low" data-le="pr:conflict">—</div>');
 
@@ -80,87 +196,87 @@
       '<div class="le-note" data-le="L:missing"></div>');
 
     html += card('Order book',
-      p.row('ob:bidask', 'Best bid / ask') +
-      p.row('ob:spread', 'Spread') +
-      p.row('ob:micro', 'Microprice') +
-      p.row('ob:obi1', 'OBI 1') +
-      p.row('ob:obi5', 'OBI 5') +
-      p.row('ob:obi10', 'OBI 10') +
-      p.row('ob:obi25', 'OBI 25') +
-      p.row('ob:obi50', 'OBI 50') +
-      p.row('ob:wobi', 'Weighted OBI') +
-      p.row('ob:top', 'Top book score') +
-      p.row('ob:deep', 'Deep book score') +
-      p.row('ob:consistency', 'Book consistency') +
-      p.row('ob:alignment', 'BOOK_ALIGNMENT') +
+      p.row('ob:bidask', label('Best bid / ask')) +
+      p.row('ob:spread', label('Spread')) +
+      p.row('ob:micro', label('Microprice')) +
+      p.row('ob:obi1', label('OBI 1')) +
+      p.row('ob:obi5', label('OBI 5')) +
+      p.row('ob:obi10', label('OBI 10')) +
+      p.row('ob:obi25', label('OBI 25')) +
+      p.row('ob:obi50', label('OBI 50')) +
+      p.row('ob:wobi', label('Weighted OBI')) +
+      p.row('ob:top', label('Top book score')) +
+      p.row('ob:deep', label('Deep book score')) +
+      p.row('ob:consistency', label('Book consistency')) +
+      p.row('ob:alignment', label('BOOK_ALIGNMENT')) +
       '<div class="le-note" data-le="ob:label"></div>' +
-      p.row('ob:bidpull', 'Bid pulling') +
-      p.row('ob:askpull', 'Ask pulling') +
-      p.row('ob:bidrep', 'Bid replenishment') +
-      p.row('ob:askrep', 'Ask replenishment') +
-      p.row('ob:absbid', 'Bid absorption score') +
-      p.row('ob:absask', 'Ask absorption score') +
-      p.row('ob:walls', 'Walls (persistent/total)') +
-      p.row('ob:wallbias', 'Wall bias') +
-      p.row('ob:spoof', 'Spoofs (60s)'));
+      p.row('ob:bidpull', label('Bid pulling')) +
+      p.row('ob:askpull', label('Ask pulling')) +
+      p.row('ob:bidrep', label('Bid replenishment')) +
+      p.row('ob:askrep', label('Ask replenishment')) +
+      p.row('ob:absbid', label('Bid absorption score')) +
+      p.row('ob:absask', label('Ask absorption score')) +
+      p.row('ob:walls', label('Walls (persistent/total)')) +
+      p.row('ob:wallbias', label('Wall bias')) +
+      p.row('ob:spoof', label('Spoofs (60s)')));
 
     html += card('Microprice',
-      p.row('mp:bias', 'Bias') +
-      p.row('mp:offset', 'Offset from mid (bps)') +
-      p.row('mp:d250', 'Δ 250ms') +
-      p.row('mp:d1', 'Δ 1s') +
-      p.row('mp:d3', 'Δ 3s') +
-      p.row('mp:d5', 'Δ 5s'));
+      p.row('mp:bias', label('Bias')) +
+      p.row('mp:offset', label('Offset from mid (bps)')) +
+      p.row('mp:d250', label('Δ 250ms')) +
+      p.row('mp:d1', label('Δ 1s')) +
+      p.row('mp:d3', label('Δ 3s')) +
+      p.row('mp:d5', label('Δ 5s')));
 
     html += card('Trade flow',
-      p.row('fl:nd5', 'Normalised delta 5s') +
-      p.row('fl:nd60', 'Normalised delta 60s') +
-      p.row('fl:buy', 'Taker buy (5s)') +
-      p.row('fl:sell', 'Taker sell (5s)') +
-      p.row('fl:delta', 'Delta (5s)') +
-      p.row('fl:ratio', 'Raw ratio (diagnostic)') +
-      p.row('fl:cvd', 'CVD') +
-      p.row('fl:tps', 'Trades/sec') +
-      p.row('fl:vps', 'Volume/sec') +
-      p.row('fl:accel', 'Acceleration') +
-      p.row('fl:z', 'Velocity z-score') +
-      p.row('fl:vstate', 'Velocity state') +
-      p.row('fl:large', 'Large trades (60s)') +
-      p.row('fl:div', 'CVD divergence'));
+      p.row('fl:nd5', label('Normalised delta 5s')) +
+      p.row('fl:nd60', label('Normalised delta 60s')) +
+      p.row('fl:buy', label('Taker buy (5s)')) +
+      p.row('fl:sell', label('Taker sell (5s)')) +
+      p.row('fl:delta', label('Delta (5s)')) +
+      p.row('fl:ratio', label('Raw ratio (diagnostic)')) +
+      p.row('fl:cvd', label('CVD')) +
+      p.row('fl:tps', label('Trades/sec')) +
+      p.row('fl:vps', label('Volume/sec')) +
+      p.row('fl:accel', label('Acceleration')) +
+      p.row('fl:z', label('Velocity z-score')) +
+      p.row('fl:vstate', label('Velocity state')) +
+      p.row('fl:large', label('Large trades (60s)')) +
+      p.row('fl:div', label('CVD divergence')));
 
     html += card('Derivatives',
-      p.row('dv:oi', 'Open interest') +
-      p.row('dv:oidelta', 'OI delta') +
-      p.row('dv:oipct', 'OI delta %') +
-      p.row('dv:oitrend', 'OI trend') +
-      p.row('dv:interp', 'Interpretation') +
-      p.row('dv:funding', 'Funding rate') +
-      p.row('dv:liqlong', 'Long liquidations (60s)') +
-      p.row('dv:liqshort', 'Short liquidations (60s)') +
-      p.row('dv:liqvel', 'Liquidation velocity') +
-      p.row('dv:liqstate', 'Liquidation state'));
+      p.row('dv:oi', label('Open interest')) +
+      p.row('dv:oidelta', label('OI delta')) +
+      p.row('dv:oipct', label('OI delta %')) +
+      p.row('dv:oitrend', label('OI trend')) +
+      p.row('dv:interp', label('Interpretation')) +
+      p.row('dv:funding', label('Funding rate')) +
+      p.row('dv:liqlong', label('Long liquidations (60s)')) +
+      p.row('dv:liqshort', label('Short liquidations (60s)')) +
+      p.row('dv:liqvel', label('Liquidation velocity')) +
+      p.row('dv:liqstate', label('Liquidation state')));
 
     html += card('BTC lead',
-      p.row('bt:dir', 'BTC direction') +
-      p.row('bt:impulse', 'BTC impulse') +
-      p.row('bt:corr', 'Correlation') +
-      p.row('bt:lag', 'Estimated lag') +
-      p.row('bt:score', 'Lead score') +
-      p.row('bt:state', 'State'));
+      p.row('bt:dir', label('BTC direction')) +
+      p.row('bt:impulse', label('BTC impulse')) +
+      p.row('bt:corr', label('Correlation')) +
+      p.row('bt:lag', label('Estimated lag')) +
+      p.row('bt:score', label('Lead score')) +
+      p.row('bt:state', label('State')));
 
     html += card('Structure',
-      p.row('st:trend', 'SMC trend') +
-      p.row('st:swing', 'Last swing') +
-      p.row('st:bos', 'BOS') +
-      p.row('st:choch', 'CHoCH') +
-      p.row('st:sweep', 'Sweep') +
-      p.row('st:fvg', 'FVGs') +
-      p.row('st:ob', 'Order block') +
-      p.row('st:pd', 'Premium / discount') +
-      p.row('st:ell', 'Elliott candidate') +
-      p.row('st:ellphase', 'Elliott phase') +
-      p.row('st:sup', 'Nearest support') +
-      p.row('st:res', 'Nearest resistance'));
+      p.row('st:trend', label('SMC trend')) +
+      p.row('st:swing', label('Last swing')) +
+      p.row('st:bos', label('BOS')) +
+      p.row('st:choch', label('CHoCH')) +
+      p.row('st:sweep', label('Sweep')) +
+      p.row('st:fvg', label('FVGs')) +
+      p.row('st:ob', label('Order block')) +
+      p.row('st:pd', label('Premium / discount')) +
+      p.row('st:ell', label('Elliott candidate')) +
+      p.row('st:ellphase', label('Elliott phase')) +
+      p.row('st:sup', label('Nearest support')) +
+      p.row('st:res', label('Nearest resistance')));
 
     ['short', 'long'].forEach(function (side) {
       var rows = ['compression', 'fading_bounces', 'depth_drain', 'defender_pulling',
@@ -171,21 +287,21 @@
             '<span class="bar"><i data-le="F:' + side + ':' + name + ':bar"></i></span>' +
             '<span class="num le-num" data-le="F:' + side + ':' + name + '">—</span></div>';
         }).join('');
-      html += card('Pre-break ' + side,
-        p.row('F:' + side + ':level', 'Level') +
-        p.row('F:' + side + ':tests', 'Tests') +
-        p.row('F:' + side + ':score', 'Break score') +
+      html += card(side === 'long' ? 'Pre-break long' : 'Pre-break short',
+        p.row('F:' + side + ':level', label('Level')) +
+        p.row('F:' + side + ':tests', label('Tests')) +
+        p.row('F:' + side + ':score', label('Break score')) +
         '<div class="le-note" data-le="F:' + side + ':note"></div>' + rows);
     });
 
     html += card('Feed health',
       clocks(p) +
-      p.row('h:status', 'Engine status') +
-      p.row('h:signals', 'Signals') +
-      p.row('h:ws', 'WS connected') +
-      p.row('h:synced', 'Book synced') +
-      p.row('h:dropped', 'Dropped messages') +
-      p.row('h:reconnects', 'Reconnects') +
+      p.row('h:status', label('Engine status')) +
+      p.row('h:signals', label('Signals')) +
+      p.row('h:ws', label('WS connected')) +
+      p.row('h:synced', label('Book synced')) +
+      p.row('h:dropped', label('Dropped messages')) +
+      p.row('h:reconnects', label('Reconnects')) +
       '<div class="le-note" data-le="h:reasons"></div>');
 
     html += '</div>';
