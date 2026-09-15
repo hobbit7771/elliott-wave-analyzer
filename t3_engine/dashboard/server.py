@@ -134,10 +134,29 @@ app = FastAPI(title="T3 Elliott Wave Trading Engine Dashboard")
 # unset every route answers {"enabled": false} and no thread exists.
 from t3_engine.lead_engine import api as lead_engine_api          # noqa: E402
 from t3_engine.lead_engine import api_v1 as lead_engine_api_v1    # noqa: E402
+from t3_engine.lead_engine import mcp_http as lead_engine_mcp_http  # noqa: E402
 from t3_engine.lead_engine import config as lead_engine_config    # noqa: E402
 from t3_engine.lead_engine.engine import get_engine as get_lead_engine  # noqa: E402
 
 app.include_router(lead_engine_api.router)
+
+
+@app.get("/ai-connect", response_class=HTMLResponse)
+def lead_engine_connect_page():
+    """How to point ChatGPT or Claude at this engine.
+
+    A page rather than a paragraph in a README because the thing people
+    actually need - the MCP URL, whether the flag is on, whether a key is
+    set - depends on the deployment, and a README cannot know any of it.
+
+    It never shows the key. Whether one is CONFIGURED and what it IS are
+    different questions, and only the first is answered anywhere in this
+    application."""
+    path = os.path.join(_STATIC_DIR, "lead_connect.html")
+    if not os.path.exists(path):
+        raise HTTPException(404, "connection page is missing from this build")
+    with open(path, "r", encoding="utf-8") as handle:
+        return HTMLResponse(handle.read())
 
 
 @app.get("/lead-engine/{symbol}", response_class=HTMLResponse)
@@ -171,6 +190,9 @@ def lead_engine_workspace(symbol: str):
 # every route inside refuses unless EXTERNAL_AI_ACCESS_ENABLED is true AND
 # a valid LEAD_ENGINE_API_KEY is presented - see lead_engine/auth.py.
 app.include_router(lead_engine_api_v1.router)
+# MCP over HTTP, so a hosted assistant that cannot launch a
+# subprocess (ChatGPT) can reach the same sixteen read-only tools.
+app.include_router(lead_engine_mcp_http.router)
 
 # --- live engine registry (spec section 20: one running pipeline per
 # symbol, driven by the public Bybit WebSocket - no API key needed for

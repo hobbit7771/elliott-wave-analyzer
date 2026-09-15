@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="ru" translate="no">
+<head>
+<meta charset="utf-8" />
+<!-- Written in Russian by hand. A browser translating it would turn MCP,
+     JSON-RPC and the config keys into nonsense. -->
+<meta name="google" content="notranslate" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Lead Engine — подключение AI</title>
+<link rel="icon" href="/static/icons/icon-192.png" />
+<link rel="stylesheet" href="/static/lead_engine.css" />
+<link rel="stylesheet" href="/static/lead_workspace.css" />
+</head>
+<body class="le-root">
+<div id="cnRoot">
+  <header id="cnHead">
+    <span class="wsSymbol">Подключение AI</span>
+    <span id="cnState" class="le-chip">—</span>
+    <a class="panel-btn" href="/">Назад</a>
+  </header>
+
+  <main id="cnMain">
+    <div class="le-card">
+      <h3>Состояние доступа</h3>
+      <div class="le-row"><span class="k">Внешний доступ</span><span class="v le-num" id="cnEnabled">—</span></div>
+      <div class="le-row"><span class="k">Ключ настроен</span><span class="v le-num" id="cnKey">—</span></div>
+      <div class="le-row"><span class="k">Лимит запросов</span><span class="v le-num" id="cnRate">—</span></div>
+      <div class="le-note" id="cnHint"></div>
+    </div>
+
+    <div class="le-card">
+      <h3>ChatGPT — удалённый MCP</h3>
+      <div class="le-note">
+        ChatGPT не может запустить процесс на вашей машине, поэтому
+        подключается по URL. В настройках коннектора укажите адрес ниже и
+        передайте ключ заголовком <code>Authorization: Bearer &lt;ключ&gt;</code>.
+      </div>
+      <pre class="cnCode" id="cnMcpUrl">—</pre>
+      <div class="le-note">Транспорт — JSON-RPC 2.0 поверх HTTP POST. Методы:
+        <code>initialize</code>, <code>tools/list</code>, <code>tools/call</code>,
+        <code>ping</code>. 16 инструментов, все только на чтение.</div>
+    </div>
+
+    <div class="le-card">
+      <h3>Claude Desktop / Claude Code — MCP по stdio</h3>
+      <div class="le-note">Добавьте в конфигурацию MCP-серверов:</div>
+      <pre class="cnCode" id="cnClaude">—</pre>
+      <div class="le-note">Ключ берётся из переменной окружения на вашей
+        машине. Он никогда не показывается на этой странице и не хранится
+        в репозитории.</div>
+    </div>
+
+    <div class="le-card">
+      <h3>REST напрямую</h3>
+      <div class="le-note">Один запрос — весь текущий срез по инструменту:</div>
+      <pre class="cnCode" id="cnCurl">—</pre>
+      <div class="le-note">Поток изменений (только дельты, не весь стейт):</div>
+      <pre class="cnCode" id="cnStream">—</pre>
+    </div>
+
+    <div class="le-card">
+      <h3>Что доступно</h3>
+      <div class="le-note" id="cnTools">—</div>
+      <div class="le-note">
+        Доступ строго read-only: нельзя открыть или закрыть позицию,
+        изменить плечо, вывести средства или тронуть ключи биржи. Записи
+        в этом пространстве имён просто нет.
+      </div>
+    </div>
+  </main>
+</div>
+<script src="/static/lead_connect.js"></script>
+</body>
+</html>
