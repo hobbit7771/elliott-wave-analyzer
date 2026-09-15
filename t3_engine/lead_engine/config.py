@@ -38,11 +38,36 @@ DEFAULT_SYMBOLS: Tuple[str, ...] = (
 )
 
 # Kline intervals, in Bybit's own notation (minutes as bare numbers).
-DEFAULT_KLINE_INTERVALS: Tuple[str, ...] = ("1", "5", "15", "60", "240")
+# Kline topics. ONE interval, and deliberately.
+#
+# The first build subscribed to five (1, 5, 15, 60, 240) across seven
+# symbols - thirty-five topics, about thirty frames a second - and then
+# read exactly one of them: `state.on_kline` files the rest into
+# `self.smc[interval]`, which nothing ever asks for, and only the
+# one-minute series reaches `_structure_engine` or the Elliott context.
+# Twenty-eight topics of bandwidth and CPU for data no code path read.
+# Higher timeframes come from REST when the chart wants them, where they
+# cost one request instead of a permanent subscription.
+DEFAULT_KLINE_INTERVALS: Tuple[str, ...] = ("1",)
 
-# Order book depth topic. 50 is what the specification asks for and what
-# the book keeps; asking for a deeper topic would cost bandwidth for
-# levels no feature here reads.
+# Order book. Two numbers, because they answer different questions.
+#
+# TOPIC depth is what Bybit is asked for, and it sets the PUSH RATE:
+# level 1 every 10ms, level 50 every 20ms, level 200 every 100ms, level
+# 500 every 100ms. Level 50 across seven symbols is about 110 frames a
+# second and it was the largest single share of the feed - on a shared
+# core, more than the socket thread could read, which is how the arrival
+# latency climbed to thirty seconds and Bybit closed the connection on a
+# keepalive timeout.
+#
+# Level 200 delivers FOUR TIMES the depth at ONE FIFTH the frame rate.
+# There is no trade-off to weigh here; it is better on both counts.
+ORDERBOOK_TOPIC_DEPTH = 200
+
+# ANALYSIS depth is how far into that book the metrics look, and it stays
+# at 50 because that is what the features are defined over - OBI at
+# 1/5/10/25/50, walls, stacking. Keeping it here means a deeper topic
+# costs nothing extra per frame.
 ORDERBOOK_DEPTH = 50
 
 PUBLIC_LINEAR_WS = "wss://stream.bybit.com/v5/public/linear"
@@ -241,6 +266,7 @@ class LeadEngineConfig:
     rest_base: str = REST_BASE
     kline_intervals: List[str] = field(default_factory=lambda: list(DEFAULT_KLINE_INTERVALS))
     orderbook_depth: int = ORDERBOOK_DEPTH
+    orderbook_topic_depth: int = ORDERBOOK_TOPIC_DEPTH
     weights: PressureWeights = field(default_factory=PressureWeights)
     layer_weights: LayerWeights = field(default_factory=LayerWeights)
     thresholds: Thresholds = field(default_factory=Thresholds)
@@ -270,6 +296,8 @@ class LeadEngineConfig:
             rest_base=os.getenv("T3_LEAD_ENGINE_REST_BASE", "").strip() or REST_BASE,
             kline_intervals=list(DEFAULT_KLINE_INTERVALS),
             orderbook_depth=_env_int("ORDERBOOK_DEPTH", ORDERBOOK_DEPTH),
+            orderbook_topic_depth=_env_int("ORDERBOOK_TOPIC_DEPTH",
+                                           ORDERBOOK_TOPIC_DEPTH),
             weights=weights_from_env(),
             layer_weights=layer_weights_from_env(),
             thresholds=thresholds_from_env(),

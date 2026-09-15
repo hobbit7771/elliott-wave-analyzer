@@ -112,7 +112,10 @@ class LeadEngine:
                 kline_intervals=self.config.kline_intervals,
                 on_message=self.handle_message,
                 url=self.config.ws_url,
-                depth=self.config.orderbook_depth,
+                # The TOPIC depth, which sets Bybit's push rate. The
+                # analysis depth is the book's own, and they are not the
+                # same number - see config.ORDERBOOK_TOPIC_DEPTH.
+                depth=self.config.orderbook_topic_depth,
                 connect_fn=self._connect_fn,
             )
             # A book that desynced used to stay dead until the next
@@ -139,6 +142,7 @@ class LeadEngine:
                 "symbols": ",".join(self.config.symbols),
                 "config": {"weights": self.config.weights.as_dict(),
                            "orderbook_depth": self.config.orderbook_depth,
+                           "orderbook_topic_depth": self.config.orderbook_topic_depth,
                            "kline_intervals": list(self.config.kline_intervals)},
                 "note": "lead engine start",
             })
