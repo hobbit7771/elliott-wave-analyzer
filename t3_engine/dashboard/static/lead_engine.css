@@ -1,0 +1,97 @@
+/* Market Lead Engine tab. Its own stylesheet, its own class prefix.
+   Nothing here restyles an existing element: every rule is scoped under
+   #tab-lead or .le-, so loading this file cannot change how any other tab
+   renders. That is the same isolation the backend has, applied to CSS. */
+
+#tab-lead { font-size: 12px; }
+
+#tab-lead .le-head {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  padding: 8px; border: 1px solid #232733; border-radius: 6px;
+  background: #11151d; margin-bottom: 10px;
+}
+#tab-lead .le-head select, #tab-lead .le-head button { font-size: 12px; }
+#tab-lead .le-price { font-size: 18px; font-weight: 600; color: #e6e9ef; }
+#tab-lead .le-chip {
+  padding: 2px 7px; border-radius: 10px; font-size: 10px; letter-spacing: .04em;
+  border: 1px solid #2c3140; color: #9aa3b2; white-space: nowrap;
+}
+#tab-lead .le-chip.ok    { border-color: #1c5e50; color: #34d399; }
+#tab-lead .le-chip.warn  { border-color: #6b551b; color: #fbbf24; }
+#tab-lead .le-chip.bad   { border-color: #6b2222; color: #f87171; }
+
+#tab-lead .le-grid {
+  display: grid; gap: 10px; margin-bottom: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+#tab-lead .le-card {
+  border: 1px solid #232733; border-radius: 6px; background: #11151d; padding: 8px 10px;
+}
+#tab-lead .le-card h3 {
+  margin: 0 0 6px; font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+  color: #7c869a; font-weight: 600;
+}
+#tab-lead .le-row {
+  display: flex; justify-content: space-between; gap: 10px; padding: 2px 0;
+  border-bottom: 1px solid #1a1f29;
+}
+#tab-lead .le-row:last-child { border-bottom: none; }
+#tab-lead .le-row .k { color: #8a93a5; }
+#tab-lead .le-row .v { color: #d7dbe3; text-align: right; font-variant-numeric: tabular-nums; }
+#tab-lead .le-row .v.up   { color: #34d399; }
+#tab-lead .le-row .v.down { color: #f87171; }
+#tab-lead .le-row .v.dim  { color: #6b7488; }
+
+/* The two pressure bars. Deliberately separate bars rather than one
+   two-sided meter: long and short are computed independently and both can
+   be high at once, which a single meter cannot show. */
+#tab-lead .le-meter { margin: 6px 0; }
+#tab-lead .le-meter .lbl {
+  display: flex; justify-content: space-between; font-size: 10px; color: #8a93a5;
+  margin-bottom: 3px;
+}
+#tab-lead .le-meter .track {
+  height: 10px; background: #1a1f29; border-radius: 5px; overflow: hidden;
+}
+#tab-lead .le-meter .fill { height: 100%; width: 0; transition: width .25s ease; }
+#tab-lead .le-meter.long  .fill { background: linear-gradient(90deg, #12614e, #34d399); }
+#tab-lead .le-meter.short .fill { background: linear-gradient(90deg, #6b2222, #f87171); }
+#tab-lead .le-meter.break .fill { background: linear-gradient(90deg, #4c3a86, #a78bfa); }
+
+#tab-lead .le-state {
+  display: inline-block; padding: 4px 12px; border-radius: 4px; font-weight: 700;
+  letter-spacing: .06em; font-size: 13px; border: 1px solid #2c3140; color: #c7cbd3;
+}
+#tab-lead .le-state.idle   { color: #6b7488; }
+#tab-lead .le-state.watch  { color: #9aa3b2; border-color: #3a4152; }
+#tab-lead .le-state.long   { color: #34d399; border-color: #1c5e50; background: #0f2620; }
+#tab-lead .le-state.short  { color: #f87171; border-color: #6b2222; background: #260f0f; }
+#tab-lead .le-state.aplus  { color: #fde68a; border-color: #6b551b; background: #241d0c; }
+#tab-lead .le-state.rev    { color: #a78bfa; border-color: #4c3a86; background: #191430; }
+#tab-lead .le-state.fail   { color: #f87171; border-color: #6b2222; background: #1c0f0f; }
+
+#tab-lead .le-feature {
+  display: grid; grid-template-columns: 130px 1fr 42px; gap: 6px;
+  align-items: center; padding: 2px 0; font-size: 11px;
+}
+#tab-lead .le-feature .bar { height: 6px; background: #1a1f29; border-radius: 3px; }
+#tab-lead .le-feature .bar > i { display: block; height: 100%; border-radius: 3px; background: #7c8cf8; }
+#tab-lead .le-feature .num { text-align: right; color: #9aa3b2; font-variant-numeric: tabular-nums; }
+
+#tab-lead .le-note { color: #7c869a; font-size: 11px; line-height: 1.5; margin: 6px 0; }
+#tab-lead .le-off {
+  border: 1px solid #6b551b; background: #1d1809; color: #fde68a;
+  padding: 12px; border-radius: 6px; line-height: 1.6;
+}
+#tab-lead table.le-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+#tab-lead table.le-table th {
+  text-align: left; color: #7c869a; font-weight: 600; padding: 4px 6px;
+  border-bottom: 1px solid #232733; font-size: 10px; text-transform: uppercase;
+}
+#tab-lead table.le-table td { padding: 4px 6px; border-bottom: 1px solid #1a1f29; }
+#tab-lead table.le-table tr.me td { background: #151b26; }
+
+@media (max-width: 520px) {
+  #tab-lead .le-grid { grid-template-columns: 1fr; }
+  #tab-lead .le-feature { grid-template-columns: 110px 1fr 38px; }
+}
