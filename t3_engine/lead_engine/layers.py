@@ -39,6 +39,7 @@ from t3_engine.lead_engine.normalize import (
     agreement,
     clamp,
     normalized_delta,
+    signed_strength,
     saturate,
     split_direction,
 )
@@ -153,8 +154,10 @@ def score_flow(flow, cvd, normalizer: Normalizer) -> LayerScore:
     # arbitrary running total whose size depends on how long the process
     # has been up.
     slope = cvd.cvd_change(60_000)
-    parts["cvd_slope"] = (normalizer.update("cvd_slope_60s", slope, "zscore")
-                          if slope is not None else None)
+    # Sign from the slope, magnitude from its own history. A z-score here
+    # turned "buying, weaker than it was" into selling - see
+    # normalize.signed_strength.
+    parts["cvd_slope"] = signed_strength(normalizer, "cvd_slope_60s", slope)
 
     large = flow.large_trades(60_000)
     large_total = large["buy_volume"] + large["sell_volume"]
@@ -248,8 +251,9 @@ def score_book(book, microprice, normalizer: Normalizer) -> LayerScore:
     })
 
     offset = microprice.offset_bps()
-    parts["microprice"] = (normalizer.update("microprice_offset", offset, "zscore")
-                           if offset is not None else None)
+    # Same reason as cvd_slope: the microprice offset is a DIRECTION, and
+    # a z-score can invert the sign of one that never changed sign.
+    parts["microprice"] = signed_strength(normalizer, "microprice_offset", offset)
 
     metrics = book.metrics()
     bid_side = metrics.bid_replenishment - metrics.bid_pulling
@@ -370,8 +374,11 @@ def score_derivatives(open_interest, liquidations, ticker: Dict[str, Any],
     except (TypeError, ValueError):
         funding = None
     if funding is not None:
-        normalised = normalizer.update("funding", funding, "zscore")
-        parts["funding"] = clamp(-normalised)
+        # Negated because positive funding means longs are paying, which
+        # is crowding on the long side and therefore a bearish lean. The
+        # sign still comes from the rate itself, not from a z-score.
+        normalised = signed_strength(normalizer, "funding", funding)
+        parts["funding"] = clamp(-normalised) if normalised is not None else None
         detail_extra["funding_rate"] = funding
     else:
         parts["funding"] = None

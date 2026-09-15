@@ -26,13 +26,30 @@
                      '1h': 3600, '4h': 14400, '1d': 86400 };
   var FETCH_MS = 500;
   var REFRESH_MS = 300;
+  // How often the forming bar is re-read from Bybit. Every bar boundary
+  // triggers one as well, so this is the in-between cadence rather than
+  // the only one.
+  var LIVE_BAR_MS = 4000;
+  // Beyond this the live price is not a live price and must not be drawn
+  // onto the current bar. Matches the engine's own DEGRADED threshold.
+  var STALE_DRAW_MS = 1000;
   var EMA_COLORS = { 9: '#38bdf8', 18: '#34d399', 50: '#fbbf24', 200: '#f472b6' };
   var PREFS_KEY = 'lead_ws_prefs';
 
   var ws = {
     symbol: null, timeframe: '5m', chart: null, series: null, volume: null,
-    emaSeries: {}, candles: [], closes: [], panel: null, fib: null,
-    frame: null, timer: null, markers: [], uiLatencyMs: null,
+    emaSeries: {}, emaAnchor: {}, candles: [], closes: [], panel: null, fib: null,
+    frame: null, timer: null, liveTimer: null, markers: [], uiLatencyMs: null,
+    // Bumped on every symbol or timeframe change. An in-flight response
+    // that comes back carrying an older token is DISCARDED: switching
+    // 5m -> 1m -> 15m quickly otherwise lets the slowest response land
+    // last and paint the wrong series over the right one.
+    generation: 0,
+    // server clock minus browser clock. Bar bucketing uses the corrected
+    // time, because a browser clock that is thirty seconds out puts every
+    // tick in the wrong bar and opens each new bar at the wrong moment.
+    clockSkewMs: 0,
+    liveStale: false,
     prefs: { ema: { 9: false, 18: false, 50: true, 200: true },
              volume: true, signals: true },
     fetches: 0, updates: 0, setDataCalls: 0
@@ -40,6 +57,27 @@
   global.leadWorkspace = ws;
 
   function el(id) { return document.getElementById(id); }
+
+  /* The server's clock, not this browser's. Every frame carries the time
+     the server built it; the difference is tracked and applied so bar
+     boundaries land where the exchange says they do. */
+  function exchangeNow() { return Date.now() + ws.clockSkewMs; }
+
+  function noteServerClock(frame) {
+    var serverMs = null;
+    if (frame && typeof frame.generated_at === 'number') {
+      serverMs = frame.generated_at * 1000;
+    } else if (frame && typeof frame.server_time === 'number') {
+      serverMs = frame.server_time;
+    }
+    if (serverMs === null) return;
+    // Half the round trip is the honest correction; the poll interval is
+    // 500ms so this is accurate to a few tens of milliseconds, which is
+    // far inside a one-minute bar.
+    var skew = serverMs + (ws.uiLatencyMs || 0) / 2 - Date.now();
+    // Smoothed, so one slow response does not jolt the bucketing.
+    ws.clockSkewMs = ws.clockSkewMs === 0 ? skew : ws.clockSkewMs * 0.8 + skew * 0.2;
+  }
   function LP() { return global.LeadPanel; }
 
   /* ---- preferences -------------------------------------------------- */
@@ -143,21 +181,60 @@
         if (values[i] !== null) points.push({ time: ws.candles[i].time, value: values[i] });
       }
       line.setData(points);
+      // Remember where the recursion stands at the last CLOSED bar, so
+      // the forming bar can be extended from it without redoing any of
+      // this. See extendEmas.
+      var anchorIndex = values.length - 2;
+      ws.emaAnchor[period] = (anchorIndex >= 0 && values[anchorIndex] !== null)
+        ? { value: values[anchorIndex], index: anchorIndex } : null;
     });
   }
 
-  /* Extend the EMAs by the newest bar only. The full recompute above runs
-     when history loads or a toggle changes; a tick must not redo 500
-     bars four times a second. */
+  /* The EMA of the FORMING bar, from the previous value.
+
+     EMA is a recursion - EMA_t = a*close_t + (1-a)*EMA_(t-1) - so
+     extending it costs one multiply. The previous version called the
+     full `ema(ws.closes, period)` here instead: six hundred bars, four
+     periods, twice a second, to use the last element of each and throw
+     away the rest.
+
+     The anchor is the EMA at the last CLOSED bar, never at the last tick.
+     Compounding within a bar - feeding each tick's result back in - would
+     make the line depend on how often the page happened to poll. */
   function extendEmas() {
     var last = ws.candles[ws.candles.length - 1];
     if (!last) return;
-    Object.keys(ws.emaSeries).forEach(function (period) {
-      var values = ema(ws.closes, Number(period));
-      var value = values[values.length - 1];
-      if (value !== null && value !== undefined) {
-        ws.emaSeries[period].update({ time: last.time, value: value });
+    var close = ws.closes[ws.closes.length - 1];
+    Object.keys(ws.emaSeries).forEach(function (key) {
+      var period = Number(key);
+      var anchor = ws.emaAnchor[key];
+      if (!anchor) {
+        // No anchor yet (history just arrived, or too few bars). Pay for
+        // one full pass and keep the result.
+        var values = ema(ws.closes, period);
+        var index = values.length - 2;
+        if (index < 0 || values[index] === null) return;
+        anchor = ws.emaAnchor[key] = { value: values[index], index: index };
       }
+      var alpha = 2 / (period + 1);
+      var value = alpha * close + (1 - alpha) * anchor.value;
+      ws.emaSeries[key].update({ time: last.time, value: value });
+    });
+  }
+
+  /* A bar just closed: the value that was provisional becomes the anchor.
+     Called when a new bar is appended, from either source. */
+  function commitEmaBar() {
+    var closedIndex = ws.closes.length - 2;
+    if (closedIndex < 0) return;
+    var closedValue = ws.closes[closedIndex];
+    Object.keys(ws.emaAnchor).forEach(function (key) {
+      var anchor = ws.emaAnchor[key];
+      if (!anchor) return;
+      if (anchor.index >= closedIndex) return;   // already committed
+      var alpha = 2 / (Number(key) + 1);
+      ws.emaAnchor[key] = { value: alpha * closedValue + (1 - alpha) * anchor.value,
+                            index: closedIndex };
     });
   }
 
@@ -180,22 +257,33 @@
       });
   }
 
+  function candleUrl(limit) {
+    return '/api/lead-engine/candles/' + encodeURIComponent(ws.symbol) +
+           '?timeframe=' + encodeURIComponent(ws.timeframe) + '&limit=' + limit;
+  }
+
+  function adopt(row, fromExchange) {
+    return { time: row.time, open: row.open, high: row.high, low: row.low,
+             close: row.close, volume: row.volume, closed: row.closed,
+             // Whether Bybit produced this bar or the browser did. Only
+             // an exchange bar may draw a volume: see drawVolume.
+             exchange: fromExchange !== false };
+  }
+
   function loadHistory() {
     var note = el('wsChartNote');
+    var token = ++ws.generation;
     note.textContent = 'Loading ' + ws.symbol + ' ' + ws.timeframe + '…';
-    return get('/api/lead-engine/candles/' + encodeURIComponent(ws.symbol) +
-               '?timeframe=' + encodeURIComponent(ws.timeframe) + '&limit=600')
+    return get(candleUrl(600))
       .then(function (data) {
+        if (token !== ws.generation) return;     // a newer timeframe won
         var rows = (data && data.candles) || [];
         if (!rows.length) {
           note.textContent = 'No candles returned for ' + ws.symbol + ' ' + ws.timeframe +
             (data && data.detail ? ' — ' + data.detail : '');
           return;
         }
-        ws.candles = rows.map(function (c) {
-          return { time: c.time, open: c.open, high: c.high, low: c.low,
-                   close: c.close, volume: c.volume, closed: c.closed };
-        });
+        ws.candles = rows.map(function (row) { return adopt(row, true); });
         ws.closes = ws.candles.map(function (c) { return c.close; });
         // ONE setData per (symbol, timeframe). Everything after this is
         // update() on the forming bar.
@@ -207,43 +295,127 @@
         drawEmas();
         ws.chart.timeScale().fitContent();
         note.textContent = rows.length + ' candles · ' + ws.timeframe +
-          ' · history loaded once, live bar updated incrementally';
+          ' · history loaded once, live bar refreshed from Bybit';
       })
-      .catch(function (e) { note.textContent = 'Could not load candles: ' + e.message; });
+      .catch(function (e) {
+        if (token !== ws.generation) return;
+        note.textContent = 'Could not load candles: ' + e.message;
+      });
+  }
+
+  /* The forming bar, from the exchange.
+
+     This exists because the first version BUILT the live bar out of a
+     price polled every 500ms and the browser's own clock. Three things
+     were wrong with that and all three are silent:
+
+       - every high and low between two polls was lost, so a spike that
+         lasted two seconds never appeared on the chart at all;
+       - the bar's volume was whatever the browser had accumulated, which
+         was nothing: the one call site passed null, so the live bar's
+         volume was permanently zero;
+       - the bar boundary came from `Date.now()`, so a browser clock a
+         minute out put every tick in the wrong bar.
+
+     Bybit's own kline carries the true high, low and volume for the bar
+     still forming, and `fetch_candles` already marks it `closed: false`.
+     So it is fetched, not invented. Between refreshes a live price may
+     only EXTEND the bar - push the close, raise a high, lower a low -
+     because those are things price genuinely did; it may never shrink a
+     range or invent a volume. */
+  function refreshLiveBars() {
+    if (!ws.candles.length) return Promise.resolve();
+    var token = ws.generation;
+    return get(candleUrl(3))
+      .then(function (data) {
+        if (token !== ws.generation) return;     // the timeframe changed
+        var rows = (data && data.candles) || [];
+        if (!rows.length) return;
+        rows.forEach(function (row) {
+          var index = -1;
+          for (var i = ws.candles.length - 1; i >= 0 && i > ws.candles.length - 8; i--) {
+            if (ws.candles[i].time === row.time) { index = i; break; }
+          }
+          var bar = adopt(row, true);
+          if (index >= 0) {
+            // The exchange is authoritative for a bar it has sent, INCLUDING
+            // shrinking a range this browser extended from a stray tick.
+            ws.candles[index] = bar;
+            ws.closes[index] = bar.close;
+          } else if (row.time > ws.candles[ws.candles.length - 1].time) {
+            ws.candles.push(bar);
+            ws.closes.push(bar.close);
+            if (ws.candles.length > 1500) { ws.candles.shift(); ws.closes.shift(); }
+            commitEmaBar();
+          } else {
+            return;                              // older than the window
+          }
+          ws.series.update({ time: bar.time, open: bar.open, high: bar.high,
+                             low: bar.low, close: bar.close });
+          if (ws.prefs.volume) {
+            ws.volume.update({ time: bar.time, value: bar.volume || 0,
+                               color: bar.close >= bar.open ? '#1d4b45' : '#4b2020' });
+          }
+        });
+        ws.liveRefreshes = (ws.liveRefreshes || 0) + 1;
+        extendEmas();
+      })
+      .catch(function () { /* one dropped refresh; the next one carries it */ });
   }
 
   function drawVolume() {
     if (!ws.prefs.volume) { ws.volume.setData([]); return; }
-    ws.volume.setData(ws.candles.map(function (c) {
-      return { time: c.time, value: c.volume || 0,
-               color: c.close >= c.open ? '#1d4b45' : '#4b2020' };
-    }));
+    // Only bars the EXCHANGE sent get a volume. A provisional bar opened
+    // by this browser has no volume to report, and drawing a zero for it
+    // would be a claim rather than a gap.
+    ws.volume.setData(ws.candles
+      .filter(function (c) { return c.exchange !== false && c.volume !== null; })
+      .map(function (c) {
+        return { time: c.time, value: c.volume || 0,
+                 color: c.close >= c.open ? '#1d4b45' : '#4b2020' };
+      }));
   }
 
-  /* One price tick into the live bar. Appends a new bar when the tick
-     belongs to the next interval — which is how a candle closes without
-     the history ever being refetched. */
-  function applyTick(price, volumeHint) {
+  /* One live price into the forming bar. EXTEND ONLY.
+
+     What this may do: move the close, raise a high, lower a low - all
+     things price genuinely did between two refreshes from the exchange.
+
+     What it may not do: invent a volume, shrink a range, or decide on
+     its own that a bar has closed. The bar itself comes from Bybit (see
+     refreshLiveBars); this only keeps it moving in between.
+
+     It also refuses to touch the chart when the feed is stale. A price
+     that is four seconds old is not a live price, and painting it onto
+     the current bar is how a chart comes to disagree with the market
+     while looking perfectly healthy. */
+  function applyTick(price) {
     if (!price || !ws.candles.length) return;
+    if (ws.liveStale) return;
+
     var seconds = TF_SECONDS[ws.timeframe] || 300;
-    var now = Math.floor(Date.now() / 1000);
-    var bucket = Math.floor(now / seconds) * seconds;
+    var bucket = Math.floor(Math.floor(exchangeNow() / 1000) / seconds) * seconds;
     var last = ws.candles[ws.candles.length - 1];
 
     if (bucket > last.time) {
+      // A bar boundary. Provisional, and marked as such: it carries no
+      // volume and no true open until the exchange sends this bar, which
+      // refreshLiveBars will then use to replace it outright.
       last.closed = true;
       var fresh = { time: bucket, open: price, high: price, low: price,
-                    close: price, volume: 0, closed: false };
+                    close: price, volume: null, closed: false, exchange: false };
       ws.candles.push(fresh);
       ws.closes.push(price);
       if (ws.candles.length > 1500) { ws.candles.shift(); ws.closes.shift(); }
+      commitEmaBar();
       ws.series.update({ time: fresh.time, open: fresh.open, high: fresh.high,
                          low: fresh.low, close: fresh.close });
+      // Ask the exchange for the real one now rather than at the next tick.
+      refreshLiveBars();
     } else if (bucket === last.time) {
       last.high = Math.max(last.high, price);
       last.low = Math.min(last.low, price);
       last.close = price;
-      if (volumeHint) last.volume = volumeHint;
       ws.closes[ws.closes.length - 1] = price;
       ws.series.update({ time: last.time, open: last.open, high: last.high,
                          low: last.low, close: last.close });
@@ -251,11 +423,6 @@
       return;                       // a stale price for a bar already closed
     }
     ws.updates += 1;
-    if (ws.prefs.volume) {
-      var current = ws.candles[ws.candles.length - 1];
-      ws.volume.update({ time: current.time, value: current.volume || 0,
-                         color: current.close >= current.open ? '#1d4b45' : '#4b2020' });
-    }
     extendEmas();
   }
 
@@ -310,10 +477,17 @@
           return;
         }
         ws.frame = data;
+        noteServerClock(data);
+        // Whether this price may touch the chart at all. A price the
+        // engine itself will not act on is not a price to draw with.
+        var health = data.health || {};
+        var bookAge = Number(health.book_age_ms);
+        ws.liveStale = health.signals_enabled === false ||
+                       (isFinite(bookAge) && bookAge > STALE_DRAW_MS);
         mountPanel();
         ws.panel.push(data);
         renderHeader(data);
-        applyTick(Number(data.price), null);
+        applyTick(Number(data.price));
         updateMarkers(data);
       })
       .catch(function (e) {
@@ -362,12 +536,19 @@
   function setTimeframe(tf) {
     if (tf === ws.timeframe) return;
     ws.timeframe = tf;
+    // The bars on screen belong to the OLD timeframe. Cleared here rather
+    // than left to be overwritten, so a slow history response cannot find
+    // 1m bars sitting under a 15m request and merge the two.
+    ws.candles = [];
+    ws.closes = [];
     ws.markers = [];
     ws.series.setMarkers([]);
     renderTimeframes();
     // Drawings are per symbol AND timeframe: switching swaps the set on
     // screen, it never mixes them.
     ws.fib.setChart(ws.symbol, ws.timeframe);
+    // loadHistory() bumps the generation, so any response still in flight
+    // for the previous timeframe is discarded when it lands.
     loadHistory();
   }
 
@@ -485,10 +666,13 @@
     ws.fib.setChart(ws.symbol, ws.timeframe);
     loadHistory().then(loadFrame);
     ws.timer = setInterval(loadFrame, FETCH_MS);
+    ws.liveTimer = setInterval(refreshLiveBars, LIVE_BAR_MS);
   }
 
   ws.stats = function () {
     return { fetches: ws.fetches, chartUpdates: ws.updates, setDataCalls: ws.setDataCalls,
+             liveRefreshes: ws.liveRefreshes || 0, clockSkewMs: Math.round(ws.clockSkewMs),
+             liveStale: ws.liveStale, generation: ws.generation,
              candles: ws.candles.length,
              panel: ws.panel ? ws.panel.stats() : null };
   };

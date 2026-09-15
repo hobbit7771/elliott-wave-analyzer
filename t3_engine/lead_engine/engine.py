@@ -44,6 +44,11 @@ from t3_engine.lead_engine.trade_flow import Trade
 
 logger = logging.getLogger(__name__)
 
+# How long to wait before asking Bybit for the same symbol's book again.
+# A resubscribe is not free: it costs a round trip and produces its own
+# discontinuity, so asking on every gap turns one lost frame into a loop.
+RESYNC_DEBOUNCE_SECONDS = 5.0
+
 DISABLED_PAYLOAD: Dict[str, Any] = {
     "enabled": False,
     "detail": (
@@ -66,6 +71,7 @@ class LeadEngine:
         self.started_at: Optional[float] = None
         self.start_error = ""
         self._lock = threading.RLock()
+        self._resync_asked: Dict[str, float] = {}
         self._connect_fn = connect_fn
         self._oi_fetcher = oi_fetcher
         self._storage = storage
@@ -228,9 +234,24 @@ class LeadEngine:
             state.health.orderbook_synced = False
 
     def _request_resync(self, symbol: str, reason: str) -> None:
+        """Ask the stream for a fresh snapshot, at most once every
+        RESYNC_DEBOUNCE_SECONDS per symbol.
+
+        Debounced because a resubscribe under load produces its own
+        discontinuity: the first version asked on every gap, so one lost
+        frame could start a loop where each resync guaranteed the next.
+        Between requests the book stays desynced and its signals stay
+        muted, which is the correct state to be in - it is not serving
+        numbers from a book it cannot trust, it is waiting for a good
+        one."""
         stream = self.stream
         if stream is None:
             return
+        now = time.time()
+        last = self._resync_asked.get(symbol, 0.0)
+        if now - last < RESYNC_DEBOUNCE_SECONDS:
+            return
+        self._resync_asked[symbol] = now
         try:
             stream._demand_resync([symbol], reason or "desync")
         except Exception:                        # noqa: BLE001 - a failed
