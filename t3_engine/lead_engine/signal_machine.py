@@ -154,6 +154,27 @@ class SignalMachine:
             self.current.level = level
         return self.current
 
+    def _blocked(self, inputs: SignalInputs) -> str:
+        """Why no side may be named, or "" when one may.
+
+        Three separate reasons, kept apart because they mean different
+        things and a trader should be told which one applies."""
+        if inputs.conflict >= MAX_CONFLICT:
+            return f"both sides pressing at once (conflict {inputs.conflict:.0f})"
+        # Independent layers disagreeing is a harder stop than both sides
+        # merely scoring. Structure bullish against flow and book bearish
+        # must not produce a strong LONG however high the raw numbers are.
+        if inputs.conflict_level == CONFLICT_HIGH:
+            return (f"independent layers disagree ({inputs.conflict_level}); "
+                    "no directional call")
+        # Not enough of the engine answered. WATCH is still allowed -
+        # noticing something on partial data is honest - but a direction
+        # on it is not.
+        if inputs.confidence < MIN_DIRECTIONAL_CONFIDENCE:
+            return (f"confidence {inputs.confidence:.2f} below "
+                    f"{MIN_DIRECTIONAL_CONFIDENCE:.2f}: too few inputs to call a side")
+        return ""
+
     def _decide(self, inputs: SignalInputs, now: float):
         thresholds = self.thresholds
         if not inputs.healthy:
@@ -192,6 +213,21 @@ class SignalMachine:
             return (INVALIDATED, self.current.direction, 0.0,
                     "cooling off after an invalidation", strongest, self.current.level)
 
+        # ---- the gates ------------------------------------------------
+        #
+        # Everything below this point can name a SIDE, so everything that
+        # forbids naming one has to be checked first.
+        #
+        # That ordering is the fix for a real defect: REVERSAL_CANDIDATE
+        # sat ABOVE these checks and returns a direction, so a liquidation
+        # flush produced a directional call regardless of how little of
+        # the engine had answered and regardless of whether its layers
+        # agreed. The confidence floor existed and did not apply to the
+        # one state most likely to fire on thin, fast-moving data.
+        blocked = self._blocked(inputs)
+        if blocked:
+            return (WATCH, direction, pressure, blocked, probability, level)
+
         # A flush that has exhausted, with pressure now leaning against the
         # direction it flushed in.
         if inputs.liquidation_state == "EXHAUSTION":
@@ -205,31 +241,6 @@ class SignalMachine:
                 return (REVERSAL_CANDIDATE, "short", inputs.short_pressure,
                         "liquidations exhausted and pressure has turned down",
                         inputs.prebreak_short, inputs.short_level)
-
-        if inputs.conflict >= MAX_CONFLICT:
-            return (WATCH, "", max(inputs.long_pressure, inputs.short_pressure),
-                    f"both sides pressing at once (conflict {inputs.conflict:.0f})",
-                    strongest, level)
-
-        # Independent layers disagreeing is a harder stop than both sides
-        # merely scoring. Structure bullish against flow and book bearish
-        # must not produce a strong LONG however high the raw numbers are,
-        # so a high conflict caps the state at WATCH and a medium one caps
-        # it below A_PLUS.
-        if inputs.conflict_level == CONFLICT_HIGH:
-            return (WATCH, direction, pressure,
-                    f"independent layers disagree ({inputs.conflict_level}); "
-                    "no directional call",
-                    probability, level)
-
-        # Not enough of the engine answered to name a side. WATCH is still
-        # allowed - noticing something on partial data is honest - but a
-        # direction on it is not.
-        if inputs.confidence < MIN_DIRECTIONAL_CONFIDENCE:
-            return (WATCH, direction, pressure,
-                    f"confidence {inputs.confidence:.2f} below "
-                    f"{MIN_DIRECTIONAL_CONFIDENCE:.2f}: too few inputs to call a side",
-                    probability, level)
 
         capped_top = (HIGH_PROBABILITY if inputs.conflict_level == CONFLICT_MEDIUM
                       else A_PLUS)

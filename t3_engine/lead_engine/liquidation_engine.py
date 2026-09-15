@@ -1,9 +1,11 @@
 """Forced closes: who is being taken out, how fast, and whether it is done.
 
-Bybit's `allLiquidation.SYMBOL` reports each forced close as an order,
-and `S` is the side of THAT ORDER, not of the position. A long being
-liquidated is closed by selling, so it arrives as S="Sell". Getting this
-backwards inverts every state below, so the mapping lives in one place -
+Bybit's `allLiquidation.SYMBOL` reports the side of the LIQUIDATED
+POSITION: S="Buy" is a long being taken out, S="Sell" is a short. That is
+the opposite of the older `liquidation` topic, which reported the closing
+ORDER's side - and reasoning from the older convention is exactly how
+this came to be inverted in the first build, filing every long flush as a
+short flush. The mapping therefore lives in one place -
 `side_is_long_liquidation` - and is asserted by a test rather than
 remembered.
 
@@ -60,13 +62,25 @@ PEAK_WINDOW_BUCKETS = 5
 
 
 def side_is_long_liquidation(side: str) -> bool:
-    """True when this liquidation order closes a LONG.
+    """True when the POSITION that was liquidated was a long.
 
-    Bybit sends the order's side. Closing a long means selling, so
-    S="Sell" is a long being liquidated. Inverting this inverts every
-    state in this module, which is why it is a named function with a test
-    rather than a conditional buried in the loop."""
-    return str(side).strip().lower().startswith("s")
+    Bybit's `allLiquidation` reports the side of the liquidated POSITION,
+    not the side of the order that closed it. `S="Buy"` is a long being
+    liquidated; `S="Sell"` is a short.
+
+    This was backwards, and it was backwards for a defensible reason -
+    the older `liquidation` topic reported the closing ORDER's side,
+    where the logic runs the other way round (closing a long means
+    selling). Reasoning from that convention gave exactly the wrong
+    answer for the newer topic, and the result was not a small error:
+    every long flush was filed as a short flush and vice versa, so the
+    liquidation state, the flush direction and the REVERSAL_CANDIDATE it
+    can produce all pointed the wrong way. Confirmed against the live
+    feed.
+
+    It is a named function with a test for the same reason it always
+    was: inverting it inverts every state in this module."""
+    return str(side).strip().lower().startswith("b")
 
 
 @dataclass(frozen=True)

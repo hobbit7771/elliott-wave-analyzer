@@ -355,3 +355,134 @@ def test_no_kline_data_yields_nothing_rather_than_a_guess():
     engine = LeadEngine(LeadEngineConfig(enabled=True, symbols=["INJUSDT"]))
     engine._ensure("INJUSDT")
     assert engine.states["INJUSDT"].live_candle(300) is None
+
+
+# ---- a read must not change the answer ---------------------------------
+
+def _zigzag(count, base, slope, amplitude, start=0):
+    """A clean alternating series, so fractal swings of BOTH kinds
+    confirm. A monotone staircase produces highs and no lows."""
+    import math
+
+    from t3_engine.lead_engine.smc_engine import Candle
+
+    out = []
+    for index in range(count):
+        price = base + slope * index + amplitude * math.sin(index * math.pi / 3.0)
+        out.append(Candle(start_ms=(start + index) * 60_000, open=price,
+                          high=price * 1.0005, low=price * 0.9995,
+                          close=price, volume=10.0, closed=True))
+    return out
+
+
+def test_reading_the_structure_twice_gives_the_same_answer():
+    """CHoCH is the most consequential label this engine produces - it is
+    what `pressure_component` weighs most heavily - and it depended on
+    CALL ORDER.
+
+    `state()` advanced `self._trend` as a side effect, and it is called
+    several times per snapshot: by the structure layer, by the frame
+    assembler, by the multi-timeframe block. The first caller saw a break
+    against the prevailing trend and got CHoCH, which committed the new
+    trend; every caller after it saw the same break WITH the now-current
+    trend and got BOS. Same bar, same data, different answer.
+
+    Measured on the old code: read 1 CHoCH, reads 2-4 BOS."""
+    from t3_engine.lead_engine.smc_engine import SmcEngine
+
+    engine = SmcEngine("INJUSDT", "1")
+    down = _zigzag(24, 12.0, -0.12, 0.45)
+    for candle in down:
+        engine.update(candle)
+    established = engine.state()
+    assert established.trend == "bearish"
+    assert established.swing_high is not None
+
+    # Close decisively above the last swing high: a change of character.
+    high = established.swing_high
+    for candle in _zigzag(1, high * 1.01, 0.0, 0.0, start=len(down)):
+        engine.update(candle)
+    for offset, price in enumerate((high * 1.03, high * 1.06)):
+        for candle in _zigzag(1, price, 0.0, 0.0, start=len(down) + 1 + offset):
+            engine.update(candle)
+
+    reads = [engine.state() for _ in range(4)]
+    assert reads[0].choch is True and reads[0].choch_direction == "bullish"
+    assert reads[0].bos is False
+    signatures = {(r.bos, r.choch, r.bos_direction, r.choch_direction, r.trend)
+                  for r in reads}
+    assert len(signatures) == 1, f"reading twice changed the answer: {signatures}"
+
+
+def test_the_structure_still_moves_when_a_bar_actually_closes():
+    """Memoised, not frozen. A cache that never invalidates is a worse
+    bug than the one it replaced."""
+    from t3_engine.lead_engine.smc_engine import SmcEngine
+
+    engine = SmcEngine("INJUSDT", "1")
+    for candle in _zigzag(24, 12.0, -0.12, 0.45):
+        engine.update(candle)
+    before = engine.state()
+
+    for index, candle in enumerate(_zigzag(6, 20.0, 0.5, 0.2, start=24)):
+        engine.update(candle)
+    after = engine.state()
+    assert after is not before
+    assert (after.swing_high, after.trend) != (before.swing_high, before.trend)
+
+
+# ---- no direction without the confidence to name one -------------------
+
+def test_an_exhausted_flush_cannot_name_a_side_on_thin_data():
+    """REVERSAL_CANDIDATE returns a direction, and it sat ABOVE the
+    confidence and conflict gates - so the one state most likely to fire
+    on thin, fast-moving data was the one state that ignored how little
+    of the engine had answered."""
+    from t3_engine.lead_engine.signal_machine import (
+        MIN_DIRECTIONAL_CONFIDENCE,
+        SignalInputs,
+        SignalMachine,
+    )
+
+    def run(confidence, conflict_level="CONFLICT_LOW"):
+        machine = SignalMachine("INJUSDT")
+        return machine.update(SignalInputs(
+            long_pressure=55.0, short_pressure=5.0, conflict=5.0,
+            conflict_level=conflict_level, confidence=confidence,
+            prebreak_long=0.0, prebreak_short=0.0,
+            long_level=5.7, short_level=5.6,
+            liquidation_state="EXHAUSTION", healthy=True))
+
+    thin = run(MIN_DIRECTIONAL_CONFIDENCE - 0.01)
+    assert thin.state == "WATCH"
+    assert "confidence" in thin.reason
+
+    conflicted = run(0.9, conflict_level="CONFLICT_HIGH")
+    assert conflicted.state == "WATCH"
+    assert "disagree" in conflicted.reason
+
+    confident = run(0.9)
+    assert confident.state == "REVERSAL_CANDIDATE"
+    assert confident.direction == "long"
+
+
+def test_no_state_that_names_a_side_escapes_the_gate():
+    """Structural rather than case-by-case: whatever the inputs, a state
+    carrying a direction may not come out while the gate is closed."""
+    from t3_engine.lead_engine.signal_machine import SignalInputs, SignalMachine
+
+    directional = {"PRE_BREAK_LONG", "PRE_BREAK_SHORT", "HIGH_PROBABILITY",
+                   "A_PLUS", "REVERSAL_CANDIDATE", "PRE_SIGNAL"}
+    for liquidation in ("NEUTRAL", "EXHAUSTION", "CASCADE", "LONG_FLUSH"):
+        for probability in (0.0, 65.0, 90.0):
+            for pressure in (10.0, 60.0, 95.0):
+                machine = SignalMachine("INJUSDT")
+                result = machine.update(SignalInputs(
+                    long_pressure=pressure, short_pressure=2.0, conflict=1.0,
+                    conflict_level="CONFLICT_LOW", confidence=0.05,
+                    prebreak_long=probability, prebreak_short=0.0,
+                    long_level=5.7, short_level=5.6,
+                    liquidation_state=liquidation, healthy=True))
+                assert result.state not in directional, (
+                    f"{result.state} named a side on confidence 0.05 "
+                    f"({liquidation}, p={probability}, pressure={pressure})")

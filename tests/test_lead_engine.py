@@ -182,14 +182,52 @@ def test_cvd_names_the_divergence_rather_than_signing_it():
 
 # ---- liquidations -------------------------------------------------------
 
-def test_a_sell_liquidation_closes_a_long():
-    """Bybit sends the ORDER's side. Closing a long means selling, so
-    S='Sell' is a long being liquidated. Inverting this inverts every
-    state in the module."""
-    assert side_is_long_liquidation("Sell") is True
-    assert side_is_long_liquidation("Buy") is False
-    event = liquidation_from_message({"T": 1, "p": "10", "v": "5", "S": "Sell"}, "TESTUSDT")
-    assert event is not None and event.is_long is True
+def test_a_buy_liquidation_is_a_long_being_taken_out():
+    """`allLiquidation` reports the side of the LIQUIDATED POSITION, not
+    of the order that closed it. S='Buy' is a long.
+
+    This was inverted, and for a defensible reason: the older
+    `liquidation` topic reported the closing ORDER's side, where the logic
+    runs the other way (closing a long means selling). Reasoning from that
+    convention filed every long flush as a short flush, so LONG_FLUSH and
+    SHORT_SQUEEZE were swapped and any REVERSAL_CANDIDATE they produced
+    pointed the wrong way."""
+    assert side_is_long_liquidation("Buy") is True
+    assert side_is_long_liquidation("Sell") is False
+
+    long_event = liquidation_from_message(
+        {"T": 1, "p": "10", "v": "5", "S": "Buy"}, "TESTUSDT")
+    assert long_event is not None and long_event.is_long is True
+
+    short_event = liquidation_from_message(
+        {"T": 1, "p": "10", "v": "5", "S": "Sell"}, "TESTUSDT")
+    assert short_event is not None and short_event.is_long is False
+
+
+def test_a_flush_of_longs_is_named_a_long_flush():
+    """End to end through the engine, because the mapping only matters
+    for what it makes the STATE say."""
+    from t3_engine.lead_engine.liquidation_engine import LONG_FLUSH, SHORT_SQUEEZE
+
+    base = 1_700_000_000_000
+
+    def flush(side):
+        engine = LiquidationEngine("TESTUSDT")
+        for index in range(30):
+            engine.add(liquidation_from_message(
+                {"T": base + index * 150, "p": "100", "v": "400", "S": side},
+                "TESTUSDT"))
+        return engine
+
+    longs = flush("Buy")
+    assert longs.state() in (LONG_FLUSH, "CASCADE")
+    assert longs.window(5_000)["long_notional"] > 0
+    assert longs.window(5_000)["short_notional"] == 0
+
+    shorts = flush("Sell")
+    assert shorts.state() in (SHORT_SQUEEZE, "CASCADE")
+    assert shorts.window(5_000)["short_notional"] > 0
+    assert shorts.window(5_000)["long_notional"] == 0
 
 
 def test_a_flush_is_a_cascade_while_it_accelerates_and_exhaustion_once_it_stops():
@@ -197,14 +235,16 @@ def test_a_flush_is_a_cascade_while_it_accelerates_and_exhaustion_once_it_stops(
     stamp = 1_000_000
     for _ in range(60):
         stamp += 100
+        # S="Buy" is a LONG being taken out - see
+        # test_a_buy_liquidation_is_a_long_being_taken_out.
         engine.add(liquidation_from_message(
-            {"T": stamp, "p": "5.8", "v": "1200", "S": "Sell"}, "TESTUSDT"))
+            {"T": stamp, "p": "5.8", "v": "1200", "S": "Buy"}, "TESTUSDT"))
     assert engine.state() == "CASCADE"
     assert engine.pressure_component() < 0, "a long flush is selling while it runs"
 
     stamp += 20_000
     engine.add(liquidation_from_message(
-        {"T": stamp, "p": "5.8", "v": "2", "S": "Sell"}, "TESTUSDT"))
+        {"T": stamp, "p": "5.8", "v": "2", "S": "Buy"}, "TESTUSDT"))
     assert engine.state() == "EXHAUSTION"
     assert engine.pressure_component() > 0, "the weak side has been removed"
 
