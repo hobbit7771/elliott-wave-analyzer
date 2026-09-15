@@ -319,37 +319,63 @@ def test_candles_are_built_from_trades_so_structure_exists_before_klines_do():
 
 # ---- pressure -----------------------------------------------------------
 
+def _layers(**scores):
+    """Five LayerScores from a dict of signed scores. `None` means the
+    layer had nothing to say, which is not the same as zero."""
+    from t3_engine.lead_engine.layers import LAYERS, LayerScore
+
+    out = {}
+    for name in LAYERS:
+        value = scores.get(name)
+        out[name] = LayerScore(name=name, score=value or 0.0,
+                               confidence=0.0 if value is None else 1.0)
+    return out
+
+
 def test_long_and_short_pressure_are_independent_not_complements():
     """A featureless market must not read as 50 long. And a market being
     fought over must read as high on BOTH, which one meter cannot show."""
-    quiet = pressure_score({name: 0.0 for name in
-                            ("order_book_imbalance", "microprice", "cvd", "trade_velocity",
-                             "liquidity_shift", "liquidations", "btc_lead_lag", "smc",
-                             "elliott_context")})
+    quiet = pressure_score(_layers(flow=0.0, book=0.0, structure=0.0,
+                                   derivatives=0.0, btc_lead=0.0))
     assert quiet.long_pressure == 0.0 and quiet.short_pressure == 0.0
 
-    contested = pressure_score({"order_book_imbalance": 0.9, "microprice": 0.9,
-                                "cvd": -0.9, "trade_velocity": -0.9,
-                                "liquidity_shift": 0.0, "liquidations": 0.0,
-                                "btc_lead_lag": 0.0, "smc": 0.0, "elliott_context": 0.0})
+    contested = pressure_score(_layers(flow=0.9, book=-0.9, structure=0.9,
+                                       derivatives=-0.9, btc_lead=0.0))
     assert contested.long_pressure > 20 and contested.short_pressure > 20
-    assert contested.conflict > 20
 
 
-def test_a_component_that_is_not_ready_is_dropped_not_counted_as_neutral():
+def test_a_layer_that_is_not_ready_is_dropped_not_counted_as_neutral():
     """Counting a missing stream as zero dilutes a genuine reading toward
     the middle, making a half-connected engine look calm rather than
-    uninformed."""
-    partial = pressure_score({"order_book_imbalance": 1.0, "microprice": None,
-                              "cvd": None, "trade_velocity": None,
-                              "liquidity_shift": None, "liquidations": None,
-                              "btc_lead_lag": None, "smc": None, "elliott_context": None})
+    uninformed. Its weight is redistributed and its name reported."""
+    partial = pressure_score(_layers(flow=1.0))
     assert partial.long_pressure == pytest.approx(100.0)
-    assert len(partial.missing) == 8
+    assert sorted(partial.missing) == ["book", "btc_lead", "derivatives", "structure"]
+    # ...but the engine says it is not sure, because four fifths of the
+    # weight had nothing to contribute.
+    assert partial.confidence < 0.35
+
+
+def test_independent_layers_disagreeing_is_detected_and_costs_confidence():
+    """The brief's case: structure bullish, flow and book bearish. The old
+    `conflict` was min(long, short) - it noticed both sides had scored but
+    not WHICH sources disagreed, so this situation and nine mildly mixed
+    components produced the same number."""
+    from t3_engine.lead_engine.layers import CONFLICT_HIGH
+
+    result = pressure_score(_layers(structure=0.8, flow=-0.7, book=-0.6,
+                                    derivatives=0.0, btc_lead=-0.2))
+    assert result.conflict.level == CONFLICT_HIGH
+    assert result.conflict.opposing == ["structure"]
+    assert result.confidence < 0.5
+    unanimous = pressure_score(_layers(structure=0.8, flow=0.7, book=0.6,
+                                       derivatives=0.4, btc_lead=0.2))
+    assert unanimous.confidence > result.confidence * 2
 
 
 def test_the_published_weights_sum_to_one():
     assert le_config.PressureWeights().total() == pytest.approx(1.0)
+    assert le_config.LayerWeights().total() == pytest.approx(1.0)
 
 
 # ---- pre-break ----------------------------------------------------------

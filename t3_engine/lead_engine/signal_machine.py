@@ -57,6 +57,12 @@ MAX_CONFLICT = 30.0
 # How long INVALIDATED is held before decaying back to IDLE.
 INVALIDATION_COOLDOWN_SECONDS = 60.0
 
+# Conflict levels, mirrored from layers.py so this module does not have to
+# import it just for three strings.
+CONFLICT_HIGH = "CONFLICT_HIGH"
+CONFLICT_MEDIUM = "CONFLICT_MEDIUM"
+CONFLICT_LOW = "CONFLICT_LOW"
+
 # A reversal candidate needs a liquidation flush that has EXHAUSTED and
 # pressure now leaning the other way by at least this much.
 REVERSAL_PRESSURE = 30.0
@@ -97,6 +103,11 @@ class SignalInputs:
     liquidation_state: str
     healthy: bool
     health_reason: str = ""
+    # From layers.detect_conflict: which INDEPENDENT sources disagree,
+    # rather than the old proxy of "both sides scored something". A high
+    # conflict caps what the machine is allowed to claim - see _cap_state.
+    conflict_level: str = "CONFLICT_LOW"
+    confidence: float = 1.0
 
 
 class SignalMachine:
@@ -189,13 +200,28 @@ class SignalMachine:
                     f"both sides pressing at once (conflict {inputs.conflict:.0f})",
                     strongest, level)
 
+        # Independent layers disagreeing is a harder stop than both sides
+        # merely scoring. Structure bullish against flow and book bearish
+        # must not produce a strong LONG however high the raw numbers are,
+        # so a high conflict caps the state at WATCH and a medium one caps
+        # it below A_PLUS.
+        if inputs.conflict_level == CONFLICT_HIGH:
+            return (WATCH, direction, pressure,
+                    f"independent layers disagree ({inputs.conflict_level}); "
+                    "no directional call",
+                    probability, level)
+
+        capped_top = (HIGH_PROBABILITY if inputs.conflict_level == CONFLICT_MEDIUM
+                      else A_PLUS)
+
         if probability >= thresholds.a_plus_probability and pressure >= PRE_SIGNAL_PRESSURE:
-            return (A_PLUS, direction, pressure,
-                    f"break probability {probability:.0f} with pressure {pressure:.0f}",
+            return (capped_top, direction, pressure,
+                    f"break score {probability:.0f} with pressure {pressure:.0f}"
+                    + ("" if capped_top == A_PLUS else " (capped: layers partly disagree)"),
                     probability, level)
         if probability >= thresholds.high_probability:
             return (HIGH_PROBABILITY, direction, pressure,
-                    f"break probability {probability:.0f}", probability, level)
+                    f"break score {probability:.0f}", probability, level)
         if probability >= thresholds.prebreak_probability:
             state = PRE_BREAK_LONG if direction == "long" else PRE_BREAK_SHORT
             return (state, direction, pressure,

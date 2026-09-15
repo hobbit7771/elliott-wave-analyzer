@@ -205,8 +205,19 @@ class PreBreakResult:
     def as_dict(self) -> Dict[str, object]:
         return {
             "direction": self.direction, "level": self.level,
+            # The number, under the name it has earned. `break_score` is
+            # what this is: a weighted mean of the ten features below.
+            # `break_probability` is kept for compatibility and carries the
+            # SAME number, which is why calibration.label_for exists -
+            # whether it may be called a probability is decided there,
+            # from measured outcomes, not here.
+            "break_score": round(self.probability, 2),
             "break_probability": round(self.probability, 2),
             "features": {k: round(v, 4) for k, v in self.features.items()},
+            "feature_weights": dict(FEATURE_WEIGHTS),
+            # Which features contributed nothing because their input was
+            # absent, as opposed to genuinely zero.
+            "inactive_features": sorted(k for k, v in self.features.items() if v == 0.0),
             "tests": self.tests, "note": self.note,
         }
 
@@ -326,8 +337,17 @@ class PreBreakEngine:
         kind = "support" if direction == SHORT else "resistance"
         level = self.levels.nearest(inputs.price, kind)
         if level is None:
+            # The message used to say "below" for both directions, so a
+            # missing resistance was reported as "no resistance identified
+            # below the visible swings" - which reads as a search in the
+            # wrong direction. The SEARCH was always right (LevelTracker.
+            # nearest filters support to price<=current and resistance to
+            # price>=current, and there is a test for it); only the
+            # sentence was wrong, and the sentence is what a user reads.
+            where = "below" if kind == "support" else "above"
             return PreBreakResult(direction=direction, level=None, probability=0.0,
-                                  note=f"no {kind} identified below the visible swings")
+                                  note=f"no {kind} identified {where} the current price "
+                                       f"in the visible swings")
         if not inputs.book.synced:
             return PreBreakResult(direction=direction, level=level.price, probability=0.0,
                                   tests=level.tests,

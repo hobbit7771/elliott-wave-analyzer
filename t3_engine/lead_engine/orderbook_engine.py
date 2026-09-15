@@ -65,17 +65,128 @@ class LevelFlow:
         return max(0.0, self.removed - self.executed)
 
 
+# Wall classification. A large resting order is not a wall the moment it
+# appears - most of them are gone in seconds, and treating a fresh one as
+# support is how an engine gets walked into a spoof. These thresholds are
+# what separate "large" from "meaningful".
+TRANSIENT_WALL_MS = 3_000
+PERSISTENT_WALL_MS = 20_000
+
+# A wall counts as replenishing once it has been cut and rebuilt this
+# often - the shape of a real defender, as opposed to one order sitting
+# there untouched.
+REPLENISH_EVENTS = 2
+
+# ...and as absorbed once this share of its own size has traded at its
+# price while it was still standing.
+ABSORBED_SHARE = 0.75
+
+TRANSIENT_WALL = "TRANSIENT_WALL"
+PERSISTENT_WALL = "PERSISTENT_WALL"
+REPLENISHING_WALL = "REPLENISHING_WALL"
+POSSIBLE_SPOOF = "POSSIBLE_SPOOF"
+ABSORBED_WALL = "ABSORBED_WALL"
+
+
 @dataclass
 class Wall:
+    """One large resting order, and everything needed to judge it.
+
+    The first build kept only first/last seen. That cannot tell a wall
+    that has stood for ten minutes from one that appeared a second ago,
+    cannot tell a defender being repeatedly cut and rebuilt from an
+    untouched block, and cannot tell an order that was traded through
+    from one that was pulled the moment price approached. All three
+    distinctions change what the wall means, so all three are tracked."""
+
     side: str
     price: float
     size: float
     first_seen_ms: int
     last_seen_ms: int
+    initial_size: float = 0.0
+    max_size: float = 0.0
+    min_size: float = 0.0
+    updates: int = 0
+    replenishments: int = 0
+    reductions: int = 0
+    executed: float = 0.0
+    reached: bool = False
+
+    def __post_init__(self) -> None:
+        if self.initial_size <= 0:
+            self.initial_size = self.size
+        if self.max_size <= 0:
+            self.max_size = self.size
+        if self.min_size <= 0:
+            self.min_size = self.size
 
     @property
     def persistence_ms(self) -> int:
         return max(0, self.last_seen_ms - self.first_seen_ms)
+
+    @property
+    def absorbed_share(self) -> float:
+        return self.executed / self.initial_size if self.initial_size > 0 else 0.0
+
+    def observe(self, size: float, timestamp_ms: int) -> None:
+        previous = self.size
+        self.size = size
+        self.last_seen_ms = timestamp_ms
+        self.updates += 1
+        self.max_size = max(self.max_size, size)
+        self.min_size = min(self.min_size, size)
+        if size < previous * 0.8:
+            self.reductions += 1
+        elif size > previous * 1.2 and self.reductions > 0:
+            # Cut and rebuilt. That is a defender, not a block.
+            self.replenishments += 1
+
+    def classify(self, now_ms: int) -> str:
+        """What this wall is, right now.
+
+        Order matters: absorption and replenishment are statements about
+        what HAPPENED to the wall and outrank the age buckets, which are
+        statements about how long it has merely existed."""
+        if self.absorbed_share >= ABSORBED_SHARE:
+            return ABSORBED_WALL
+        if self.replenishments >= REPLENISH_EVENTS:
+            return REPLENISHING_WALL
+        age = max(0, now_ms - self.first_seen_ms)
+        if age < TRANSIENT_WALL_MS:
+            return TRANSIENT_WALL
+        if age >= PERSISTENT_WALL_MS:
+            return PERSISTENT_WALL
+        return TRANSIENT_WALL
+
+    def weight(self, now_ms: int) -> float:
+        """How much this wall should count, 0..1.
+
+        Only persistent and replenishing walls carry real weight. A
+        transient one counts for almost nothing, an absorbed one counts
+        against the side it was defending, and a wall that vanished
+        without price ever reaching it is scored as a spoof by the book,
+        not here."""
+        kind = self.classify(now_ms)
+        if kind == PERSISTENT_WALL:
+            return 1.0
+        if kind == REPLENISHING_WALL:
+            return 0.9
+        if kind == ABSORBED_WALL:
+            return 0.2
+        return 0.15
+
+    def as_dict(self, now_ms: int) -> Dict[str, object]:
+        return {
+            "side": self.side, "price": self.price, "size": round(self.size, 6),
+            "initial_size": round(self.initial_size, 6),
+            "persistence_ms": self.persistence_ms, "updates": self.updates,
+            "replenishments": self.replenishments, "reductions": self.reductions,
+            "executed": round(self.executed, 6),
+            "absorbed_share": round(self.absorbed_share, 4),
+            "classification": self.classify(now_ms),
+            "weight": round(self.weight(now_ms), 3),
+        }
 
 
 @dataclass
@@ -106,6 +217,8 @@ class OrderBookMetrics:
     ask_walls: int = 0
     max_wall_persistence_ms: int = 0
     wall_cancellations: int = 0
+    alignment: Dict[str, float] = field(default_factory=dict)
+    alignment_label: str = ""
 
     def as_dict(self) -> Dict[str, object]:
         return {
@@ -122,6 +235,8 @@ class OrderBookMetrics:
             "ask_walls": self.ask_walls,
             "max_wall_persistence_ms": self.max_wall_persistence_ms,
             "wall_cancellations": self.wall_cancellations,
+            "alignment": dict(self.alignment),
+            "alignment_label": self.alignment_label,
         }
 
 
@@ -147,6 +262,7 @@ class OrderBook:
         self._flows: TimeSeries = TimeSeries(horizon_ms=FLOW_WINDOW_MS * 4)
         self._walls: Dict[Tuple[str, float], Wall] = {}
         self._wall_cancels: TimeSeries = TimeSeries(horizon_ms=60_000)
+        self._spoofs: TimeSeries = TimeSeries(horizon_ms=60_000)
 
     # ---- ingest ----
 
@@ -235,15 +351,44 @@ class OrderBook:
                 else:
                     book[price] = size
 
-    def note_trade(self, taker_side: str, quantity: float) -> None:
+    def note_trade(self, taker_side: str, quantity: float,
+                   price: Optional[float] = None) -> None:
         """Tell the book that liquidity was EXECUTED, not withdrawn.
 
         A taker Buy lifts offers, so it consumes the ASK side; a taker
         Sell hits bids. Without this the engine would read every filled
         order as a cancelled one and report constant 'pulling' in exactly
-        the conditions - heavy trading - where pulling matters most."""
+        the conditions - heavy trading - where pulling matters most.
+
+        `price` is optional and is what lets a wall know whether it was
+        traded through or pulled: volume printing at a wall's own price is
+        attributed to it, and a wall that disappears having absorbed
+        nothing while price never reached it is a spoof rather than a
+        defender that gave way."""
         side = "ask" if str(taker_side).lower().startswith("b") else "bid"
-        self._pending_exec[side] += max(0.0, float(quantity))
+        quantity = max(0.0, float(quantity))
+        self._pending_exec[side] += quantity
+        if price is None:
+            return
+        price = float(price)
+        for (wall_side, wall_price), wall in self._walls.items():
+            if wall_side != side:
+                continue
+            # "At this level" means within half a tick of it, and the tick
+            # is inferred from the book rather than configured per symbol.
+            if abs(wall_price - price) <= self._tick() * 0.5:
+                wall.executed += quantity
+                wall.reached = True
+
+    def _tick(self) -> float:
+        """The smallest gap between adjacent levels currently quoted.
+
+        Inferred rather than configured: Bybit's tick size differs per
+        instrument and this engine watches seven of them, so reading it
+        off the book is both correct and free."""
+        prices = sorted(self.bids)[-5:] + sorted(self.asks)[:5]
+        gaps = [abs(b - a) for a, b in zip(prices, prices[1:]) if abs(b - a) > 0]
+        return min(gaps) if gaps else 0.0
 
     # ---- flow bookkeeping ----
 
@@ -297,17 +442,17 @@ class OrderBook:
                     if existing is None:
                         live[key] = Wall(side, price, size, stamp, stamp)
                     else:
-                        existing.size = size
-                        existing.last_seen_ms = stamp
+                        existing.observe(size, stamp)
                         live[key] = existing
         for key, wall in self._walls.items():
             if key in live:
                 continue
-            # Gone. Traded through, or pulled? If the book still shows a
-            # touch on the far side of that price, it was consumed; if
-            # price never reached it, someone withdrew it.
-            if not self._price_reached(wall):
+            # Gone. Traded through, or pulled? If price never reached it
+            # and nothing executed against it, someone withdrew it - which
+            # is the shape of a spoof, and is counted as one.
+            if not self._price_reached(wall) and wall.executed <= 0:
                 self._wall_cancels.add(stamp, wall)
+                self._spoofs.add(stamp, wall)
         self._walls = live
 
     def _price_reached(self, wall: Wall) -> bool:
@@ -440,6 +585,8 @@ class OrderBook:
 
         out.stacked_bid_levels = self._stacked(self.top_bids())
         out.stacked_ask_levels = self._stacked(self.top_asks())
+        out.alignment = self.alignment()
+        out.alignment_label = self.alignment_label()
         out.bid_walls = sum(1 for (side, _), _ in self._walls.items() if side == "bid")
         out.ask_walls = sum(1 for (side, _), _ in self._walls.items() if side == "ask")
         out.max_wall_persistence_ms = max((w.persistence_ms for w in self._walls.values()),
@@ -447,10 +594,116 @@ class OrderBook:
         out.wall_cancellations = len(self._wall_cancels.window(60_000))
         return out
 
+    # ---- alignment across depths ----
+
+    def alignment(self) -> Dict[str, float]:
+        """Whether the depths AGREE, not just what the touch says.
+
+        The failure this exists to prevent: OBI1 at +0.98 with OBI50 at
+        −0.12 and a weighted OBI of −0.03. That is not a strong long. It
+        is one queue at the touch temporarily favouring bids while the
+        book behind it leans the other way - which is frequently a
+        precursor to the opposite move, and is certainly not accumulation.
+
+        Three numbers:
+
+          top_book_score   the first five levels, where the next hundred
+                           milliseconds actually trade
+          deep_book_score  levels 10 through 50, where size that intends
+                           to stay sits
+          consistency      how much the five depths agree with each other,
+                           0 (they contradict) to 1 (unanimous)
+
+        and `book_alignment`, which is the signed reading the score uses:
+        the mean of the depths, multiplied by their consistency. A book
+        that disagrees with itself scores near zero however extreme any
+        one depth is, which is the whole point."""
+        if not self.synced:
+            return {"top_book_score": 0.0, "deep_book_score": 0.0,
+                    "consistency": 0.0, "book_alignment": 0.0}
+
+        depths = {depth: self.obi(depth) for depth in OBI_DEPTHS}
+        top = (depths[1] + depths[5]) / 2.0
+        deep_levels = [depths[10], depths[25], depths[50]]
+        deep = sum(deep_levels) / len(deep_levels)
+
+        values = list(depths.values())
+        total = sum(abs(v) for v in values)
+        consistency = (abs(sum(values)) / total) if total > 0 else 0.0
+
+        # The mean across depths, then discounted by how much they agree.
+        # Weighted toward the deep end on purpose: the touch is the
+        # noisiest part of the book and the easiest to fake.
+        mean = 0.35 * top + 0.65 * deep
+        return {
+            "top_book_score": round(clamp(top), 6),
+            "deep_book_score": round(clamp(deep), 6),
+            "consistency": round(clamp(consistency, 0.0, 1.0), 6),
+            "book_alignment": round(clamp(mean * consistency), 6),
+        }
+
+    def alignment_label(self) -> str:
+        """The alignment said in words, for the panel."""
+        data = self.alignment()
+        top, deep = data["top_book_score"], data["deep_book_score"]
+
+        def side(value: float) -> str:
+            if value > 0.15:
+                return "BULLISH"
+            if value < -0.15:
+                return "BEARISH"
+            return "NEUTRAL"
+
+        top_side, deep_side = side(top), side(deep)
+        if top_side == deep_side:
+            return f"BOOK_{top_side}" if top_side != "NEUTRAL" else "BOOK_BALANCED"
+        return f"TOP_BOOK_{top_side}_DEEP_BOOK_{deep_side}"
+
+    # ---- walls, classified ----
+
+    def wall_summary(self, now_ms: Optional[int] = None) -> Dict[str, object]:
+        now_ms = now_ms or self.updated_at_ms
+        walls = [wall.as_dict(now_ms) for wall in self._walls.values()]
+        by_kind: Dict[str, int] = {}
+        for wall in walls:
+            kind = str(wall["classification"])
+            by_kind[kind] = by_kind.get(kind, 0) + 1
+        bid_weight = sum(float(w["weight"]) * float(w["size"])
+                         for w in walls if w["side"] == "bid")
+        ask_weight = sum(float(w["weight"]) * float(w["size"])
+                         for w in walls if w["side"] == "ask")
+        total = bid_weight + ask_weight
+        return {
+            "walls": sorted(walls, key=lambda w: -float(w["weight"]))[:10],
+            "by_classification": by_kind,
+            "bid_weighted_size": round(bid_weight, 4),
+            "ask_weighted_size": round(ask_weight, 4),
+            # -1..+1: which side's SERIOUS walls are heavier. Transient
+            # ones barely move it - see Wall.weight.
+            "wall_bias": round(((bid_weight - ask_weight) / total) if total > 0 else 0.0, 6),
+            "spoofs_60s": len(self._spoofs.window(60_000)),
+            "cancellations_60s": len(self._wall_cancels.window(60_000)),
+        }
+
+    def raw_absorption(self, window_ms: int = FLOW_WINDOW_MS) -> Dict[str, float]:
+        """Absorption's raw inputs, for the normaliser to scale.
+
+        Returned as the three quantities rather than as the ratio, so the
+        caller can normalise against traded volume AND against depth -
+        `added / executed` alone is an unbounded number that means
+        different things at different activity levels."""
+        bid_flow, ask_flow = self._flow_totals(window_ms)
+        metrics_bid_depth = sum(size for _, size in self.top_bids())
+        metrics_ask_depth = sum(size for _, size in self.top_asks())
+        return {
+            "bid_added": bid_flow.added, "bid_executed": bid_flow.executed,
+            "ask_added": ask_flow.added, "ask_executed": ask_flow.executed,
+            "bid_depth": metrics_bid_depth, "ask_depth": metrics_ask_depth,
+        }
+
     def pressure_component(self) -> float:
         """One number on -1..+1 for the pressure score: how the resting
-        book leans. Blends the weighted OBI with the shallow one so a
-        thin, aggressive touch cannot be hidden by depth further out."""
+        book leans, across depths that agree. See `alignment`."""
         if not self.synced:
             return 0.0
-        return clamp(0.6 * self.weighted_obi() + 0.4 * self.obi(5))
+        return clamp(self.alignment()["book_alignment"])

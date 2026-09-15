@@ -86,6 +86,42 @@ def symbols() -> List[str]:
 
 
 @dataclass(frozen=True)
+class LayerWeights:
+    """How much each of the five independent layers counts.
+
+    The brief's opening numbers. They are a starting point and are said to
+    be one: the right weights are whatever a calibrated backtest says they
+    are, and until there is enough history for that these are a guess with
+    a rationale - flow first because aggression is what actually moves
+    price in the next minute, book second because it is what aggression
+    meets, structure third because it says where the move matters, and
+    positioning and BTC as context rather than cause."""
+
+    flow: float = 0.30
+    book: float = 0.25
+    structure: float = 0.20
+    derivatives: float = 0.15
+    btc_lead: float = 0.10
+
+    def as_dict(self) -> Dict[str, float]:
+        return {"flow": self.flow, "book": self.book, "structure": self.structure,
+                "derivatives": self.derivatives, "btc_lead": self.btc_lead}
+
+    def total(self) -> float:
+        return sum(self.as_dict().values())
+
+
+def layer_weights_from_env() -> LayerWeights:
+    """Each layer overridable on its own, e.g.
+    T3_LEAD_ENGINE_LAYER_FLOW=0.35."""
+    defaults = LayerWeights()
+    values = {}
+    for name, default in defaults.as_dict().items():
+        values[name] = _env_float(f"LAYER_{name.upper()}", default)
+    return LayerWeights(**values)
+
+
+@dataclass(frozen=True)
 class PressureWeights:
     """What each component contributes to the pressure score.
 
@@ -191,6 +227,7 @@ class LeadEngineConfig:
     kline_intervals: List[str] = field(default_factory=lambda: list(DEFAULT_KLINE_INTERVALS))
     orderbook_depth: int = ORDERBOOK_DEPTH
     weights: PressureWeights = field(default_factory=PressureWeights)
+    layer_weights: LayerWeights = field(default_factory=LayerWeights)
     thresholds: Thresholds = field(default_factory=Thresholds)
 
     # Open interest comes from REST, on its own clock, never from the
@@ -219,6 +256,7 @@ class LeadEngineConfig:
             kline_intervals=list(DEFAULT_KLINE_INTERVALS),
             orderbook_depth=_env_int("ORDERBOOK_DEPTH", ORDERBOOK_DEPTH),
             weights=weights_from_env(),
+            layer_weights=layer_weights_from_env(),
             thresholds=thresholds_from_env(),
             oi_poll_seconds=_env_float("OI_POLL_SECONDS", 60.0),
             recompute_interval_seconds=_env_float("RECOMPUTE_INTERVAL_SECONDS", 0.25),
