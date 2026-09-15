@@ -1,0 +1,26 @@
+# Market Lead Engine dependencies.
+#
+# Kept as its own manifest so that what this module needs is visible
+# separately from what the analyser needs, per the brief's section 25.
+# Nothing heavy is added to the main system on its account: every package
+# below is ALREADY a dependency of the project, and the engine was built
+# that way deliberately - a realtime microstructure engine that dragged in
+# numpy, pandas or a C extension would make the whole deployment heavier
+# for one tab.
+#
+# The maths is stdlib: statistics, math, collections.deque. Nothing here
+# needs an array library at 50 book levels and a few thousand trades.
+
+httpx>=0.27          # open interest polling (REST), already used project-wide
+websockets>=12.0     # the Bybit public WebSocket, already used project-wide
+fastapi>=0.110       # the /api/lead-engine router, already used project-wide
+
+# Deliberately absent, and to stay absent:
+#   - any Binance client or SDK (blocked in this deployment; no fallback)
+#   - any LLM / AI provider SDK (the critical path is deterministic)
+#   - numpy / pandas / scipy (not needed at this data volume)
+#
+# If a local model is added later (logistic regression, gradient boosting,
+# as the brief permits), its package belongs HERE and nowhere else, and it
+# must stay off the critical path: a model that fails to load must leave
+# the deterministic engine running.

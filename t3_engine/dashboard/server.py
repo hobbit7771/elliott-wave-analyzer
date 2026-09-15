@@ -122,6 +122,22 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="T3 Elliott Wave Trading Engine Dashboard")
 
+# --- Market Lead Engine -------------------------------------------------
+# A separate realtime microstructure engine that shares this process and
+# nothing else. It is mounted here and started below; those two calls plus
+# one tab in index.html are the ENTIRE contact surface between it and this
+# file. Everything it does lives in t3_engine/lead_engine/, it reaches
+# none of the code in this module, and this module calls only its facade.
+#
+# The import is unconditional but inert: importing the package starts
+# nothing (see lead_engine/__init__.py), and with LEAD_ENGINE_ENABLED
+# unset every route answers {"enabled": false} and no thread exists.
+from t3_engine.lead_engine import api as lead_engine_api          # noqa: E402
+from t3_engine.lead_engine import config as lead_engine_config    # noqa: E402
+from t3_engine.lead_engine.engine import get_engine as get_lead_engine  # noqa: E402
+
+app.include_router(lead_engine_api.router)
+
 # --- live engine registry (spec section 20: one running pipeline per
 # symbol, driven by the public Bybit WebSocket - no API key needed for
 # market data). Kept as simple in-process state: this is a single-process
@@ -174,7 +190,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # value here and the UI keeps "Not sent" as an explicit choice.
 DEFAULT_REASONING_EFFORT = "max"
 
-BUILD_VERSION = "BUILD-CHECK-041"
+BUILD_VERSION = "BUILD-CHECK-042"
 
 
 @app.get("/api/health")
@@ -1219,6 +1235,34 @@ def stale_timeframes(symbol: str, now: Optional[float] = None) -> List[str]:
     except Exception:                       # noqa: BLE001 - a warm-up must
         return list(CLAUDE_TIMEFRAMES)      # never take the process down
     return [t for t in CLAUDE_TIMEFRAMES if t not in fresh]
+
+
+@app.on_event("startup")
+def start_lead_engine() -> None:
+    """Bring the Market Lead Engine up, if it is switched on.
+
+    Wrapped so that a Lead Engine that cannot start leaves a dashboard
+    that runs without it - the isolation requirement, enforced here rather
+    than assumed. `LeadEngine.start()` already swallows its own failures;
+    this second guard covers the construction of the engine itself."""
+    if not lead_engine_config.enabled():
+        logger.info("lead engine: disabled (%s is not true)", lead_engine_config.ENABLED_ENV)
+        return
+    try:
+        started = get_lead_engine().start()
+        logger.info("lead engine: start() returned %s", started)
+    except Exception:                       # noqa: BLE001 - see docstring
+        logger.exception("lead engine failed to start; the dashboard is unaffected")
+
+
+@app.on_event("shutdown")
+def stop_lead_engine() -> None:
+    if not lead_engine_config.enabled():
+        return
+    try:
+        get_lead_engine().stop()
+    except Exception:                       # noqa: BLE001
+        logger.exception("lead engine did not stop cleanly")
 
 
 @app.on_event("startup")

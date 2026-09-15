@@ -97,6 +97,7 @@
     header h1 { flex-basis: 100%; }
   }
 </style>
+  <link rel="stylesheet" href="/static/lead_engine.css">
 </head>
 <body>
 <header>
@@ -155,6 +156,7 @@
   <button data-tab="analyst">AI Analyst</button>
   <button data-tab="mtf">Multi-TF</button>
   <button data-tab="claude">Claude</button>
+  <button data-tab="lead">Lead Engine</button>
 </div>
 <div id="layout">
   <div id="chart"></div>
@@ -420,6 +422,29 @@
         <h2>Structures</h2>
         <div id="claudeStructures"></div>
       </div>
+    </div>
+    <div id="tab-lead" style="display:none;">
+      <!-- MARKET LEAD ENGINE. Everything below this comment is rendered by
+           static/lead_engine.js and styled by static/lead_engine.css. No
+           script in this file reads or writes any of it, and it reads
+           nothing belonging to the other tabs: the only contact is the
+           leadEngineStore.show()/hide() pair called by the tab switcher. -->
+      <div class="note">
+        A separate realtime <strong>market microstructure</strong> engine: its own Bybit socket,
+        its own L2 order book, its own features, its own storage and its own API namespace.
+        It shares this page and nothing else — no Elliott code runs here, and nothing here
+        touches the wave counts, the strategies or the paper trading.
+      </div>
+      <div class="field-row">
+        <label style="font-size:11px;color:#9aa3b2;display:flex;align-items:center;gap:6px;">Symbol
+          <select id="leSymbol"></select>
+        </label>
+        <button id="leRefresh" class="panel-btn">Refresh</button>
+      </div>
+      <div class="le-head" id="leHead"></div>
+      <div id="leBody"></div>
+      <h2>Fleet</h2>
+      <div id="leFleet"></div>
     </div>
     <div id="tab-mtf" style="display:none;">
       <div class="note">
@@ -1211,7 +1236,7 @@ document.getElementById('liveStop').addEventListener('click', async () => {
 // stay clean (no engine overlay ever reaches it), and swapping elements
 // means switching tabs can't disturb the zoom/pan state of either chart.
 const TAB_PANELS = { analysis: 'tab-analysis', ai: 'tab-ai', analyst: 'tab-analyst',
-                     mtf: 'tab-mtf', claude: 'tab-claude' };
+                     mtf: 'tab-mtf', claude: 'tab-claude', lead: 'tab-lead' };
 document.querySelectorAll('#tabs button').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('#tabs button').forEach(b => b.classList.remove('active'));
@@ -1222,15 +1247,22 @@ document.querySelectorAll('#tabs button').forEach(btn => {
       document.getElementById(id).style.display = tab === active ? '' : 'none';
     });
     const onAnalyst = active === 'analyst' || active === 'mtf' || active === 'claude';
+    const onLead = active === 'lead';
     // 'block', not '': #analystChart is display:none in the stylesheet, and
     // clearing the inline style just falls back to that rule - which left
     // the tab showing an empty gap where the chart should be.
-    document.getElementById('chart').style.display = onAnalyst ? 'none' : 'block';
+    document.getElementById('chart').style.display = (onAnalyst || onLead) ? 'none' : 'block';
     document.getElementById('analystChart').style.display = onAnalyst ? 'block' : 'none';
     if (onAnalyst) ensureAnalystChart();
     if (active === 'mtf') loadSavedMtf();
     if (active === 'analyst') loadSavedCounts();
     if (active === 'claude') loadClaudeTimeframes();
+    // The Lead Engine tab drives itself; it is told when it is on
+    // screen and when it is not, and it polls only while it is on.
+    if (window.leadEngineStore) {
+      if (active === 'lead') window.leadEngineStore.show();
+      else window.leadEngineStore.hide();
+    }
   });
 });
 
@@ -2763,5 +2795,6 @@ loadSymbolList();
 // asked for it.
 resumeJobs();
 </script>
+  <script src="/static/lead_engine.js"></script>
 </body>
 </html>
