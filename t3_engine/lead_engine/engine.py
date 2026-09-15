@@ -115,6 +115,11 @@ class LeadEngine:
                 depth=self.config.orderbook_depth,
                 connect_fn=self._connect_fn,
             )
+            # A book that desynced used to stay dead until the next
+            # reconnect, because nothing asked Bybit for another
+            # snapshot. The stream now tells the engine which books to
+            # throw away, and asks the exchange to resend them.
+            self.stream.on_resync(self._reset_books)
             self.stream.start()
             self.oi_poller = OpenInterestPoller(
                 symbols=self.config.symbols,
@@ -173,12 +178,25 @@ class LeadEngine:
         state.health.ws_connected = True
         state.health.messages += 1
         if self.stream is not None:
-            state.health.ws_latency_ms = self.stream.stats.latency_ms
-            state.health.reconnects = self.stream.stats.reconnects
+            stats = self.stream.stats
+            state.health.reconnects = stats.reconnects
+            state.health.dropped_messages = stats.dropped
+            if not state.health.last_book_receive_ms:
+                # Until this symbol's own book has landed, the stream's
+                # median is the only latency figure there is. Once it has,
+                # `on_orderbook` sets the per-frame value, which is the
+                # one that belongs to this instrument.
+                state.health.network_latency_ms = stats.network_latency_ms
 
         kind = parsed["kind"]
         if kind == "orderbook":
+            was_synced = state.book.synced
             state.on_orderbook(message)
+            if was_synced and not state.book.synced:
+                # The sequence broke, or the book crossed. Neither repairs
+                # itself: Bybit only sends a snapshot on subscribe, so a
+                # desynced book stays desynced until one is asked for.
+                self._request_resync(symbol, state.book.desync_reason)
             self.bus.publish(bus_module.TOPIC_ORDERBOOK,
                              {"symbol": symbol, "synced": state.book.synced})
         elif kind == "publicTrade":
@@ -193,7 +211,27 @@ class LeadEngine:
         elif kind == "kline":
             self._on_klines(state, parsed["detail"], message)
 
-        state.health.processing_ms = (time.perf_counter() - began) * 1000.0
+        state.health.processing_latency_ms = (time.perf_counter() - began) * 1000.0
+        state.health.last_process_ms = int(time.time() * 1000)
+
+    def _reset_books(self, symbols: List[str]) -> None:
+        """Called by the stream when a book must be rebuilt from scratch."""
+        for symbol in symbols:
+            state = self.states.get(str(symbol).upper())
+            if state is None:
+                continue
+            state.book.reset("stream resync")
+            state.health.orderbook_synced = False
+
+    def _request_resync(self, symbol: str, reason: str) -> None:
+        stream = self.stream
+        if stream is None:
+            return
+        try:
+            stream._demand_resync([symbol], reason or "desync")
+        except Exception:                        # noqa: BLE001 - a failed
+            logger.debug("lead_engine: resync request failed for %s",  # resync
+                         symbol, exc_info=True)  # is retried on the next gap
 
     def _on_trades(self, state: SymbolState, message: Dict[str, Any]) -> None:
         for item in (message.get("data") or []):

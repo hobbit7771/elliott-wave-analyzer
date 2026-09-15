@@ -201,7 +201,22 @@ class Thresholds:
     high_probability: float = 72.0
     a_plus_probability: float = 85.0
 
-    # Data older than this makes the engine DEGRADED and mutes signals.
+    # ---- data freshness --------------------------------------------
+    #
+    # Milliseconds, and deliberately tight. An order book on a linear
+    # perpetual updates every 20-100ms by construction, so a book a
+    # second old is not "a bit behind", it is describing a market that
+    # has moved. The two levels are different decisions: DEGRADED says
+    # "shown, but do not trust it", SIGNALS_DISABLED says "no opinion at
+    # all". Both configurable, because the right numbers depend on the
+    # instrument and the host.
+    book_age_degraded_ms: float = 1_000.0
+    book_age_signals_off_ms: float = 2_500.0
+    trade_age_signals_off_ms: float = 1_500.0
+
+    # The older, coarser limits. Kept because the quiet symbols genuinely
+    # go a long time without a print and these gate the NOTES rather than
+    # the signals.
     max_book_age_seconds: float = 5.0
     max_trade_age_seconds: float = 30.0
     max_ticker_age_seconds: float = 30.0

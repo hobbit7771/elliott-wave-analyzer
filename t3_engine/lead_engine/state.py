@@ -122,17 +122,30 @@ class SymbolState:
     def on_orderbook(self, message: Dict[str, Any]) -> bool:
         applied = self.book.apply(message)
         stamp = int(message.get("ts") or 0)
+        # Exchange stamp and arrival stamp, kept apart. The difference is
+        # the wire; `now` minus the arrival stamp is how current THIS
+        # process is. Conflating them makes a fast link carrying old data
+        # indistinguishable from a slow link carrying fresh data.
+        received = int(message.get("_received_at_ms") or 0) or int(time.time() * 1000)
         if stamp:
             self.health.last_book_ms = stamp
+            self.health.network_latency_ms = max(0.0, float(received - stamp))
+        self.health.last_book_receive_ms = received
         self.health.orderbook_synced = self.book.synced
+        self.health.sequence = self.book.sequence_stats()
         if not applied and str(message.get("type", "")).lower() == "delta":
             self.health.dropped_messages = self.book.gaps
         if applied and self.book.synced:
             self.microprice.observe(stamp or self.health.last_book_ms,
                                     self.book.microprice(), self.book.midpoint())
-            metrics = self.book.metrics()
+            # The two depths, not the whole metric set. `metrics()`
+            # computes OBI at five depths, weighted OBI, walls, absorption
+            # and stacking; asking for all of that on every delta was the
+            # largest single cost in the ingest path and it was being
+            # thrown away except for two numbers.
+            bid_depth, ask_depth = self.book.side_totals()
             self.prebreak.observe_depth(stamp or self.health.last_book_ms,
-                                        metrics.bid_depth, metrics.ask_depth)
+                                        bid_depth, ask_depth)
         return applied
 
     def on_trade(self, trade: Trade) -> None:
@@ -149,6 +162,7 @@ class SymbolState:
         self.calibrator.resolve(trade.price, trade.timestamp_ms)
         self.last_price = trade.price
         self.health.last_trade_ms = trade.timestamp_ms
+        self.health.last_trade_receive_ms = int(time.time() * 1000)
         self.lead_lag.observe(self.symbol, trade.timestamp_ms, trade.price)
         closed = self.local_candles.add(trade)
         if closed is not None:
@@ -159,6 +173,7 @@ class SymbolState:
     def on_ticker(self, data: Dict[str, Any], stamp_ms: int) -> None:
         self.ticker.update({k: v for k, v in data.items() if v is not None})
         self.health.last_ticker_ms = stamp_ms
+        self.health.last_ticker_receive_ms = int(time.time() * 1000)
         price = data.get("lastPrice") or data.get("markPrice")
         try:
             if price is not None:
