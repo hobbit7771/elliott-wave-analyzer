@@ -692,3 +692,39 @@ def test_btc_flow_is_read_from_btcs_own_frame_not_rescored():
     engine.get_state("INJUSDT", force=True)
     engine.get_state("SOLUSDT", force=True)
     assert len(feature.samples) == after_own
+
+
+def test_the_recorder_reports_the_feed_rate_between_sweeps(caplog):
+    """The ingest rate was only visible to whoever could open
+    /api/lead-engine/status in a browser, which is no help when the
+    question is what the feed was doing an hour ago."""
+    import logging
+
+    from t3_engine.lead_engine.config import LeadEngineConfig
+    from t3_engine.lead_engine.engine import LeadEngine
+    from t3_engine.lead_engine.storage import Recorder, Storage
+
+    engine = LeadEngine(LeadEngineConfig(enabled=True, symbols=["INJUSDT"]))
+    recorder = Recorder(engine, Storage(), interval_seconds=15.0)
+
+    # No socket yet: a heartbeat must not be the thing that breaks a sweep.
+    engine.stream = None
+    recorder.sweep_once()
+
+    class _Stream:
+        def __init__(self):
+            from t3_engine.lead_engine.bybit_ws import StreamStats
+
+            self.stats = StreamStats()
+            self.stats.connected = True
+
+    engine.stream = _Stream()
+    with caplog.at_level(logging.INFO, logger="t3_engine.lead_engine.storage"):
+        recorder.sweep_once()          # no previous sweep: rate unknown
+        engine.stream.stats.messages = 900
+        recorder.sweep_once()
+
+    lines = [r.message for r in caplog.records if "lead_engine feed" in r.message]
+    assert len(lines) == 2
+    assert "rate=?/s" in lines[0], lines[0]
+    assert "messages=900" in lines[1] and "rate=?/s" not in lines[1], lines[1]
