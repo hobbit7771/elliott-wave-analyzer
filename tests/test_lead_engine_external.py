@@ -22,6 +22,7 @@ from t3_engine.lead_engine import api_v1
 from t3_engine.lead_engine import auth
 from t3_engine.lead_engine import config as le_config
 from t3_engine.lead_engine import engine as engine_module
+from t3_engine.lead_engine import snapshot as snapshot_module
 
 client = TestClient(server_module.app)
 
@@ -370,3 +371,67 @@ def test_the_mcp_package_never_imports_the_engine():
                 assert not module.startswith("t3_engine"), \
                     f"{path.name} imports {module}; the MCP adapter must reach the " \
                     "engine over HTTP only"
+
+
+def _synthetic_candles(symbol, interval="5m", limit=400, *args, **kwargs):
+    """Candles in `fetch_candles`' exact shape, without an exchange.
+
+    The multi-timeframe block is assembled from REST history, and there is
+    no network in a test run - so without this every timeframe comes back
+    `available: false` and the test asserts nothing."""
+    import math
+    import time as _time
+
+    from t3_engine.lead_engine.candles_rest import (INTERVAL_SECONDS,
+                                                    normalize_interval)
+
+    label = normalize_interval(interval) or "5m"
+    seconds = INTERVAL_SECONDS[label]
+    now = int(_time.time())
+    start = now - (now % seconds) - seconds * (limit - 1)
+    price = 5.70
+    rows = []
+    for index in range(limit):
+        price = price * (1 + 0.0009 * math.sin(index / 11.0)) + 0.0004
+        high = price * 1.0012
+        low = price * 0.9988
+        rows.append({"time": start + index * seconds, "open": round(price, 5),
+                     "high": round(high, 5), "low": round(low, 5),
+                     "close": round(price, 5), "volume": 120.0 + index % 40,
+                     "closed": index < limit - 1, "interval": label,
+                     "interval_seconds": seconds})
+    return rows
+
+
+def test_the_multi_tf_block_carries_its_reading_at_the_top_level(external_on,
+                                                                 monkeypatch):
+    """An agent asking "what is the 4h trend" should not have to know that
+    the answer lives inside a nested structure block."""
+    monkeypatch.setattr(snapshot_module, "fetch_candles", _synthetic_candles)
+    _seed_engine()
+    body = client.get(f"{V1}/multi-tf/INJUSDT", headers={"x-api-key": TOKEN}).json()
+    frames = body["timeframes"]
+    assert set(frames) == set(snapshot_module.MTF_TIMEFRAMES)
+    for label, block in frames.items():
+        assert block["available"] is True, block
+        for field in ("trend", "premium_discount", "range_position",
+                      "swing_high", "swing_low", "support", "resistance",
+                      "bos", "choch", "ema", "ohlc_summary", "current_candle"):
+            assert field in block, f"{label} is missing {field}"
+        assert set(block["ema"]) == {"ema9", "ema18", "ema50", "ema200"}
+
+
+def test_every_flow_window_reports_a_bounded_delta(external_on):
+    """The unbounded `buy / sell` ratio is the defect this guards. It is
+    still reported as a diagnostic, capped so it cannot print a
+    seven-figure number, but every window now also carries the bounded
+    form that anything downstream should read."""
+    from t3_engine.lead_engine.trade_flow import RATIO_DISPLAY_CAP
+
+    _seed_engine()
+    body = client.get(f"{V1}/flow/INJUSDT", headers={"x-api-key": TOKEN}).json()
+    windows = body["trade_flow"]["windows"]
+    assert len(windows) >= 8
+    for label, window in windows.items():
+        assert -1.0 <= window["normalized_delta"] <= 1.0, (label, window)
+        assert window["delta_ratio"] <= RATIO_DISPLAY_CAP, (label, window)

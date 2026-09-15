@@ -233,6 +233,11 @@ def timeframe_context(symbol: str, timeframe: str, base_url: str,
         },
         "ema": {name: (line[-1]["value"] if line else None) for name, line in emas.items()},
         "structure": structure,
+        # Hoisted alongside the rest of the flat names an agent can rely
+        # on without walking into the nested block.
+        "trend": structure.get("trend"),
+        "premium_discount": structure.get("premium_discount"),
+        "range_position": structure.get("range_position"),
         "swing_high": structure.get("swing_high"),
         "swing_low": structure.get("swing_low"),
         "bos": structure.get("bos"), "bos_direction": structure.get("bos_direction"),
