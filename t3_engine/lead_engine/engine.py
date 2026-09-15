@@ -173,7 +173,7 @@ class LeadEngine:
         state.health.ws_connected = True
         state.health.messages += 1
         if self.stream is not None:
-            state.health.latency_ms = self.stream.stats.latency_ms
+            state.health.ws_latency_ms = self.stream.stats.latency_ms
             state.health.reconnects = self.stream.stats.reconnects
 
         kind = parsed["kind"]

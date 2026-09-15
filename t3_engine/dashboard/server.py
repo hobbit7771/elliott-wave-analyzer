@@ -133,10 +133,15 @@ app = FastAPI(title="T3 Elliott Wave Trading Engine Dashboard")
 # nothing (see lead_engine/__init__.py), and with LEAD_ENGINE_ENABLED
 # unset every route answers {"enabled": false} and no thread exists.
 from t3_engine.lead_engine import api as lead_engine_api          # noqa: E402
+from t3_engine.lead_engine import api_v1 as lead_engine_api_v1    # noqa: E402
 from t3_engine.lead_engine import config as lead_engine_config    # noqa: E402
 from t3_engine.lead_engine.engine import get_engine as get_lead_engine  # noqa: E402
 
 app.include_router(lead_engine_api.router)
+# The versioned, token-gated, read-only external surface. Mounted always;
+# every route inside refuses unless EXTERNAL_AI_ACCESS_ENABLED is true AND
+# a valid LEAD_ENGINE_API_KEY is presented - see lead_engine/auth.py.
+app.include_router(lead_engine_api_v1.router)
 
 # --- live engine registry (spec section 20: one running pipeline per
 # symbol, driven by the public Bybit WebSocket - no API key needed for
@@ -190,7 +195,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # value here and the UI keeps "Not sent" as an explicit choice.
 DEFAULT_REASONING_EFFORT = "max"
 
-BUILD_VERSION = "BUILD-CHECK-042"
+BUILD_VERSION = "BUILD-CHECK-043"
 
 
 @app.get("/api/health")

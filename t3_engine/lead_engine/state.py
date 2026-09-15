@@ -233,6 +233,7 @@ class SymbolState:
                 (now - self._snapshot_at) < self.config.recompute_interval_seconds:
             return self._snapshot
 
+        now_ms = int(now * 1000)
         book_metrics = self.book.metrics()
         layers = self.layer_scores(btc_state)
         pressure = pressure_score(layers, self.config.layer_weights)
@@ -267,11 +268,10 @@ class SymbolState:
         # ask whether this score has earned the word "probability" yet.
         # Opening happens BEFORE the outcome exists - that is the whole
         # design; see calibration.py.
-        stamp_ms = int(now * 1000)
         for result in (long_break, short_break):
             if result.level:
                 self.calibrator.observe(result.direction, result.probability,
-                                        result.level, price, stamp_ms)
+                                        result.level, price, now_ms)
         long_label = label_for(long_break.probability,
                                self.calibrator.probability(long_break.probability,
                                                            15_000, LONG))
@@ -279,7 +279,6 @@ class SymbolState:
                                 self.calibrator.probability(short_break.probability,
                                                             15_000, SHORT))
 
-        now_ms = int(now * 1000)
         verdict = assess(self.health, self.thresholds, now_ms=now_ms, started=True)
         signal = self.signals.update(SignalInputs(
             long_pressure=pressure.long_pressure,
@@ -303,6 +302,7 @@ class SymbolState:
             "price": price,
             "ticker": dict(self.ticker),
             "orderbook": book_metrics.as_dict(),
+            "walls": self.book.wall_summary(now_ms) if self.book.synced else {},
             "microprice": self.microprice.as_dict(),
             "trade_flow": self.flow.as_dict(),
             "cvd": self.cvd.as_dict(),
