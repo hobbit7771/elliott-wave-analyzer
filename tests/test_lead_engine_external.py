@@ -186,7 +186,7 @@ def test_every_response_says_how_old_its_data_is(external_on):
     body = client.get(f"{V1}/snapshot/INJUSDT", headers={"x-api-key": TOKEN}).json()
     assert body["server_time"] > 0
     assert "book_age_ms" in body and "trade_age_ms" in body
-    assert body["quality"] in ("ok", "degraded", "unavailable")
+    assert body["quality"] in ("ok", "degraded", "stale", "unavailable")
     assert isinstance(body["signals_valid"], bool)
 
 
@@ -195,11 +195,16 @@ def test_stale_data_is_never_presented_as_current(external_on):
     not from whether the numbers look plausible."""
     engine = _seed_engine()
     state = engine.states["INJUSDT"]
+    # Both clocks, because both are real: the exchange said this a minute
+    # ago AND it landed a minute ago. Ageing only the exchange stamp would
+    # describe a frame that arrived late, which is a different fault.
     state.health.last_book_ms = int(state.health.last_book_ms) - 60_000
+    state.health.last_book_receive_ms = int(state.health.last_book_receive_ms
+                                            or state.health.last_book_ms) - 60_000
     body = client.get(f"{V1}/snapshot/INJUSDT", headers={"x-api-key": TOKEN}).json()
     assert body["signals_valid"] is False
-    assert body["quality"] == "degraded"
-    assert body["engine_status"] in ("STALE_DATA", "DEGRADED")
+    assert body["quality"] == "stale"
+    assert body["engine_status"] in ("WS_CONNECTED_DATA_STALE", "STALE_DATA", "DEGRADED")
 
 
 def test_a_break_score_is_not_called_a_probability_until_it_is_one(external_on):

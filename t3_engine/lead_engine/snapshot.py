@@ -81,7 +81,16 @@ def market_snapshot(engine, symbol: str) -> Dict[str, Any]:
     smc = frame.get("smc") or {}
 
     signals_valid = bool(health.get("signals_enabled"))
-    quality = "ok" if health.get("status") == "OK" else "degraded"
+    # Three answers, not two. "stale" is the case where the socket is up
+    # and frames are arriving but what they carry is old - which a client
+    # must be able to tell apart from a feed that is merely imperfect.
+    status = health.get("status")
+    if status == "OK":
+        quality = "ok"
+    elif status in ("WS_CONNECTED_DATA_STALE", "STALE_DATA"):
+        quality = "stale"
+    else:
+        quality = "degraded"
 
     windows = flow.get("windows") or {}
 

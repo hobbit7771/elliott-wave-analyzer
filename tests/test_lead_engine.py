@@ -520,42 +520,100 @@ def test_missing_liquidations_do_not_degrade_the_feed():
     assert assess(health, _T(), now_ms).status == "OK"
 
 
-def test_a_stale_order_book_reports_stale_not_merely_degraded():
-    """Old data and a dead socket are different failures and now have
-    different names, so the header can no longer print "feed OK" beside a
-    nine-second book age."""
-    from t3_engine.lead_engine.health import DEGRADED, STALE_DATA
+def _health(now_ms, book_age, trade_age=500, **kwargs):
+    """A StreamHealth whose book and trade frames landed that long ago."""
+    health = StreamHealth("TESTUSDT", ws_connected=kwargs.pop("ws_connected", True),
+                          orderbook_synced=kwargs.pop("orderbook_synced", True))
+    health.last_book_ms = health.last_book_receive_ms = now_ms - book_age
+    health.last_trade_ms = health.last_trade_receive_ms = now_ms - trade_age
+    health.last_ticker_ms = now_ms - 500
+    for name, value in kwargs.items():
+        setattr(health, name, value)
+    return health
+
+
+def test_a_socket_that_is_up_carrying_old_data_is_never_called_ok():
+    """"Connected" and "current" are not the same claim, and the first
+    build made the first while meaning the second - which is how a header
+    came to read "feed OK" beside a nine-second book age."""
+    from t3_engine.lead_engine.health import DEGRADED, WS_CONNECTED_DATA_STALE
 
     now_ms = int(time.time() * 1000)
-    health = StreamHealth("TESTUSDT", ws_connected=True, orderbook_synced=True,
-                          last_book_ms=now_ms - 20_000, last_trade_ms=now_ms - 500,
-                          last_ticker_ms=now_ms - 500)
-    verdict = assess(health, _T(), now_ms)
-    assert verdict.status == STALE_DATA and verdict.signals_enabled is False
+    verdict = assess(_health(now_ms, 20_000), _T(), now_ms)
+    assert verdict.status == WS_CONNECTED_DATA_STALE
+    assert verdict.signals_enabled is False
 
-    # A socket that is down is DEGRADED, not STALE: nothing is old, there
+    # A socket that is down is DEGRADED, not stale: nothing is old, there
     # is simply nothing.
-    down = StreamHealth("TESTUSDT", ws_connected=False, orderbook_synced=True,
-                        last_book_ms=now_ms - 100, last_trade_ms=now_ms - 100,
-                        last_ticker_ms=now_ms - 100)
+    down = _health(now_ms, 100, ws_connected=False)
     assert assess(down, _T(), now_ms).status == DEGRADED
+
+
+def test_the_freshness_thresholds_are_the_two_decisions_they_claim_to_be():
+    """A book a second old is shown but not trusted; a book two and a
+    half seconds old buys no opinion at all. On a perpetual whose book
+    ticks every 20-100ms, neither number is harsh."""
+    from t3_engine.lead_engine.health import OK, WS_CONNECTED_DATA_STALE
+
+    now_ms = int(time.time() * 1000)
+    thresholds = _T()
+
+    fresh = assess(_health(now_ms, 200, 400), thresholds, now_ms)
+    assert fresh.status == OK and fresh.signals_enabled is True
+
+    degraded = assess(_health(now_ms, 1_400, 400), thresholds, now_ms)
+    assert degraded.status == WS_CONNECTED_DATA_STALE
+    assert degraded.signals_enabled is False
+
+    muted = assess(_health(now_ms, 3_000, 400), thresholds, now_ms)
+    assert muted.signals_enabled is False
+
+    no_trades = assess(_health(now_ms, 200, 2_000), thresholds, now_ms)
+    assert no_trades.signals_enabled is False
+    assert any("no trade" in reason for reason in no_trades.reasons)
+
+
+def test_a_desynced_book_says_why_rather_than_only_that():
+    """"Order book not synced" is not a diagnosis. The sequence that broke
+    is one, and the resync that follows depends on knowing which."""
+    now_ms = int(time.time() * 1000)
+    health = _health(now_ms, 200, orderbook_synced=False)
+    health.sequence = {"desync_reason": "sequence gap: expected 12, got 19",
+                       "sequence_gaps": 1, "resync_count": 1}
+    verdict = assess(health, _T(), now_ms)
+    assert verdict.signals_enabled is False
+    assert any("expected 12, got 19" in reason for reason in verdict.reasons)
 
 
 def test_the_four_clocks_measure_four_different_things():
     """The defect this replaces: one number printed under two names, so
     "latency 3334ms" and "book 3.3s" in the header were the same
-    staleness twice. The case that hid is a FAST link carrying OLD data."""
+    staleness twice. The case that hid is a FAST link carrying OLD data.
+
+    The four are now stored apart - exchange, receive, process, ui - so
+    every age is measured from the clock that answers its own question."""
     now_ms = int(time.time() * 1000)
-    health = StreamHealth("TESTUSDT", ws_connected=True, orderbook_synced=True,
-                          last_book_ms=now_ms - 9_000, last_trade_ms=now_ms - 400,
-                          last_ticker_ms=now_ms - 400, ws_latency_ms=40.0,
-                          processing_ms=0.6)
+    health = StreamHealth("TESTUSDT", ws_connected=True, orderbook_synced=True)
+    health.last_book_ms = now_ms - 9_000          # exchange said 9s ago
+    health.last_book_receive_ms = now_ms - 8_960  # it landed 40ms later
+    health.last_trade_ms = health.last_trade_receive_ms = now_ms - 400
+    health.last_ticker_ms = now_ms - 400
+    health.last_ui_ms = now_ms - 250
+    health.network_latency_ms = 40.0
+    health.processing_latency_ms = 0.6
+
     payload = health.as_dict(now_ms)
-    assert payload["ws_latency_ms"] == 40.0
-    assert payload["book_age_ms"] == pytest.approx(9000, abs=50)
+    assert payload["network_latency_ms"] == 40.0
+    assert payload["processing_latency_ms"] == 0.6
+    assert payload["book_age_ms"] == pytest.approx(8_960, abs=50)
+    assert payload["book_data_age_ms"] == pytest.approx(9_000, abs=50)
     assert payload["trade_age_ms"] == pytest.approx(400, abs=50)
-    assert payload["processing_ms"] == 0.6
-    assert payload["ws_latency_ms"] < payload["book_age_ms"] / 100
+    assert payload["ui_age_ms"] == pytest.approx(250, abs=50)
+    # The whole point: a fast link carrying old data.
+    assert payload["network_latency_ms"] < payload["book_age_ms"] / 100
+    # And the old names still mean what they always meant.
+    assert payload["ws_latency_ms"] == payload["network_latency_ms"]
+    assert payload["processing_ms"] == payload["processing_latency_ms"]
 
 
 # ---- bus and storage ----------------------------------------------------

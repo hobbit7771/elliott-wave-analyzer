@@ -240,6 +240,13 @@ class OrderBookMetrics:
         }
 
 
+def _price_of(item: Tuple[float, float]) -> float:
+    """Sort key as a module function rather than a lambda: profiled at
+    6.6 million calls for 3,000 deltas, where the lambda's own frame was
+    a measurable share of the cost."""
+    return item[0]
+
+
 class OrderBook:
     """One instrument's book. Not thread-safe by itself; the engine owns
     one per symbol and touches it only from the stream thread."""
@@ -258,6 +265,11 @@ class OrderBook:
         self.deltas_applied = 0
         self.gaps = 0
         self.crossings = 0
+        self.resyncs = 0
+        self.desync_reason = ""
+        self._sorted_version: Optional[Tuple] = None
+        self._sorted_bids: List[Tuple[float, float]] = []
+        self._sorted_asks: List[Tuple[float, float]] = []
         self._pending_exec: Dict[str, float] = {"bid": 0.0, "ask": 0.0}
         self._flows: TimeSeries = TimeSeries(horizon_ms=FLOW_WINDOW_MS * 4)
         self._walls: Dict[Tuple[str, float], Wall] = {}
@@ -265,6 +277,37 @@ class OrderBook:
         self._spoofs: TimeSeries = TimeSeries(horizon_ms=60_000)
 
     # ---- ingest ----
+
+    def reset(self, reason: str = "resync") -> None:
+        """Throw the local book away.
+
+        Called when the socket reconnected, when frames were dropped, or
+        when the sequence broke. Everything derived from the book goes
+        with it: half a book is not a smaller book, it is a wrong one.
+        The counters survive, because they are the record of how often
+        this had to happen."""
+        self.bids.clear()
+        self.asks.clear()
+        self.synced = False
+        self.last_update_id = None
+        self.updated_at_ms = 0
+        self.desync_reason = reason
+        self.resyncs += 1
+        self._pending_exec = {"bid": 0.0, "ask": 0.0}
+        self._walls.clear()
+
+    def sequence_stats(self) -> Dict[str, object]:
+        """What the sequence actually did, for the health block."""
+        return {
+            "last_update_id": self.last_update_id,
+            "sequence_gaps": self.gaps,
+            "snapshots_received": self.snapshots,
+            "deltas_received": self.deltas_applied,
+            "resync_count": self.resyncs,
+            "crossed_books": self.crossings,
+            "synced": self.synced,
+            "desync_reason": "" if self.synced else self.desync_reason,
+        }
 
     def apply(self, message: Dict) -> bool:
         """Apply one orderbook message. False when it was not usable.
@@ -289,8 +332,10 @@ class OrderBook:
             if self._crossed():
                 self.crossings += 1
                 self.synced = False
+                self.desync_reason = "snapshot crossed"
                 return False
             self.synced = True
+            self.desync_reason = ""
             self.updated_at_ms = stamp or self.updated_at_ms
             self._pending_exec = {"bid": 0.0, "ask": 0.0}
             # Walls are registered from the snapshot too, not only from
@@ -315,6 +360,9 @@ class OrderBook:
                 # whole sequence check exists to prevent.
                 self.gaps += 1
                 self.synced = False
+                self.desync_reason = (
+                    f"sequence gap: expected {self.last_update_id + 1}, "
+                    f"got {update_id}")
                 return False
 
         before_bids = dict(self.bids)
@@ -336,6 +384,7 @@ class OrderBook:
             # derived from a book that cannot be real.
             self.crossings += 1
             self.synced = False
+            self.desync_reason = "crossed book after delta"
             return False
         self._record_flow(before_bids, before_asks, stamp)
         self._track_walls(stamp)
@@ -440,8 +489,8 @@ class OrderBook:
         threshold = self.thresholds.wall_multiple * self._median_level_size()
         live: Dict[Tuple[str, float], Wall] = {}
         if threshold > 0:
-            for side, book in (("bid", self.bids), ("ask", self.asks)):
-                for price, size in self._top(book, side, self.depth):
+            for side, levels in (("bid", self.top_bids()), ("ask", self.top_asks())):
+                for price, size in levels:
                     if size < threshold:
                         continue
                     key = (side, price)
@@ -495,16 +544,35 @@ class OrderBook:
 
     # ---- views ----
 
-    @staticmethod
-    def _top(book: Dict[float, float], side: str, count: int) -> List[Tuple[float, float]]:
-        ordered = sorted(book.items(), key=lambda kv: kv[0], reverse=(side == "bid"))
-        return ordered[:count]
+    def _sorted_sides(self) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
+        """Both sides, ordered, sorted at most once per book version.
+
+        `metrics()` asks for the top of the book about fifty times - OBI
+        at five depths, weighted OBI, walls, absorption, stacking - and
+        every one of those used to sort the whole book again. Profiled at
+        141,000 sorts for 3,000 deltas, which was the single largest cost
+        in the ingest path and the reason the consumer could not keep up
+        with a 200 frame/second feed."""
+        version = (self.last_update_id, self.updated_at_ms,
+                   len(self.bids), len(self.asks))
+        if self._sorted_version != version:
+            self._sorted_bids = sorted(self.bids.items(), key=_price_of, reverse=True)
+            self._sorted_asks = sorted(self.asks.items(), key=_price_of)
+            self._sorted_version = version
+        return self._sorted_bids, self._sorted_asks
 
     def top_bids(self, count: Optional[int] = None) -> List[Tuple[float, float]]:
-        return self._top(self.bids, "bid", count or self.depth)
+        return self._sorted_sides()[0][:count or self.depth]
 
     def top_asks(self, count: Optional[int] = None) -> List[Tuple[float, float]]:
-        return self._top(self.asks, "ask", count or self.depth)
+        return self._sorted_sides()[1][:count or self.depth]
+
+    def side_totals(self) -> Tuple[float, float]:
+        """Total resting size on each side. Cheap: no sort, no slice.
+
+        Exists because the pre-break engine wants the two depths on every
+        delta and used to get them by asking for the whole metric set."""
+        return (sum(self.bids.values()), sum(self.asks.values()))
 
     def best_bid(self) -> Optional[float]:
         return max(self.bids) if self.bids else None
