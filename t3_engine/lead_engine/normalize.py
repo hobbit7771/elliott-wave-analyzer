@@ -237,6 +237,37 @@ def deadband(value: float, previous: Optional[float], threshold: float) -> float
     return previous if abs(value - previous) < threshold else value
 
 
+def signed_strength(normalizer, name: str, value: Optional[float]) -> Optional[float]:
+    """Direction from the value, magnitude from its own recent history.
+
+    The bug this exists to prevent, in full, because it is subtle and it
+    was live:
+
+      CVD had been climbing hard - say +500 a minute - and then kept
+      climbing, but only +100 a minute. A Z-SCORE of +100 against a
+      rolling mean of +500 is strongly NEGATIVE, so "buying, weaker than
+      it was" came out as selling. The flow layer then reported a bearish
+      component in the middle of a bid.
+
+    A z-score answers "is this unusual", which is the right question for
+    a MAGNITUDE and the wrong one for a DIRECTION, because re-centring on
+    the recent mean can invert the sign of a quantity that never changed
+    sign. So the sign is taken from the raw value and never from the
+    normaliser, and the normaliser is asked only how big this move is
+    against the sizes it has been seeing - a percentile, which is 0..1 by
+    construction and cannot flip anything.
+
+    Returns None when there is nothing to say."""
+    if value is None:
+        return None
+    number = float(value)
+    if number == 0.0:
+        return 0.0
+    strength = normalizer.update(name, abs(number), "percentile")
+    direction = 1.0 if number > 0 else -1.0
+    return clamp(direction * float(strength))
+
+
 def agreement(values: List[float]) -> float:
     """How much a set of signed scores points the same way, 0..1.
 

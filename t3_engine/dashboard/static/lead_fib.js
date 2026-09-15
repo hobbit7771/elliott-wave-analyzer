@@ -50,6 +50,10 @@
     this.timeframe = options.timeframe;
     this.ratios = (options.ratios || ALL).slice();
     this.drawings = [];        // { id, start, end, lines: [priceLine], hidden }
+    // Nothing has been read from storage yet, so `this.drawings` being
+    // empty means "not loaded", not "the user has none". Saving on that
+    // distinction is how the saved set got erased - see setChart.
+    this.loaded = false;
     this.armed = false;
     this.pendingPoint = null;
     this.hidden = false;
@@ -63,7 +67,8 @@
   /* ---- persistence -------------------------------------------------- */
 
   FibTool.prototype.save = function () {
-    try {
+    if (!this.loaded) return;    // see setChart: an unloaded tool has
+    try {                        // nothing to say about what is stored
       var payload = this.drawings.map(function (d) {
         return { id: d.id, start: d.start, end: d.end, hidden: d.hidden };
       });
@@ -74,6 +79,7 @@
   FibTool.prototype.load = function () {
     this.clearLines();
     this.drawings = [];
+    this.loaded = true;
     var raw = null;
     try { raw = localStorage.getItem(this.key()); } catch (e) { raw = null; }
     if (!raw) { this.onChange(this); return; }
@@ -190,9 +196,19 @@
   FibTool.prototype.setChart = function (symbol, timeframe) {
     // Switching charts swaps which drawings are on screen. It must never
     // mix them: a level drawn on 5m means nothing on 1h.
-    this.save();
+    //
+    // The save is conditional, and that is the whole bug this fixes. On
+    // page open, `start()` calls setChart with the SAME symbol and
+    // timeframe the tool was constructed with - so the old unconditional
+    // save wrote an empty `drawings` array over the very key it was about
+    // to read, and every saved retracement was destroyed by opening the
+    // page. Only a tool that has actually loaded something may write, and
+    // only when the key is really changing.
+    var changing = symbol !== this.symbol || timeframe !== this.timeframe;
+    if (this.loaded && changing) this.save();
     this.symbol = symbol;
     this.timeframe = timeframe;
+    if (this.loaded && !changing) { this.onChange(this); return; }
     this.load();
   };
 

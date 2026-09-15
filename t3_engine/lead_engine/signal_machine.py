@@ -67,6 +67,17 @@ CONFLICT_LOW = "CONFLICT_LOW"
 # pressure now leaning the other way by at least this much.
 REVERSAL_PRESSURE = 30.0
 
+# The confidence floor for a DIRECTIONAL state.
+#
+# Confidence is the share of each layer's own inputs that were actually
+# available (see layers._combine), damped by cross-layer conflict. A
+# score of 70 built from one of five flow inputs and nothing else is not
+# the same claim as a score of 70 with all five, and the first build
+# offered both as PRE_BREAK. Below this floor the machine may still say
+# WATCH - "something is building" is an honest thing to say on partial
+# data - but it may not name a side.
+MIN_DIRECTIONAL_CONFIDENCE = 0.45
+
 
 @dataclass
 class SignalSnapshot:
@@ -209,6 +220,15 @@ class SignalMachine:
             return (WATCH, direction, pressure,
                     f"independent layers disagree ({inputs.conflict_level}); "
                     "no directional call",
+                    probability, level)
+
+        # Not enough of the engine answered to name a side. WATCH is still
+        # allowed - noticing something on partial data is honest - but a
+        # direction on it is not.
+        if inputs.confidence < MIN_DIRECTIONAL_CONFIDENCE:
+            return (WATCH, direction, pressure,
+                    f"confidence {inputs.confidence:.2f} below "
+                    f"{MIN_DIRECTIONAL_CONFIDENCE:.2f}: too few inputs to call a side",
                     probability, level)
 
         capped_top = (HIGH_PROBABILITY if inputs.conflict_level == CONFLICT_MEDIUM

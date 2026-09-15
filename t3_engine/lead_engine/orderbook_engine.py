@@ -313,8 +313,9 @@ class OrderBook:
         """Apply one orderbook message. False when it was not usable.
 
         A snapshot always applies and always re-syncs. A delta applies
-        only when it continues the sequence; anything else is a gap, and a
-        gap desyncs rather than being papered over."""
+        only when it continues the sequence; a genuine gap desyncs rather
+        than being papered over, because a silently wrong book is the
+        failure this whole check exists to prevent."""
         data = message.get("data") or {}
         kind = str(message.get("type") or "").lower()
         stamp = int(message.get("ts") or message.get("cts") or 0)
@@ -324,45 +325,65 @@ class OrderBook:
             update_id = None
 
         if kind == "snapshot":
-            self.bids.clear()
-            self.asks.clear()
-            self._merge(data)
-            self.last_update_id = update_id
-            self.snapshots += 1
-            if self._crossed():
-                self.crossings += 1
-                self.synced = False
-                self.desync_reason = "snapshot crossed"
-                return False
-            self.synced = True
-            self.desync_reason = ""
-            self.updated_at_ms = stamp or self.updated_at_ms
-            self._pending_exec = {"bid": 0.0, "ask": 0.0}
-            # Walls are registered from the snapshot too, not only from
-            # deltas. Found by a test: a book that synced and then received
-            # few updates had no walls at all, because the only call site
-            # was in the delta branch - so a large resting order sitting
-            # untouched, which is exactly the interesting case, was
-            # invisible until something else moved.
-            self._track_walls(stamp)
-            return True
-
+            return self._apply_snapshot(data, stamp, update_id)
         if kind != "delta":
             return False
+
+        # Bybit documents a restart case: a DELTA carrying u == 1 is a
+        # fresh snapshot, not a message from the middle of a sequence.
+        # Read as a gap it desyncs the book and asks for a resync, and the
+        # resubscribe that follows produces another u == 1 - which is a
+        # resync loop that feeds itself. This is one of the causes of the
+        # constant resyncing seen on the live feed.
+        if update_id == 1:
+            return self._apply_snapshot(data, stamp, update_id)
+
+        return self._apply_delta(data, stamp, update_id)
+
+    def _apply_snapshot(self, data: Dict, stamp: int,
+                        update_id: Optional[int]) -> bool:
+        self.bids.clear()
+        self.asks.clear()
+        self._merge(data)
+        self.last_update_id = update_id
+        self.snapshots += 1
+        if self._crossed():
+            self.crossings += 1
+            self.synced = False
+            self.desync_reason = "snapshot crossed"
+            return False
+        self.synced = True
+        self.desync_reason = ""
+        self.updated_at_ms = stamp or self.updated_at_ms
+        self._pending_exec = {"bid": 0.0, "ask": 0.0}
+        # Walls are registered from the snapshot too, not only from
+        # deltas. Found by a test: a book that synced and then received
+        # few updates had no walls at all, because the only call site was
+        # in the delta branch - so a large resting order sitting untouched,
+        # which is exactly the interesting case, was invisible until
+        # something else moved.
+        self._track_walls(stamp)
+        return True
+
+    def _apply_delta(self, data: Dict, stamp: int,
+                     update_id: Optional[int]) -> bool:
         if not self.synced:
             return False                # nothing to apply a delta to yet
+
         if update_id is not None and self.last_update_id is not None:
             if update_id <= self.last_update_id:
                 return False            # a repeat; harmless, and not an error
-            if update_id != self.last_update_id + 1:
-                # The book can no longer be trusted. Said out loud rather
-                # than repaired: a silently wrong book is the failure this
-                # whole sequence check exists to prevent.
+            missing = update_id - self.last_update_id - 1
+            if missing > 0:
+                # Frames were lost between there and here, so some levels
+                # in the local book are stale and there is no way to tell
+                # which. The book stops being trusted and says how much
+                # it missed.
                 self.gaps += 1
                 self.synced = False
                 self.desync_reason = (
-                    f"sequence gap: expected {self.last_update_id + 1}, "
-                    f"got {update_id}")
+                    f"sequence gap: expected {self.last_update_id + 1}, got "
+                    f"{update_id} ({missing} frame(s) lost)")
                 return False
 
         before_bids = dict(self.bids)
@@ -772,14 +793,32 @@ class OrderBook:
         ask_weight = sum(float(w["weight"]) * float(w["size"])
                          for w in walls if w["side"] == "ask")
         total = bid_weight + ask_weight
+        raw_size = sum(float(w["size"]) for w in walls)
+
+        # The per-wall weight CANCELS out of a ratio. With one transient
+        # wall on the bid and nothing on the ask, (bid - ask) / total is
+        # 0.15s / 0.15s = +1.0 - the maximum reading the feature can
+        # produce, from a single flimsy order that has been there for
+        # eight seconds. Wall.weight was doing its job and the ratio was
+        # throwing the answer away.
+        #
+        # So the ratio gives the DIRECTION and a quality factor gives the
+        # CONVICTION: the size-weighted mean of the per-wall weights, which
+        # is 1.0 when the walls are persistent and 0.15 when the only wall
+        # on the book is one that appeared a moment ago.
+        direction = ((bid_weight - ask_weight) / total) if total > 0 else 0.0
+        quality = (total / raw_size) if raw_size > 0 else 0.0
         return {
             "walls": sorted(walls, key=lambda w: -float(w["weight"]))[:10],
             "by_classification": by_kind,
             "bid_weighted_size": round(bid_weight, 4),
             "ask_weighted_size": round(ask_weight, 4),
-            # -1..+1: which side's SERIOUS walls are heavier. Transient
-            # ones barely move it - see Wall.weight.
-            "wall_bias": round(((bid_weight - ask_weight) / total) if total > 0 else 0.0, 6),
+            # -1..+1: which side's SERIOUS walls are heavier, damped by how
+            # serious they actually are.
+            "wall_bias": round(direction * quality, 6),
+            "wall_direction": round(direction, 6),
+            "wall_quality": round(quality, 4),
+            "wall_count": len(walls),
             "spoofs_60s": len(self._spoofs.window(60_000)),
             "cancellations_60s": len(self._wall_cancels.window(60_000)),
         }
