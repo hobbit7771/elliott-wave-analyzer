@@ -61,12 +61,82 @@ class OpenInterestState:
     last_error: str = ""
     polls: int = 0
     failures: int = 0
+    # The five-minute bucket this state last recorded, so a repeat poll of
+    # the same bucket is not stored as a second reading.
+    last_bucket_ms: int = 0
+    last_value: Optional[float] = None
+    buckets: int = 0
+    repeats: int = 0
+    revisions: int = 0
 
     def observe(self, timestamp_ms: int, open_interest: float,
                 price: Optional[float] = None) -> None:
-        self.series.add(timestamp_ms, float(open_interest))
+        """One reading. Repeat polls of the SAME five-minute bucket are
+        recorded once.
+
+        Bybit publishes open interest on a five-minute grid and this
+        poller runs every sixty seconds, so four polls out of five return
+        the row already held - identical timestamp, identical value.
+        Storing each of them made a window of "the last fifteen minutes"
+        hold twelve copies of three readings, which is how a delta of
+        zero came to mean "polled again" rather than "did not change".
+
+        A bucket whose value is later revised still wins: the newest
+        reading for a timestamp replaces the older one."""
+        stamp = int(timestamp_ms)
+        value = float(open_interest)
+        if stamp and stamp == self.last_bucket_ms:
+            if value == self.last_value:
+                # Nothing new. The price series is deliberately NOT
+                # touched: the four interpretations compare the price
+                # change against the OI change over the same buckets, so
+                # both have to be sampled on the same clock. Mixing a
+                # wall-clock sample into a series stamped with exchange
+                # buckets makes the window straddle two clocks and the
+                # comparison meaningless.
+                self.repeats += 1
+                return
+            self.revisions += 1                  # same bucket, new number
+            self._replace_newest(stamp, value)
+        else:
+            self.series.add(stamp, value)
+            self.buckets += 1
+        self.last_bucket_ms = stamp
+        self.last_value = value
         if price is not None:
-            self.price_series.add(timestamp_ms, float(price))
+            self.price_series.add(stamp, float(price))
+
+    def _replace_newest(self, stamp: int, value: float) -> None:
+        kept = [(t, v) for t, v in self.series.stamped() if t != stamp]
+        self.series = TimeSeries(horizon_ms=self.series.horizon_ms)
+        for t, v in kept:
+            self.series.add(t, v)
+        self.series.add(stamp, value)
+
+    @property
+    def previous(self) -> Optional[float]:
+        """The reading before the current one, or None when there is only
+        one. Not the same thing as zero change."""
+        values = self.series.all()
+        return float(values[-2]) if len(values) >= 2 else None
+
+    def delta_vs_previous(self) -> Optional[float]:
+        current, previous = self.current, self.previous
+        if current is None or previous is None:
+            return None
+        return current - previous
+
+    def why_no_delta(self, window_ms: int = 900_000) -> str:
+        """Said out loud, because "0" and "cannot say" are different
+        answers and printing the first for the second is a lie."""
+        values = self.series.window(window_ms)
+        if not values:
+            return "no open interest reading yet"
+        if len(values) < 2:
+            minutes = max(1, int(window_ms / 60_000))
+            return (f"only one reading in the last {minutes}m - Bybit publishes "
+                    f"open interest every 5 minutes, so the second is still coming")
+        return ""
 
     @property
     def current(self) -> Optional[float]:
@@ -138,11 +208,20 @@ class OpenInterestState:
     def as_dict(self) -> Dict[str, object]:
         return {
             "open_interest": self.current,
+            "previous": self.previous,
             "oi_delta": self.delta(),
             "oi_delta_pct": self.delta_pct(),
+            "oi_delta_vs_previous": self.delta_vs_previous(),
             "oi_trend": self.trend(),
             "interpretation": self.interpretation(),
             "updated_at_ms": self.updated_at_ms(),
+            # Why there is no delta, when there is none. Empty when there
+            # is one - including when the real answer is zero.
+            "no_delta_reason": self.why_no_delta(),
+            "readings": len(self.series),
+            "buckets": self.buckets,
+            "repeat_polls": self.repeats,
+            "revisions": self.revisions,
             "polls": self.polls, "failures": self.failures,
             "last_error": self.last_error,
         }

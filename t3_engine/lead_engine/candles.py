@@ -30,7 +30,14 @@ from t3_engine.lead_engine.trade_flow import Trade
 # One minute, matching STRUCTURE_INTERVAL in state.py.
 DEFAULT_INTERVAL_MS = 60_000
 
-MAX_CANDLES = 400
+# How many bars each builder keeps. 1,500 is the brief's number and it is
+# the right one for the level tracker: at the 15-second interval it uses,
+# 400 bars was a hundred minutes of history, which on a quiet instrument
+# is not enough range to contain a confirmed swing on both sides of the
+# current price. 1,500 bars is a little over six hours there, and a day
+# at the one-minute interval the structure engine uses. The cost is a few
+# thousand small objects per symbol.
+MAX_CANDLES = 1_500
 
 
 class CandleBuilder:
