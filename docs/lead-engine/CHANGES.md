@@ -218,3 +218,89 @@ in the MCP tool list.
 (`ok`/`degraded`/`stale`) and `signals_valid`. When the feed is stale the
 API says so and sets `signals_valid: false` rather than serving old
 numbers as current.
+
+---
+
+# Round 5 — the engine marked against itself
+
+Every round so far added ways for the engine to report a score. A
+microstructure engine that only ever reports scores cannot be wrong about
+anything, and "LONG_PRESSURE 71" is unfalsifiable in a way that a P&L is
+not. This round makes it wrong in public.
+
+## Added
+
+**`t3_engine/lead_engine/virtual_trades.py`** — a paper ledger per symbol.
+Every actionable signal opens a virtual position, every position closes
+for a stated reason, and the ledger says what it cost. Not a backtest: it
+runs on the live stream, against the same book the signal was computed
+from.
+
+Six rules, each of which exists to stop it flattering itself:
+
+1. **Entry is never at the signal's own price.** The fill comes from the
+   next book that arrives *strictly after* the signal, so the decision and
+   the execution never share an instant.
+2. **Entry crosses the spread**, then pays slippage on top. A long pays
+   the ask, a short hits the bid. Filling at the mid is a half-spread of
+   free money per trade — on a 1bp spread and a hundred trades, a
+   strategy's entire edge.
+3. **No fill is invented inside a gap.** If no fresh book arrives within
+   `max_fill_gap_ms` of the signal, the intent is `ABANDONED` — a trade
+   that did not happen, recorded as such, rather than a trade at a price
+   nobody saw. An exit that had to be taken across an observed gap is
+   flagged `gap_uncertain` rather than quietly booked.
+4. **Exits are stop, target, or time.** A position that is never closed is
+   a position that never loses.
+5. **Fees both ways, always**, deducted from the gross and reported
+   separately from it.
+6. **A stale book is not a price** — one older than the engine's own
+   DEGRADED threshold fills nothing, entry or exit.
+
+Two subtleties that are easy to get wrong and are pinned by tests:
+
+* **One clock for ordering, the other for the record.** A signal carries
+  this process's clock, a book carries the exchange's. Comparing them
+  directly makes the entry rule depend on the offset between them — at
+  80ms, every fill is 80ms late; at a negative offset, the ledger would
+  fill on a book stamped *before* the signal. Every ordering decision is
+  made on the arrival clock; the exchange stamp is kept alongside it
+  (`entry_book_ms`, `exit_book_ms`) because that is when the price was
+  true.
+* **The book that fills a position does not also settle it.** Otherwise a
+  spread wider than the stop closes every trade on entry — the long pays
+  the ask, the bid is a full spread below it, and the ledger books a stop
+  that no price movement caused.
+
+`open_pnl` is marked at what it would cost to **close**, not at the mid.
+
+**Wiring** — `SymbolState.on_book` is fed from `on_orderbook` and nowhere
+else; `on_signal` from `_compute_snapshot` and nowhere else. That ordering,
+not a comparison inside the ledger, is what makes rule 1 structural: when
+the snapshot runs, every book it saw has already been offered to the
+ledger and rejected as not-after. A test asserts the call sites.
+
+**`GET /api/lead-engine/virtual-trades/{symbol}`** and
+**`GET /api/v1/lead-engine/virtual-trades/{symbol}`** — summary plus
+journal. Every frame also carries `virtual_trades` with the last six rows,
+so the panel needs no second request.
+
+**`get_virtual_trades`** — the seventeenth MCP tool.
+
+**The panel** — a *Виртуальные сделки* card: open and closed P&L, fees as
+a cost, win rate, the counters that make the rules auditable
+(`abandoned_on_gap`, `gap_uncertain_exits`, `skipped_stale_book`), and a
+journal grid that folds to four columns on a phone. `Panel.html()` was
+added for it — the journal is the one block whose *shape* varies, so it
+cannot be a fixed set of cells built once; the "write only if it changed"
+rule still applies.
+
+**Tests** — `tests/test_lead_engine_virtual_trades.py` (30), one per rule,
+each written so that removing the rule makes it fail.
+
+## Paper only, structurally
+
+The module holds no credential, imports no HTTP client, and contains no
+order verb; a test asserts each of those on the source. Like everything in
+the v1 namespace the endpoint is a `GET` that reports what the paper
+positions did — it cannot open, close or size anything on an exchange.

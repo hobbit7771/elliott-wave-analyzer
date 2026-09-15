@@ -1,4 +1,4 @@
-"""The MCP tool surface: sixteen read-only tools over the engine's API.
+"""The MCP tool surface: seventeen read-only tools over the engine's API.
 
 Schemas are declared as data rather than built from decorators, for two
 reasons. The transport below can then serve them without the MCP SDK
@@ -140,6 +140,20 @@ TOOLS: Dict[str, Dict[str, Any]] = {
         "schema": _schema({"symbol": SYMBOL, "timeframe": TIMEFRAME}, ["symbol"]),
         "call": lambda c, a: c.get(f"fibonacci/{a['symbol']}",
                                    {"timeframe": a.get("timeframe", "5m")}),
+    },
+    "get_virtual_trades": {
+        "description": "The engine's virtual ledger for one symbol: its own "
+                       "signals entered at the next fresh book after the signal, "
+                       "exited on stop, target or hold time, with fees and "
+                       "slippage deducted - open and closed P&L, plus the journal. "
+                       "PAPER ONLY: these trades exist nowhere but this ledger.",
+        "schema": _schema({"symbol": SYMBOL,
+                           "limit": {"type": "integer", "default": 50,
+                                     "minimum": 1, "maximum": 500,
+                                     "description": "Journal rows."}},
+                          ["symbol"]),
+        "call": lambda c, a: c.get(f"virtual-trades/{a['symbol']}",
+                                   {"limit": a.get("limit", 50)}),
     },
     "get_health": {
         "description": "Feed freshness for every symbol: WS latency, book age, "

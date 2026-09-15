@@ -167,3 +167,44 @@
   text-decoration-color: #3a4152;
 }
 #tab-lead .le-open:hover { color: #7dd3fc; text-decoration-color: #7dd3fc; }
+
+/* ---- virtual trade journal ------------------------------------------
+ * A grid rather than a table: the card is narrow on a phone, and a
+ * <table> either overflows it or collapses the columns unreadably.
+ * Eight columns at full width, folding to the four that matter under
+ * 420px - time, side, why it closed, and what it made. */
+#tab-lead .le-subhead, .le-root .le-subhead {
+  margin: 10px 0 4px; font-size: 11px; letter-spacing: 0.06em;
+  text-transform: uppercase; color: #8a93a5;
+}
+#tab-lead .le-journal, .le-root .le-journal { font-size: 11px; }
+#tab-lead .le-jrow, .le-root .le-jrow {
+  display: grid;
+  grid-template-columns: 52px 44px 1fr 62px 62px 74px 66px 56px;
+  gap: 4px; align-items: center;
+  padding: 3px 0; border-bottom: 1px solid #1c2130;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+#tab-lead .le-jrow:last-child, .le-root .le-jrow:last-child { border-bottom: none; }
+#tab-lead .le-jrow.skipped, .le-root .le-jrow.skipped { opacity: 0.55; }
+#tab-lead .le-jrow .j-time, .le-root .le-jrow .j-time { color: #6b7488; }
+#tab-lead .le-jrow .j-state, .le-root .le-jrow .j-state {
+  color: #8a93a5; overflow: hidden; text-overflow: ellipsis;
+}
+#tab-lead .le-jrow .j-why, .le-root .le-jrow .j-why { color: #8a93a5; }
+#tab-lead .le-jrow .j-fee, .le-root .le-jrow .j-fee { color: #6b7488; }
+#tab-lead .le-jrow .j-side, .le-root .le-jrow .j-side { font-weight: 600; }
+#tab-lead .le-jrow .j-side.long, .le-root .le-jrow .j-side.long { color: #34d399; }
+#tab-lead .le-jrow .j-side.short, .le-root .le-jrow .j-side.short { color: #f87171; }
+#tab-lead .le-jrow .up, .le-root .le-jrow .up { color: #34d399; }
+#tab-lead .le-jrow .down, .le-root .le-jrow .down { color: #f87171; }
+#tab-lead .le-jrow .dim, .le-root .le-jrow .dim { color: #6b7488; }
+
+@media (max-width: 420px) {
+  #tab-lead .le-jrow, .le-root .le-jrow {
+    grid-template-columns: 48px 40px 1fr 60px;
+  }
+  #tab-lead .le-jrow .j-state, .le-root .le-jrow .j-state,
+  #tab-lead .le-jrow .j-px, .le-root .le-jrow .j-px,
+  #tab-lead .le-jrow .j-fee, .le-root .le-jrow .j-fee { display: none; }
+}

@@ -129,6 +129,15 @@ def history(symbol: str, limit: int = Query(300, ge=1, le=2000)) -> Dict[str, An
     return engine().get_history(symbol, limit)
 
 
+@router.get("/virtual-trades/{symbol}")
+def virtual_trades(symbol: str,
+                   limit: int = Query(50, ge=1, le=500)) -> Dict[str, Any]:
+    """Virtual P&L on the engine's own signals - see virtual_trades.py."""
+    if not config_module.enabled():
+        return {**_disabled(), "summary": None, "journal": []}
+    return engine().get_virtual_trades(symbol, limit)
+
+
 @router.post("/subscribe")
 def subscribe(symbol: str = Body(..., embed=True)) -> Dict[str, Any]:
     if not config_module.enabled():

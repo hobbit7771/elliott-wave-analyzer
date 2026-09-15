@@ -373,6 +373,28 @@ class LeadEngine:
                  "trade_flow", "cvd", "liquidations", "open_interest",
                  "btc_lead", "smc", "elliott", "health")}
 
+    def get_virtual_trades(self, symbol: str, limit: int = 50) -> Dict[str, Any]:
+        """The virtual ledger for one symbol: summary plus the journal.
+
+        `snapshot()` is called first so the signal - and therefore any
+        intent it opens - is current. It does NOT fill anything: fills
+        happen only on the ingest path, from a book that arrived after
+        the signal. Reading this endpoint cannot create a trade."""
+        if not self.config.enabled:
+            return dict(DISABLED_PAYLOAD)
+        symbol = symbol.upper()
+        state = self.states.get(symbol)
+        if state is None:
+            return {"enabled": True, "symbol": symbol, "tracked": False,
+                    "summary": None, "journal": []}
+        state.snapshot(btc_state=self._btc_state())
+        return {
+            "enabled": True, "tracked": True, "symbol": symbol,
+            "summary": state.ledger.summary(state.book.best_bid(),
+                                            state.book.best_ask()),
+            "journal": state.ledger.journal(max(1, min(int(limit), 500))),
+        }
+
     def get_history(self, symbol: str, limit: int = 300) -> Dict[str, Any]:
         if not self.config.enabled:
             return dict(DISABLED_PAYLOAD)

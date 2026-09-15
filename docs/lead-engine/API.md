@@ -219,6 +219,43 @@ five `/candles` + five `/indicators`.
 | `GET /signals/{symbol}` | current signal state, direction, level under stress, break score |
 | `GET /state/{symbol}` | the raw internal frame (everything, unshaped) |
 | `GET /history/{symbol}` | recent feature history — pressure, break scores, state over time |
+| `GET /virtual-trades/{symbol}` | the paper ledger on the engine's own signals — see below |
+
+### Virtual trades — the engine marked against itself
+
+`GET /virtual-trades/{symbol}?limit=50` returns `summary` and `journal`.
+
+Every actionable signal opens a virtual position; every position closes
+for a stated reason; the ledger says what it cost. It is not a backtest —
+it runs on the live stream, against the same book the signal was computed
+from — and the rules exist to stop it flattering itself:
+
+| Rule | What it means |
+| --- | --- |
+| Entry is never at the signal's own price | the fill is taken from the next book that arrives **strictly after** the signal, so the decision and the execution never share an instant |
+| Entry crosses the spread | a long pays the ask, a short hits the bid, and slippage is added on top; filling at the mid would be a half-spread of free money per trade |
+| No fill invented inside a gap | if no fresh book arrives within `max_fill_gap_ms` of the signal, the intent is recorded `ABANDONED` — a trade that did not happen, not a trade at a made-up price. An exit that had to be taken across an observed gap is marked `gap_uncertain` |
+| Exits are stop, target, or time | a position with no deadline is a position that cannot lose |
+| Fees both ways | taker in, taker out, deducted from the gross and reported separately from it |
+| A stale book is not a price | a book older than the engine's own DEGRADED threshold fills nothing, entry or exit |
+
+Ordering is done on the ARRIVAL clock, which is the clock the signal is
+stamped with; the exchange's own stamp is reported alongside it
+(`entry_book_ms`, `exit_book_ms`) because that is when the price was
+true. A clock offset between this process and the exchange therefore
+cannot decide whether a fill happens.
+
+`summary` carries `gross_pnl`, `fees_paid`, `net_pnl`, `open_pnl` (marked
+at what it would cost to CLOSE, not at the mid), `win_rate_pct`,
+`exits_by_reason`, and the counters that make the rules auditable rather
+than claimed: `abandoned_on_gap`, `gap_uncertain_exits`,
+`skipped_stale_book`, `skipped_already_open`. The `config` block states
+the costs being charged.
+
+**Paper only.** This ledger holds no credential, imports no execution
+module, and writes nothing but its own journal. Like everything in this
+namespace it is read-only: it reports what the engine's paper positions
+did and cannot open, close or size anything on an exchange.
 
 ### Chart data
 

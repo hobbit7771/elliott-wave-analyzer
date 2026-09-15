@@ -125,13 +125,88 @@
       "WS connected": "WS подключён",
       "Book synced": "Стакан синхронизирован",
       "Dropped messages": "Потеряно сообщений",
-      "Reconnects": "Переподключений"
+      "Reconnects": "Переподключений",
+
+      // The virtual ledger. "Paper" stays in the note, not in a label:
+      // the card's own subtitle says it in Russian once, plainly.
+      "Virtual trades": "Виртуальные сделки",
+      "Open positions": "Открытых позиций",
+      "Waiting for a fill": "Ждут исполнения",
+      "Closed trades": "Закрытых сделок",
+      "Win rate": "Доля прибыльных",
+      "Gross P&L": "P&L до издержек",
+      "Fees paid": "Комиссии",
+      "Net P&L": "Чистый P&L",
+      "Open P&L": "P&L по открытым",
+      "Costs vs gross": "Издержки к прибыли",
+      "Not filled - stream gap": "Не исполнено - разрыв потока",
+      "Uncertain exits": "Неточные выходы",
+      "Skipped - stale book": "Пропущено - устаревший стакан",
+      "Journal": "Журнал"
   };
 
   function label(text) {
     // An untranslated label is a bug to notice, not one to hide, so the
     // English falls through visibly rather than silently.
     return Object.prototype.hasOwnProperty.call(LABELS, text) ? LABELS[text] : text;
+  }
+
+  /* ---- the virtual journal ------------------------------------------ */
+
+  // Status and exit reason are shown in Russian, but the words are
+  // chosen here by hand rather than translated: "ABANDONED" is a state
+  // of this ledger, not an English word to be rendered.
+  var TRADE_STATUS = {
+    PENDING: 'ждёт стакан', OPEN: 'открыта', CLOSED: 'закрыта',
+    ABANDONED: 'не исполнена'
+  };
+  var EXIT_REASON = { stop: 'стоп', target: 'цель', time: 'по времени' };
+
+  function clockText(ms) {
+    if (!ms) return '—';
+    var d = new Date(Number(ms));
+    if (isNaN(d.getTime())) return '—';
+    return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) +
+      ':' + ('0' + d.getSeconds()).slice(-2);
+  }
+
+  function priceText(value) {
+    if (value === null || value === undefined) return '—';
+    var n = Number(value);
+    if (!isFinite(n)) return '—';
+    // Price precision is the instrument's, not a constant: 0.02 on an
+    // altcoin and 0.02 on BTC are not the same number of digits.
+    return n.toFixed(n >= 1000 ? 1 : n >= 10 ? 3 : 5);
+  }
+
+  function journalRows(rows) {
+    if (!rows || !rows.length) {
+      return '<div class="le-note">Пока ни одного сигнала не отработано.</div>';
+    }
+    return rows.map(function (row) {
+      var net = row.net_pnl;
+      var tone = row.status !== 'CLOSED' ? 'dim' : net > 0 ? 'up' : net < 0 ? 'down' : 'dim';
+      var side = row.direction === 'long' ? 'LONG' : 'SHORT';
+      var cells =
+        '<span class="j-time">' + esc(clockText(row.signal_at_ms)) + '</span>' +
+        '<span class="j-side ' + (row.direction === 'long' ? 'long' : 'short') + '">' +
+          esc(side) + '</span>' +
+        '<span class="j-state">' + esc(row.signal_state || '') + '</span>' +
+        '<span class="j-px le-num">' + esc(priceText(row.entry_price)) + '</span>' +
+        '<span class="j-px le-num">' + esc(priceText(row.exit_price)) + '</span>' +
+        '<span class="j-why">' +
+          esc(row.status === 'CLOSED'
+              ? (EXIT_REASON[row.exit_reason] || row.exit_reason || '')
+              : (TRADE_STATUS[row.status] || row.status)) +
+          (row.gap_uncertain ? ' <b title="выход оценён через разрыв потока">~</b>' : '') +
+        '</span>' +
+        '<span class="j-net le-num ' + tone + '">' +
+          (row.status === 'CLOSED' ? signed(net, 3) : '—') + '</span>' +
+        '<span class="j-fee le-num">' +
+          (row.fees ? '-' + fmt(row.fees, 3) : '—') + '</span>';
+      return '<div class="le-jrow' + (row.status === 'ABANDONED' ? ' skipped' : '') +
+        '">' + cells + '</div>';
+    }).join('');
   }
 
   function card(title, inner) {
@@ -293,6 +368,27 @@
         p.row('F:' + side + ':score', label('Break score')) +
         '<div class="le-note" data-le="F:' + side + ':note"></div>' + rows);
     });
+
+    html += card('Virtual trades',
+      '<div class="le-note">Бумажный учёт по собственным сигналам движка. ' +
+      'Вход - только по первому свежему стакану ПОСЛЕ сигнала, выход - по ' +
+      'стопу, цели или сроку удержания. Комиссии и проскальзывание вычтены. ' +
+      'Если поток прерывается, цена исполнения не выдумывается: сделка ' +
+      'помечается как неисполненная. Ордера на биржу не отправляются.</div>' +
+      p.row('vt:open', label('Open positions')) +
+      p.row('vt:pending', label('Waiting for a fill')) +
+      p.row('vt:closed', label('Closed trades')) +
+      p.row('vt:winrate', label('Win rate')) +
+      p.row('vt:gross', label('Gross P&L')) +
+      p.row('vt:fees', label('Fees paid')) +
+      p.row('vt:net', label('Net P&L')) +
+      p.row('vt:openpnl', label('Open P&L')) +
+      p.row('vt:costs', label('Costs vs gross')) +
+      p.row('vt:abandoned', label('Not filled - stream gap')) +
+      p.row('vt:uncertain', label('Uncertain exits')) +
+      p.row('vt:stale', label('Skipped - stale book')) +
+      '<div class="le-subhead">' + esc(label('Journal')) + '</div>' +
+      '<div class="le-journal" data-le="vt:journal"></div>');
 
     html += card('Feed health',
       clocks(p) +
@@ -518,6 +614,30 @@
     p.set('h:dropped', health.dropped_messages || 0);
     p.set('h:reconnects', health.reconnects || 0);
     p.set('h:reasons', (health.reasons || []).join('; '));
+
+    /* virtual trades - the engine's own signals, marked to the book */
+    var vt = frame.virtual_trades || {};
+    p.set('vt:open', vt.open_positions === undefined ? '—' : vt.open_positions);
+    p.set('vt:pending', vt.pending_intents === undefined ? '—' : vt.pending_intents);
+    p.set('vt:closed', vt.closed_trades === undefined ? '—' : vt.closed_trades);
+    p.set('vt:winrate', vt.win_rate_pct === null || vt.win_rate_pct === undefined
+      ? '—' : fmt(vt.win_rate_pct, 1) + '% (' + (vt.wins || 0) + '/' +
+        ((vt.wins || 0) + (vt.losses || 0)) + ')');
+    p.set('vt:gross', signed(vt.gross_pnl, 3));
+    p.colour('vt:gross', vt.gross_pnl, 'generic');
+    // Fees are a cost, so they are shown as one - never as a bare
+    // positive number next to a P&L it was subtracted from.
+    p.set('vt:fees', vt.fees_paid ? '-' + fmt(vt.fees_paid, 3) : '0.000');
+    p.set('vt:net', signed(vt.net_pnl, 3));
+    p.colour('vt:net', vt.net_pnl, 'generic');
+    p.set('vt:openpnl', signed(vt.open_pnl, 3));
+    p.colour('vt:openpnl', vt.open_pnl, 'generic');
+    p.set('vt:costs', vt.fees_vs_gross_pct === null || vt.fees_vs_gross_pct === undefined
+      ? '—' : fmt(vt.fees_vs_gross_pct, 1) + '%');
+    p.set('vt:abandoned', vt.abandoned_on_gap || 0);
+    p.set('vt:uncertain', vt.gap_uncertain_exits || 0);
+    p.set('vt:stale', vt.skipped_stale_book || 0);
+    p.html('vt:journal', journalRows(vt.recent));
   }
 
   function stateClass(state) {
