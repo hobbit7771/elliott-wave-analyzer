@@ -238,6 +238,11 @@ class Thresholds:
     book_age_degraded_ms: float = 1_000.0
     book_age_signals_off_ms: float = 2_500.0
     trade_age_signals_off_ms: float = 1_500.0
+    # A trade gap this long IS a fault even with a live book: an
+    # instrument can be quiet, but not for five minutes while its order
+    # book keeps ticking. Without this bound, a publicTrade subscription
+    # that silently died would never be noticed.
+    trade_age_dead_ms: float = 300_000.0
 
     # The older, coarser limits. Kept because the quiet symbols genuinely
     # go a long time without a print and these gate the NOTES rather than
