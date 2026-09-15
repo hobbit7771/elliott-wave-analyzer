@@ -386,7 +386,12 @@ class Recorder:
         self._last_heartbeat = (now, messages)
         snapshot = stats.as_dict()
         ages = list(self._book_ages)
-        gaps = resyncs = failures = 0
+        gaps = resyncs = 0
+        # Not a count. A bare `data_failure=1` across seven symbols says
+        # something is wrong and nothing about what, which is how one
+        # flickering symbol looked identical to a feed-wide problem for
+        # three heartbeats. The symbol and its reason go in the line.
+        failing: List[str] = []
         for state in list(self.engine.states.values()):
             sequence = getattr(state.book, "sequence_stats", None)
             if sequence is not None:
@@ -395,12 +400,14 @@ class Recorder:
                 resyncs += int(counters.get("resync_count") or 0)
             current = getattr(getattr(state, "signals", None), "current", None)
             if current is not None and getattr(current, "state", "") == "DATA_FAILURE":
-                failures += 1
+                reason = str(getattr(current, "reason", "") or "").strip()
+                failing.append(f"{state.symbol}({reason})" if reason else state.symbol)
+        failures = len(failing)
         logger.info(
             "lead_engine feed: connected=%s messages=%d rate=%s/s "
             "net_latency=%.1fms queue_wait=%.1fms queue=%d/%d dropped=%d "
             "book_age_median=%.0fms book_age_p95=%.0fms samples=%d "
-            "gaps=%d resyncs=%d data_failure=%d connects=%d reconnects=%d "
+            "gaps=%d resyncs=%d data_failure=%d%s connects=%d reconnects=%d "
             "topics=%d symbols=%d",
             bool(snapshot.get("connected")), messages,
             "?" if rate is None else f"{rate:.1f}",
@@ -411,6 +418,7 @@ class Recorder:
             int(snapshot.get("dropped") or 0),
             self._percentile(ages, 0.5), self._percentile(ages, 0.95), len(ages),
             gaps, resyncs, failures,
+            (" [" + "; ".join(failing) + "]") if failing else "",
             int(snapshot.get("connects") or 0),
             int(snapshot.get("reconnects") or 0),
             int(snapshot.get("subscribed_topics") or 0),

@@ -598,3 +598,33 @@ def test_levels_are_rebuilt_once_per_closed_bar_not_once_per_direction():
         assert tracker.levels is not levels_before
     finally:
         module.find_swings = real
+
+
+def test_the_first_sync_is_not_counted_as_a_resync():
+    """`resyncs` answers "how often did a GOOD book have to be thrown
+    away". It cannot answer that if it starts at one per symbol.
+
+    The engine resets every book before subscribing - correct, and a
+    no-op on an empty book - and counting those made a clean
+    seventeen-minute live run report `resyncs=7` on seven symbols before
+    a single frame had arrived, which is indistinguishable from seven
+    real desyncs.
+    """
+    from t3_engine.lead_engine.orderbook_engine import OrderBook
+
+    book = OrderBook("INJUSDT", 50)
+    book.reset("first connect")
+    book.reset("resubscribe")
+    assert book.resyncs == 0, "an empty book has nothing to resync"
+    assert book.sequence_stats()["resync_count"] == 0
+
+    now = int(time.time() * 1000)
+    book.apply({"type": "snapshot", "ts": now,
+                "data": {"u": 1, "b": [["5.70", "10"]], "a": [["5.71", "10"]]}})
+    assert book.synced is True
+    assert book.resyncs == 0, "syncing is not resyncing"
+
+    # Now there IS a book to lose, so losing it counts.
+    book.reset("frames dropped")
+    assert book.resyncs == 1
+    assert book.sequence_stats()["desync_reason"] == "frames dropped"

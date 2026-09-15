@@ -1418,6 +1418,36 @@ async def start_live_on_boot() -> None:
 
 
 @app.on_event("startup")
+def report_external_access() -> None:
+    """Say, once, whether the external AI surface is reachable.
+
+    Whether a key is CONFIGURED and what it IS are different questions;
+    only the first is answered, here as everywhere. The reason this is
+    worth a log line at all: when the flag is off the whole namespace
+    404s, and a 404 from a route that does not exist looks exactly like a
+    404 from a route that is switched off. One line at boot tells the two
+    apart without anyone having to guess."""
+    try:
+        from t3_engine.lead_engine import auth as lead_auth
+
+        enabled = lead_auth.external_enabled()
+        keyed = bool(lead_auth.configured_key())
+        if enabled and keyed:
+            logger.info("external AI access: ON, key configured "
+                        "(/api/v1/lead-engine, /ai-connect)")
+        elif enabled:
+            logger.warning("external AI access: ON but %s is not set - "
+                           "every request will be refused with 503",
+                           lead_auth.API_KEY_ENV)
+        else:
+            logger.info("external AI access: OFF (%s is not true) - the "
+                        "/api/v1/lead-engine namespace answers 404",
+                        lead_auth.EXTERNAL_ENV)
+    except Exception:                        # noqa: BLE001
+        logger.debug("external AI access: state not readable", exc_info=True)
+
+
+@app.on_event("startup")
 def warm_up_counts() -> None:
     for symbol in warmup_symbols():
         wanted = stale_timeframes(symbol)

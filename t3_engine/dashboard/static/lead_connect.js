@@ -32,7 +32,7 @@
     'get_trade_flow', 'get_derivatives_state', 'get_structure',
     'get_elliott_state', 'get_pressure', 'get_active_signal',
     'get_recent_signals', 'get_candles', 'get_indicators',
-    'get_fibonacci_levels'
+    'get_fibonacci_levels', 'get_virtual_trades'
   ];
 
   function render(info) {
@@ -63,6 +63,8 @@
     set('cnHint', hint);
 
     set('cnMcpUrl', info.mcp_http_url);
+    set('cnOpenapi', info.openapi_url ||
+        (info.rest_base || '') + '/openapi.json');
 
     set('cnClaude', JSON.stringify({
       mcpServers: {

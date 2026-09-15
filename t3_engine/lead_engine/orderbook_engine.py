@@ -285,14 +285,24 @@ class OrderBook:
         when the sequence broke. Everything derived from the book goes
         with it: half a book is not a smaller book, it is a wrong one.
         The counters survive, because they are the record of how often
-        this had to happen."""
+        this had to happen.
+
+        A reset of a book that was never synced is NOT counted. The first
+        connect resets every symbol before subscribing - correct, and a
+        no-op on an empty book - and counting those made a clean
+        seventeen-minute run report `resyncs=7` on seven symbols before
+        the first frame had arrived. The number is supposed to answer
+        "how often did a GOOD book have to be thrown away", and a count
+        that starts at one-per-symbol cannot answer it."""
+        had_a_book = self.synced or bool(self.bids) or bool(self.asks)
         self.bids.clear()
         self.asks.clear()
         self.synced = False
         self.last_update_id = None
         self.updated_at_ms = 0
         self.desync_reason = reason
-        self.resyncs += 1
+        if had_a_book:
+            self.resyncs += 1
         self._pending_exec = {"bid": 0.0, "ask": 0.0}
         self._walls.clear()
 

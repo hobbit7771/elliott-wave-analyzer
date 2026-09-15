@@ -493,6 +493,9 @@ def test_the_connection_page_never_reveals_the_key(external_on):
     assert TOKEN not in json.dumps(body)
     assert body["api_key_env"] == auth.API_KEY_ENV
     assert body["mcp_http_url"].endswith("/api/v1/lead-engine/mcp")
+    # The Actions route: a Custom GPT imports this document, so the page
+    # has to be able to show the URL without knowing the path by heart.
+    assert body["openapi_url"].endswith("/api/v1/lead-engine/openapi.json")
 
     page = client.get("/ai-connect")
     assert page.status_code == 200

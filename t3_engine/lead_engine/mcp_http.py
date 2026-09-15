@@ -207,6 +207,9 @@ def describe(public_url: str = "") -> Dict[str, Any]:
         "api_key_env": auth.API_KEY_ENV,
         "flag_env": auth.EXTERNAL_ENV,
         "rest_base": f"{base}/api/v1/lead-engine",
+        # The document a Custom GPT imports under Actions. Named here so
+        # the connection page can show it without hard-coding a path.
+        "openapi_url": f"{base}/api/v1/lead-engine/openapi.json",
         "mcp_http_url": f"{base}/api/v1/lead-engine/mcp",
         "snapshot_example": f"{base}/api/v1/lead-engine/snapshot/INJUSDT",
         "stream_example": f"{base}/api/v1/lead-engine/stream?symbol=INJUSDT",

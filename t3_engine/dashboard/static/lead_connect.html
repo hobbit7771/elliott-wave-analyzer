@@ -38,7 +38,25 @@
       <pre class="cnCode" id="cnMcpUrl">—</pre>
       <div class="le-note">Транспорт — JSON-RPC 2.0 поверх HTTP POST. Методы:
         <code>initialize</code>, <code>tools/list</code>, <code>tools/call</code>,
-        <code>ping</code>. 16 инструментов, все только на чтение.</div>
+        <code>ping</code>. 17 инструментов, все только на чтение.</div>
+    </div>
+
+    <div class="le-card">
+      <h3>Custom GPT — Actions (плагин)</h3>
+      <div class="le-note">
+        Если коннектор недоступен, тот же движок подключается как Action.
+        В конструкторе GPT: <b>Create a GPT → Configure → Actions → Create
+        new action → Import from URL</b>, и вставьте адрес схемы:
+      </div>
+      <pre class="cnCode" id="cnOpenapi">—</pre>
+      <div class="le-note">
+        Затем <b>Authentication → API Key → Auth Type: Bearer</b> и
+        вставьте ключ. Схема содержит только пространство
+        <code>/api/v1/lead-engine</code> — 21 операция, все
+        <code>GET</code>; сам транспорт MCP и файл схемы в неё не
+        включены, чтобы модели не предлагалось слать JSON-RPC через
+        REST-инструмент.
+      </div>
     </div>
 
     <div class="le-card">
