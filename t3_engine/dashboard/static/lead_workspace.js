@@ -323,7 +323,57 @@
      only EXTEND the bar - push the close, raise a high, lower a low -
      because those are things price genuinely did; it may never shrink a
      range or invent a volume. */
+  /* The forming bar from the engine's own kline stream.
+
+     Preferred over the REST refresh below because it is what Bybit is
+     pushing right now - aggregated server-side from `kline.1`, so it
+     carries the true high, low, close and volume, and says how many of
+     its minutes the exchange has confirmed. REST remains the fallback
+     when the engine has no kline data for this bar yet. */
+  function refreshFromKline() {
+    if (!ws.candles.length) return Promise.resolve(false);
+    var token = ws.generation;
+    return get('/api/lead-engine/live-candle/' + encodeURIComponent(ws.symbol) +
+               '?timeframe=' + encodeURIComponent(ws.timeframe))
+      .then(function (data) {
+        if (token !== ws.generation) return false;
+        var row = data && data.candle;
+        if (!row) return false;
+        var last = ws.candles[ws.candles.length - 1];
+        var bar = adopt(row, true);
+        if (row.time === last.time) {
+          ws.candles[ws.candles.length - 1] = bar;
+          ws.closes[ws.closes.length - 1] = bar.close;
+        } else if (row.time > last.time) {
+          ws.candles.push(bar);
+          ws.closes.push(bar.close);
+          if (ws.candles.length > 1500) { ws.candles.shift(); ws.closes.shift(); }
+          commitEmaBar();
+        } else {
+          return false;
+        }
+        ws.series.update({ time: bar.time, open: bar.open, high: bar.high,
+                           low: bar.low, close: bar.close });
+        if (ws.prefs.volume) {
+          ws.volume.update({ time: bar.time, value: bar.volume || 0,
+                             color: bar.close >= bar.open ? '#1d4b45' : '#4b2020' });
+        }
+        ws.klineRefreshes = (ws.klineRefreshes || 0) + 1;
+        extendEmas();
+        return true;
+      })
+      .catch(function () { return false; });
+  }
+
   function refreshLiveBars() {
+    if (!ws.candles.length) return Promise.resolve();
+    // Kline first; REST only when the engine has nothing for this bar.
+    return refreshFromKline().then(function (served) {
+      return served ? null : refreshLiveBarsFromRest();
+    });
+  }
+
+  function refreshLiveBarsFromRest() {
     if (!ws.candles.length) return Promise.resolve();
     var token = ws.generation;
     return get(candleUrl(3))
@@ -671,7 +721,9 @@
 
   ws.stats = function () {
     return { fetches: ws.fetches, chartUpdates: ws.updates, setDataCalls: ws.setDataCalls,
-             liveRefreshes: ws.liveRefreshes || 0, clockSkewMs: Math.round(ws.clockSkewMs),
+             liveRefreshes: ws.liveRefreshes || 0,
+             klineRefreshes: ws.klineRefreshes || 0,
+             clockSkewMs: Math.round(ws.clockSkewMs),
              liveStale: ws.liveStale, generation: ws.generation,
              candles: ws.candles.length,
              panel: ws.panel ? ws.panel.stats() : null };

@@ -259,6 +259,57 @@ class SymbolState:
                                        is_btc=self.symbol == BTC_SYMBOL),
         }
 
+    def live_candle(self, interval_seconds: int,
+                    now_ms: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """The forming bar for any timeframe, from Bybit's OWN klines.
+
+        The browser used to build this itself out of a price polled every
+        500ms and its own clock, which lost every high and low between two
+        polls and reported a volume of zero. The exchange sends the real
+        thing on `kline.1` - open, high, low, close, volume and `confirm` -
+        so the bar is aggregated from those one-minute klines rather than
+        invented.
+
+        Aggregating from the ONE-MINUTE stream rather than subscribing to
+        every chart timeframe is deliberate: five intervals across seven
+        symbols was twenty-eight topics of bandwidth for data nothing read,
+        and it is exactly what overloaded the socket. One minute is the
+        finest bar the chart offers, so every coarser one is an exact sum
+        of them.
+
+        `closed` is false by construction - this is the bar still forming.
+        `confirm_source` says how much of it Bybit has confirmed, so a
+        caller can tell a complete aggregate from one whose last minute is
+        still moving."""
+        seconds = max(60, int(interval_seconds))
+        engine = self.smc.get(STRUCTURE_INTERVAL)
+        candles = list(engine.candles) if engine is not None else []
+        if not candles:
+            return None
+        now_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+        bar_start_ms = (now_ms // (seconds * 1000)) * (seconds * 1000)
+        inside = [c for c in candles if c.start_ms >= bar_start_ms]
+        if not inside:
+            return None
+        inside.sort(key=lambda c: c.start_ms)
+        confirmed = sum(1 for c in inside if c.closed)
+        return {
+            "time": bar_start_ms // 1000,
+            "open": inside[0].open,
+            "high": max(c.high for c in inside),
+            "low": min(c.low for c in inside),
+            "close": inside[-1].close,
+            "volume": sum(c.volume for c in inside),
+            "closed": False,
+            "interval_seconds": seconds,
+            # How the bar was built, so nothing downstream has to guess.
+            "source": "bybit_kline_1m",
+            "minutes_used": len(inside),
+            "minutes_confirmed": confirmed,
+            "last_minute_confirmed": inside[-1].closed,
+            "as_of_ms": max(c.start_ms for c in inside),
+        }
+
     def cached_snapshot(self) -> Optional[Dict[str, Any]]:
         """The last computed frame, or None. Never recomputes - callers
         that need one computed call `snapshot()`."""

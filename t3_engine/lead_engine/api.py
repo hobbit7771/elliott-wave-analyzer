@@ -27,6 +27,7 @@ from t3_engine.lead_engine import config as config_module
 from t3_engine.lead_engine import storage as storage_module
 from t3_engine.lead_engine import fibonacci as fib_module
 from t3_engine.lead_engine.candles_rest import (
+    INTERVAL_SECONDS,
     DEFAULT_LIMIT,
     INTERVALS,
     MAX_LIMIT,
@@ -231,6 +232,30 @@ def candles(symbol: str, timeframe: str = Query("5m"),
     return {"enabled": True, "symbol": symbol.upper(), "timeframe": label,
             "candles": rows, "count": len(rows),
             "detail": "" if rows else "the exchange returned no candles for this pair"}
+
+
+@router.get("/live-candle/{symbol}")
+def live_candle(symbol: str, timeframe: str = Query("5m")) -> Dict[str, Any]:
+    """The bar still forming, from Bybit's own kline stream.
+
+    Exists so the chart never has to build one. The browser used to do it
+    from a price polled every 500ms and its own clock, which lost every
+    high and low between polls and reported a volume of zero."""
+    if not config_module.enabled():
+        return _disabled()
+    label = normalize_interval(timeframe)
+    if label is None:
+        raise HTTPException(400, f"unknown timeframe {timeframe!r}")
+    engine_instance = engine()
+    state = engine_instance.states.get(symbol.upper())
+    if state is None:
+        return {"enabled": True, "symbol": symbol.upper(), "timeframe": label,
+                "candle": None, "detail": "symbol not tracked"}
+    seconds = INTERVAL_SECONDS[label]
+    candle = state.live_candle(seconds)
+    return {"enabled": True, "symbol": symbol.upper(), "timeframe": label,
+            "candle": candle,
+            "detail": "" if candle else "no kline data for this bar yet"}
 
 
 @router.get("/indicators/{symbol}")
