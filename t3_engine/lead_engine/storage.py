@@ -28,8 +28,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 # The single permitted shared-infrastructure import. See the docstring.
 from t3_engine.database import supabase_rest
@@ -302,6 +303,11 @@ class Recorder:
         self.sweeps = 0
         self.rows = 0
         self._last_heartbeat: Optional[Tuple[float, int]] = None
+        # Rolling book-age samples, for the percentiles BUILD-CHECK-044
+        # asks for. Thirty minutes at one sweep per symbol per fifteen
+        # seconds is a few hundred numbers - small enough to keep, large
+        # enough to mean something.
+        self._book_ages: Deque[float] = deque(maxlen=2_000)
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -332,6 +338,7 @@ class Recorder:
             except Exception:                    # noqa: BLE001 - a symbol
                 continue                         # that cannot be read is skipped
             try:
+                self._note_freshness(symbol, frame)
                 self.storage.record_features(symbol, frame)
                 written += 1
                 written += self._record_transition(symbol, state)
@@ -341,6 +348,20 @@ class Recorder:
         self.rows += written
         self._heartbeat()
         return written
+
+    @staticmethod
+    def _percentile(values: List[float], fraction: float) -> float:
+        if not values:
+            return 0.0
+        ordered = sorted(values)
+        index = min(len(ordered) - 1, int(round(fraction * (len(ordered) - 1))))
+        return ordered[index]
+
+    def _note_freshness(self, symbol: str, frame: Dict[str, Any]) -> None:
+        health = frame.get("health") or {}
+        age = health.get("book_age_ms")
+        if isinstance(age, (int, float)):
+            self._book_ages.append(float(age))
 
     def _heartbeat(self) -> None:
         """One line a sweep with the socket's own counters.
@@ -364,12 +385,32 @@ class Recorder:
                 rate = (messages - previous_messages) / elapsed
         self._last_heartbeat = (now, messages)
         snapshot = stats.as_dict()
+        ages = list(self._book_ages)
+        gaps = resyncs = failures = 0
+        for state in list(self.engine.states.values()):
+            sequence = getattr(state.book, "sequence_stats", None)
+            if sequence is not None:
+                counters = sequence()
+                gaps += int(counters.get("sequence_gaps") or 0)
+                resyncs += int(counters.get("resync_count") or 0)
+            current = getattr(getattr(state, "signals", None), "current", None)
+            if current is not None and getattr(current, "state", "") == "DATA_FAILURE":
+                failures += 1
         logger.info(
             "lead_engine feed: connected=%s messages=%d rate=%s/s "
-            "latency=%.1fms connects=%d reconnects=%d topics=%d symbols=%d",
+            "net_latency=%.1fms queue_wait=%.1fms queue=%d/%d dropped=%d "
+            "book_age_median=%.0fms book_age_p95=%.0fms samples=%d "
+            "gaps=%d resyncs=%d data_failure=%d connects=%d reconnects=%d "
+            "topics=%d symbols=%d",
             bool(snapshot.get("connected")), messages,
             "?" if rate is None else f"{rate:.1f}",
-            float(snapshot.get("latency_ms") or 0.0),
+            float(snapshot.get("network_latency_ms") or 0.0),
+            float(snapshot.get("queue_latency_ms") or 0.0),
+            int(snapshot.get("queue_depth") or 0),
+            int(snapshot.get("queue_limit") or 0),
+            int(snapshot.get("dropped") or 0),
+            self._percentile(ages, 0.5), self._percentile(ages, 0.95), len(ages),
+            gaps, resyncs, failures,
             int(snapshot.get("connects") or 0),
             int(snapshot.get("reconnects") or 0),
             int(snapshot.get("subscribed_topics") or 0),
