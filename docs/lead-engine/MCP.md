@@ -97,7 +97,7 @@ running engine.
 
 ## 5. Tools
 
-Sixteen, all reads. `timeframe` accepts `1m 3m 5m 15m 30m 1h 4h 1d`.
+Seventeen, all reads. `timeframe` accepts `1m 3m 5m 15m 30m 1h 4h 1d`.
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
@@ -117,6 +117,7 @@ Sixteen, all reads. `timeframe` accepts `1m 3m 5m 15m 30m 1h 4h 1d`.
 | `get_candles` | `symbol`, `timeframe?`, `limit?` | Historical OHLCV from Bybit, oldest first; the newest row is marked `closed: false`. |
 | `get_indicators` | `symbol`, `timeframe?`, `limit?` | EMA 9/18/50/200 for one symbol and timeframe, computed from the same closes the chart draws. |
 | `get_fibonacci_levels` | `symbol`, `timeframe?` | Saved Fibonacci retracements for one symbol AND timeframe, with every level priced. |
+| `get_virtual_trades` | `symbol`, `limit?` | The engine's virtual ledger: its own signals entered at the next fresh book after the signal, exited on stop, target or hold time, with fees and slippage deducted — open and closed P&L, plus the journal. |
 
 ### Which one to call
 
@@ -125,6 +126,11 @@ Sixteen, all reads. `timeframe` accepts `1m 3m 5m 15m 30m 1h 4h 1d`.
   different ticks.
 - "Where are we on the higher timeframes?" → `get_multi_tf_snapshot`.
 - Before trusting anything → `get_health`.
+- "Is this engine actually any good?" → `get_virtual_trades`. It is the
+  only tool that answers with an outcome rather than a score, and it is
+  PAPER: those positions exist nowhere but that ledger. Read
+  `abandoned_on_gap` and `gap_uncertain_exits` alongside the P&L — they
+  say how much of the sample the stream could actually vouch for.
 
 ## 6. What a tool returns
 

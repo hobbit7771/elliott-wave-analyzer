@@ -464,7 +464,7 @@ def test_mcp_over_http_answers_the_same_as_over_stdio(external_on):
                                "params": {}})
     names = [tool["name"] for tool in listed.json()["result"]["tools"]]
     assert names == [tool["name"] for tool in tool_list()]
-    assert len(names) == 16
+    assert len(names) == 17
 
 
 def test_mcp_over_http_needs_the_same_token_as_everything_else(external_on):

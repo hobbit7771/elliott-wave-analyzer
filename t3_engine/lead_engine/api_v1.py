@@ -221,6 +221,20 @@ def signals(request: Request, symbol: str):
     return _envelope(get_engine().get_signal(symbol))
 
 
+@router.get("/virtual-trades/{symbol}")
+def virtual_trades(request: Request, symbol: str,
+                   limit: int = Query(50, ge=1, le=500)):
+    """The engine's own signals, marked to the live book.
+
+    Read-only, like everything in this namespace: it reports what the
+    engine's paper ledger did and cannot open, close or size anything on
+    an exchange."""
+    blocked = _guard(request)
+    if blocked:
+        return blocked
+    return _envelope(get_engine().get_virtual_trades(symbol, limit))
+
+
 @router.get("/history/{symbol}")
 def history(request: Request, symbol: str, limit: int = Query(300, ge=1, le=2000)):
     blocked = _guard(request)

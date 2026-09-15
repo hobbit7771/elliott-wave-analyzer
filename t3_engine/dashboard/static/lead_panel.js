@@ -126,6 +126,22 @@
     return true;
   };
 
+  /* Write a block of markup, only if it changed. The journal is the one
+     thing on the panel whose SHAPE varies - a table of however many
+     trades there are - so it cannot be a fixed set of cells built once.
+     The same "only if it changed" rule still applies, which is what
+     keeps it from re-parsing a table five times a second. */
+  Panel.prototype.html = function (id, markup) {
+    var node = this.nodes[id];
+    if (!node) return false;
+    var value = String(markup === undefined || markup === null ? '' : markup);
+    if (this.last['html:' + id] === value) { this.skipped += 1; return false; }
+    this.last['html:' + id] = value;
+    node.innerHTML = value;
+    this.writes += 1;
+    return true;
+  };
+
   /* Colour with a deadband: the class only changes when the value has
      moved far enough to be a different state, not merely a different
      number. */

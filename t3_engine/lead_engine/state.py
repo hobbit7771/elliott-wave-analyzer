@@ -56,6 +56,7 @@ from t3_engine.lead_engine.pressure_engine import score as pressure_score
 from t3_engine.lead_engine.signal_machine import SignalInputs, SignalMachine
 from t3_engine.lead_engine.smc_engine import Candle, SmcEngine
 from t3_engine.lead_engine.trade_flow import Trade, TradeFlow
+from t3_engine.lead_engine.virtual_trades import LedgerConfig, VirtualLedger
 
 # The interval the structure modules read. One minute is the compromise
 # the whole tab is built around: fine enough that a level identified on it
@@ -99,6 +100,17 @@ class SymbolState:
         self.elliott = ElliottContext(self.symbol, STRUCTURE_INTERVAL)
         self.prebreak = PreBreakEngine(self.symbol, self.thresholds)
         self.signals = SignalMachine(self.symbol, self.thresholds)
+        # The engine's own signals, marked to the live book. Entry can
+        # only be taken from `on_orderbook` and only for an intent opened
+        # by `_compute_snapshot`, which is what makes "the next fresh book
+        # AFTER the signal" a property of the wiring rather than a claim -
+        # the ledger never sees a price the ingest path did not deliver.
+        # The stale-book limit is the engine's own DEGRADED threshold, so
+        # the same book that stops a signal also stops a fill.
+        self.ledger = VirtualLedger(
+            self.symbol,
+            LedgerConfig(max_book_age_ms=self.thresholds.book_age_degraded_ms),
+        )
         self.health = StreamHealth(self.symbol)
         # Per-symbol rolling distributions. Every raw quantity that is not
         # already bounded is scaled against this instrument's own recent
@@ -146,6 +158,18 @@ class SymbolState:
             bid_depth, ask_depth = self.book.side_totals()
             self.prebreak.observe_depth(stamp or self.health.last_book_ms,
                                         bid_depth, ask_depth)
+            # The virtual ledger is fed from HERE and nowhere else: it
+            # fills and settles only on books the exchange actually sent,
+            # stamped with the exchange's own time. `book_age_ms` is
+            # measured from arrival, not from the exchange stamp, for the
+            # same reason the health module measures it that way - a
+            # clock offset is not staleness.
+            self.ledger.on_book(
+                self.book.best_bid(), self.book.best_ask(),
+                book_at_ms=stamp or received,
+                received_at_ms=received,
+                book_age_ms=max(0.0, float(int(time.time() * 1000) - received)),
+            )
         return applied
 
     def on_trade(self, trade: Trade) -> None:
@@ -394,6 +418,13 @@ class SymbolState:
             health_reason="; ".join(verdict.reasons),
         ), now=now)
 
+        # The signal is only now final, so this is the earliest the
+        # ledger may hear about it - and every book that has already
+        # arrived is in the past. The next one it fills from is therefore
+        # strictly later than the signal, by construction.
+        best_bid, best_ask = self.book.best_bid(), self.book.best_ask()
+        self.ledger.on_signal({**signal.as_dict(), "price": price}, now_ms=now_ms)
+
         frame = {
             "symbol": self.symbol,
             "generated_at": now,
@@ -421,6 +452,11 @@ class SymbolState:
             },
             "calibration": self.calibrator.summary(),
             "signal": signal.as_dict(),
+            # Summary plus the last handful of rows, so the panel can
+            # show the journal without a second request. The full journal
+            # is its own endpoint - see api.virtual_trades.
+            "virtual_trades": {**self.ledger.summary(best_bid, best_ask),
+                               "recent": self.ledger.journal(6)},
             "health": {**self.health.as_dict(now_ms), **verdict.as_dict()},
         }
         self._snapshot = frame

@@ -31,6 +31,7 @@ t3_engine/
 │   ├── pressure_engine.py    combines the layers into LONG/SHORT pressure
 │   ├── calibration.py        model score → empirical probability, or nothing
 │   ├── signal_machine.py     the ten states
+│   ├── virtual_trades.py     paper P&L on the engine's own signals
 │   ├── health.py             split latencies; is the data good enough
 │   ├── fibonacci.py          retracement levels + per-symbol/TF drawings
 │   ├── state.py              one symbol's world
@@ -45,7 +46,7 @@ t3_engine/
 
 lead_engine_mcp/               ← the MCP adapter. Imports NO t3_engine at all.
 ├── client.py                  HTTP to /api/v1/lead-engine
-├── tools.py                   16 read-only tools
+├── tools.py                   17 read-only tools
 └── server.py                  JSON-RPC over stdio
 ```
 
