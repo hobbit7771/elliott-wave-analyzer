@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from t3_engine.lead_engine.config import Thresholds
+from t3_engine.lead_engine.normalize import normalized_delta
 from t3_engine.lead_engine.rolling import (
     TimeSeries,
     WINDOWS_MS,
@@ -36,6 +37,12 @@ from t3_engine.lead_engine.rolling import (
 )
 
 EPSILON = 1e-9
+
+# Where the raw diagnostic ratio is truncated for display. It has no
+# effect on any score - nothing scores on the ratio - and it exists so
+# a one-sided 250ms window prints "999" rather than a seven-figure
+# number that reads like a bug.
+RATIO_DISPLAY_CAP = 999.0
 
 # How many one-second velocity readings the z-score is measured against.
 VELOCITY_HISTORY = 120
@@ -67,18 +74,29 @@ class WindowFlow:
 
     @property
     def delta_ratio(self) -> float:
-        """Buy volume over sell volume, guarded.
+        """Buy volume over sell volume. A DIAGNOSTIC, not a feature.
 
-        The specification's formula. Guarded because a window with no
-        sellers is common at 250ms and division by zero is not a reading."""
+        Unbounded by construction: a 250ms window with no sellers sends it
+        to the guard value, and the old scorer fed exactly this into a
+        weighted sum, which is how a "delta ratio" of a million ended up
+        driving a signal. Nothing scores on this any more - see
+        `normalized_delta` - and it is capped where it is reported so a
+        panel cannot print a number no one can read."""
         return self.buy_volume / max(self.sell_volume, EPSILON)
+
+    @property
+    def normalized_delta(self) -> float:
+        """(buy - sell) / (buy + sell). Always in [-1, +1]."""
+        return normalized_delta(self.buy_volume, self.sell_volume)
 
     def as_dict(self) -> Dict[str, float]:
         return {
             "buy_volume": round(self.buy_volume, 8),
             "sell_volume": round(self.sell_volume, 8),
             "delta": round(self.delta, 8),
-            "delta_ratio": round(min(self.delta_ratio, 1e6), 6),
+            # The bounded form is what anything downstream should read.
+            "normalized_delta": round(self.normalized_delta, 6),
+            "delta_ratio": round(min(self.delta_ratio, RATIO_DISPLAY_CAP), 6),
             "trades": self.trades,
             "notional": round(self.notional, 4),
         }

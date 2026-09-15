@@ -319,37 +319,63 @@ def test_candles_are_built_from_trades_so_structure_exists_before_klines_do():
 
 # ---- pressure -----------------------------------------------------------
 
+def _layers(**scores):
+    """Five LayerScores from a dict of signed scores. `None` means the
+    layer had nothing to say, which is not the same as zero."""
+    from t3_engine.lead_engine.layers import LAYERS, LayerScore
+
+    out = {}
+    for name in LAYERS:
+        value = scores.get(name)
+        out[name] = LayerScore(name=name, score=value or 0.0,
+                               confidence=0.0 if value is None else 1.0)
+    return out
+
+
 def test_long_and_short_pressure_are_independent_not_complements():
     """A featureless market must not read as 50 long. And a market being
     fought over must read as high on BOTH, which one meter cannot show."""
-    quiet = pressure_score({name: 0.0 for name in
-                            ("order_book_imbalance", "microprice", "cvd", "trade_velocity",
-                             "liquidity_shift", "liquidations", "btc_lead_lag", "smc",
-                             "elliott_context")})
+    quiet = pressure_score(_layers(flow=0.0, book=0.0, structure=0.0,
+                                   derivatives=0.0, btc_lead=0.0))
     assert quiet.long_pressure == 0.0 and quiet.short_pressure == 0.0
 
-    contested = pressure_score({"order_book_imbalance": 0.9, "microprice": 0.9,
-                                "cvd": -0.9, "trade_velocity": -0.9,
-                                "liquidity_shift": 0.0, "liquidations": 0.0,
-                                "btc_lead_lag": 0.0, "smc": 0.0, "elliott_context": 0.0})
+    contested = pressure_score(_layers(flow=0.9, book=-0.9, structure=0.9,
+                                       derivatives=-0.9, btc_lead=0.0))
     assert contested.long_pressure > 20 and contested.short_pressure > 20
-    assert contested.conflict > 20
 
 
-def test_a_component_that_is_not_ready_is_dropped_not_counted_as_neutral():
+def test_a_layer_that_is_not_ready_is_dropped_not_counted_as_neutral():
     """Counting a missing stream as zero dilutes a genuine reading toward
     the middle, making a half-connected engine look calm rather than
-    uninformed."""
-    partial = pressure_score({"order_book_imbalance": 1.0, "microprice": None,
-                              "cvd": None, "trade_velocity": None,
-                              "liquidity_shift": None, "liquidations": None,
-                              "btc_lead_lag": None, "smc": None, "elliott_context": None})
+    uninformed. Its weight is redistributed and its name reported."""
+    partial = pressure_score(_layers(flow=1.0))
     assert partial.long_pressure == pytest.approx(100.0)
-    assert len(partial.missing) == 8
+    assert sorted(partial.missing) == ["book", "btc_lead", "derivatives", "structure"]
+    # ...but the engine says it is not sure, because four fifths of the
+    # weight had nothing to contribute.
+    assert partial.confidence < 0.35
+
+
+def test_independent_layers_disagreeing_is_detected_and_costs_confidence():
+    """The brief's case: structure bullish, flow and book bearish. The old
+    `conflict` was min(long, short) - it noticed both sides had scored but
+    not WHICH sources disagreed, so this situation and nine mildly mixed
+    components produced the same number."""
+    from t3_engine.lead_engine.layers import CONFLICT_HIGH
+
+    result = pressure_score(_layers(structure=0.8, flow=-0.7, book=-0.6,
+                                    derivatives=0.0, btc_lead=-0.2))
+    assert result.conflict.level == CONFLICT_HIGH
+    assert result.conflict.opposing == ["structure"]
+    assert result.confidence < 0.5
+    unanimous = pressure_score(_layers(structure=0.8, flow=0.7, book=0.6,
+                                       derivatives=0.4, btc_lead=0.2))
+    assert unanimous.confidence > result.confidence * 2
 
 
 def test_the_published_weights_sum_to_one():
     assert le_config.PressureWeights().total() == pytest.approx(1.0)
+    assert le_config.LayerWeights().total() == pytest.approx(1.0)
 
 
 # ---- pre-break ----------------------------------------------------------
@@ -494,13 +520,42 @@ def test_missing_liquidations_do_not_degrade_the_feed():
     assert assess(health, _T(), now_ms).status == "OK"
 
 
-def test_a_stale_order_book_does_degrade_it():
+def test_a_stale_order_book_reports_stale_not_merely_degraded():
+    """Old data and a dead socket are different failures and now have
+    different names, so the header can no longer print "feed OK" beside a
+    nine-second book age."""
+    from t3_engine.lead_engine.health import DEGRADED, STALE_DATA
+
     now_ms = int(time.time() * 1000)
     health = StreamHealth("TESTUSDT", ws_connected=True, orderbook_synced=True,
                           last_book_ms=now_ms - 20_000, last_trade_ms=now_ms - 500,
                           last_ticker_ms=now_ms - 500)
     verdict = assess(health, _T(), now_ms)
-    assert verdict.status == "DEGRADED" and verdict.signals_enabled is False
+    assert verdict.status == STALE_DATA and verdict.signals_enabled is False
+
+    # A socket that is down is DEGRADED, not STALE: nothing is old, there
+    # is simply nothing.
+    down = StreamHealth("TESTUSDT", ws_connected=False, orderbook_synced=True,
+                        last_book_ms=now_ms - 100, last_trade_ms=now_ms - 100,
+                        last_ticker_ms=now_ms - 100)
+    assert assess(down, _T(), now_ms).status == DEGRADED
+
+
+def test_the_four_clocks_measure_four_different_things():
+    """The defect this replaces: one number printed under two names, so
+    "latency 3334ms" and "book 3.3s" in the header were the same
+    staleness twice. The case that hid is a FAST link carrying OLD data."""
+    now_ms = int(time.time() * 1000)
+    health = StreamHealth("TESTUSDT", ws_connected=True, orderbook_synced=True,
+                          last_book_ms=now_ms - 9_000, last_trade_ms=now_ms - 400,
+                          last_ticker_ms=now_ms - 400, ws_latency_ms=40.0,
+                          processing_ms=0.6)
+    payload = health.as_dict(now_ms)
+    assert payload["ws_latency_ms"] == 40.0
+    assert payload["book_age_ms"] == pytest.approx(9000, abs=50)
+    assert payload["trade_age_ms"] == pytest.approx(400, abs=50)
+    assert payload["processing_ms"] == 0.6
+    assert payload["ws_latency_ms"] < payload["book_age_ms"] / 100
 
 
 # ---- bus and storage ----------------------------------------------------
@@ -544,3 +599,96 @@ def test_microprice_deltas_cover_the_four_horizons():
                            "microprice_delta_3s", "microprice_delta_5s"}
     assert state.bias() == "bullish"
     assert state.pressure_component() > 0
+
+
+# ---- concurrency: the socket thread and a request thread at once --------
+
+def test_reading_state_while_the_tape_runs_never_raises():
+    """The failure this pins down was a 500 under load, not a crash in a
+    test: the socket thread appends to a TimeSeries deque while a request
+    thread walks the same deque to answer /state, and CPython raises
+    `RuntimeError: deque mutated during iteration`. Intermittent, load
+    dependent, and invisible until a browser is actually polling."""
+    import threading
+
+    from t3_engine.lead_engine.config import LeadEngineConfig
+    from t3_engine.lead_engine.engine import LeadEngine
+
+    engine = LeadEngine(LeadEngineConfig(enabled=True, symbols=["BTCUSDT", "INJUSDT"]))
+    now = int(time.time() * 1000)
+    tick = 0.001
+    price = 5.70
+    engine.handle_message("orderbook.50.INJUSDT", {
+        "topic": "orderbook.50.INJUSDT", "type": "snapshot", "ts": now,
+        "data": {"u": 1,
+                 "b": [[f"{price - (i + 1) * tick:.4f}", "100"] for i in range(50)],
+                 "a": [[f"{price + (i + 1) * tick:.4f}", "60"] for i in range(50)]}})
+
+    stop = threading.Event()
+    failures = []
+
+    def ingest():
+        update_id = 1
+        index = 0
+        try:
+            while not stop.is_set():
+                stamp = int(time.time() * 1000)
+                update_id += 1
+                index += 1
+                engine.handle_message("publicTrade.INJUSDT", {
+                    "topic": "publicTrade.INJUSDT", "ts": stamp,
+                    "data": [{"T": stamp, "S": "Buy" if index % 2 else "Sell",
+                              "v": "3", "p": f"{price:.4f}"}]})
+                engine.handle_message("orderbook.50.INJUSDT", {
+                    "topic": "orderbook.50.INJUSDT", "type": "delta", "ts": stamp,
+                    "data": {"u": update_id,
+                             "b": [[f"{price - tick:.4f}", f"{100 + index % 7}"]],
+                             "a": [[f"{price + tick:.4f}", f"{60 + index % 5}"]]}})
+        except Exception as exc:                      # noqa: BLE001
+            failures.append(("ingest", exc))
+
+    def read():
+        try:
+            for _ in range(200):
+                engine.get_state("INJUSDT", force=True)
+        except Exception as exc:                      # noqa: BLE001
+            failures.append(("read", exc))
+
+    writer = threading.Thread(target=ingest, daemon=True)
+    writer.start()
+    readers = [threading.Thread(target=read) for _ in range(3)]
+    for reader in readers:
+        reader.start()
+    for reader in readers:
+        reader.join(timeout=60)
+    stop.set()
+    writer.join(timeout=5)
+
+    assert not failures, failures
+
+
+def test_btc_flow_is_read_from_btcs_own_frame_not_rescored():
+    """Re-scoring BTC's flow for every tracked symbol pushed the same
+    observation into BTC's rolling normaliser once per symbol per tick,
+    which corrupts BTC's own z-scores."""
+    from t3_engine.lead_engine.config import LeadEngineConfig
+    from t3_engine.lead_engine.engine import LeadEngine
+
+    engine = LeadEngine(LeadEngineConfig(
+        enabled=True, symbols=["BTCUSDT", "INJUSDT", "SOLUSDT"]))
+    now = int(time.time() * 1000)
+    for index in range(40):
+        stamp = now + index * 100
+        engine.handle_message("publicTrade.BTCUSDT", {
+            "topic": "publicTrade.BTCUSDT", "ts": stamp,
+            "data": [{"T": stamp, "S": "Buy", "v": "1", "p": "64000"}]})
+
+    btc = engine.states["BTCUSDT"]
+    feature = btc.normalizer.feature("cvd_slope_60s")
+    engine.get_state("BTCUSDT", force=True)
+    after_own = len(feature.samples)
+    # Two OTHER symbols each take a snapshot. Neither may add a sample to
+    # BTC's history.
+    engine.get_state("INJUSDT", force=True)
+    engine.get_state("SOLUSDT", force=True)
+    assert len(feature.samples) == after_own

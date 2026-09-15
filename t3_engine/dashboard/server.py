@@ -133,10 +133,44 @@ app = FastAPI(title="T3 Elliott Wave Trading Engine Dashboard")
 # nothing (see lead_engine/__init__.py), and with LEAD_ENGINE_ENABLED
 # unset every route answers {"enabled": false} and no thread exists.
 from t3_engine.lead_engine import api as lead_engine_api          # noqa: E402
+from t3_engine.lead_engine import api_v1 as lead_engine_api_v1    # noqa: E402
 from t3_engine.lead_engine import config as lead_engine_config    # noqa: E402
 from t3_engine.lead_engine.engine import get_engine as get_lead_engine  # noqa: E402
 
 app.include_router(lead_engine_api.router)
+
+
+@app.get("/lead-engine/{symbol}", response_class=HTMLResponse)
+def lead_engine_workspace(symbol: str):
+    """The Market Workspace for one instrument.
+
+    Its own page, not a tab: a full-height chart with the Lead Engine
+    panel beside it. Served from this file because the dashboard owns the
+    web process, but every byte it loads - the markup, the styles, the
+    chart controller, the Fibonacci tool - lives in
+    static/lead_workspace.* and static/lead_*.js. Nothing in the
+    dashboard's own page is touched by it.
+
+    The symbol is in the PATH so the page can be linked, bookmarked and
+    opened in its own tab, which is what "open a separate workspace for
+    this coin" needs to mean to be useful."""
+    if not lead_engine_config.enabled():
+        return HTMLResponse(
+            "<!doctype html><meta charset='utf-8'>"
+            "<body style='background:#0e1117;color:#fde68a;font:14px system-ui;padding:24px'>"
+            "<h2>Market Lead Engine is switched off</h2>"
+            f"<p>Set <code>{lead_engine_config.ENABLED_ENV}=true</code> and redeploy.</p>"
+            "<p><a style='color:#7dd3fc' href='/'>Back to the dashboard</a></p></body>",
+            status_code=200)
+    path = os.path.join(_STATIC_DIR, "lead_workspace.html")
+    if not os.path.exists(path):
+        raise HTTPException(404, "workspace page is missing from this build")
+    with open(path, "r", encoding="utf-8") as handle:
+        return HTMLResponse(handle.read())
+# The versioned, token-gated, read-only external surface. Mounted always;
+# every route inside refuses unless EXTERNAL_AI_ACCESS_ENABLED is true AND
+# a valid LEAD_ENGINE_API_KEY is presented - see lead_engine/auth.py.
+app.include_router(lead_engine_api_v1.router)
 
 # --- live engine registry (spec section 20: one running pipeline per
 # symbol, driven by the public Bybit WebSocket - no API key needed for
@@ -190,7 +224,7 @@ async def _run_live_guarded(symbol: str, engine: LiveTradingEngine) -> None:
 # value here and the UI keeps "Not sent" as an explicit choice.
 DEFAULT_REASONING_EFFORT = "max"
 
-BUILD_VERSION = "BUILD-CHECK-042"
+BUILD_VERSION = "BUILD-CHECK-043"
 
 
 @app.get("/api/health")

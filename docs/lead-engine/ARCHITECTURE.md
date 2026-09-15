@@ -10,31 +10,57 @@ logging setup. It shares no code, no state, no tables and no endpoints.
 ```
 t3_engine/
 ├── lead_engine/              ← the new engine. Self-contained.
-│   ├── config.py             flag, symbols, weights, thresholds
+│   ├── config.py             flag, symbols, layer weights, thresholds
 │   ├── bus.py                lead_engine.* event bus
 │   ├── rolling.py            time-windowed accumulators, z-scores
+│   ├── normalize.py          rolling z-score / percentile / ratio → [-1,+1]
 │   ├── bybit_ws.py           its own Bybit socket, its own thread
-│   ├── orderbook_engine.py   L2 book from snapshot+delta, OBI, pulling
+│   ├── orderbook_engine.py   L2 book from snapshot+delta, OBI, walls
 │   ├── microprice.py         microprice history, deltas, bias
 │   ├── trade_flow.py         taker flow, velocity, large prints
 │   ├── cvd.py                cumulative delta and price/flow divergence
 │   ├── candles.py            candles built from trades
+│   ├── candles_rest.py       Bybit REST OHLCV + EMA, for the chart
 │   ├── liquidation_engine.py forced closes, flush states
 │   ├── oi_engine.py          open interest, polled on its own thread
 │   ├── btc_leadlag.py        correlation, lag estimate, BTC impulse
 │   ├── smc_engine.py         its own structure read
 │   ├── elliott_state.py      its own wave context (or a read-only adapter)
-│   ├── prebreak_engine.py    levels and break probability
-│   ├── pressure_engine.py    the weighted score
+│   ├── prebreak_engine.py    levels and break scoring
+│   ├── layers.py             the five independent layers + conflict detector
+│   ├── pressure_engine.py    combines the layers into LONG/SHORT pressure
+│   ├── calibration.py        model score → empirical probability, or nothing
 │   ├── signal_machine.py     the ten states
-│   ├── health.py             is the data good enough to have an opinion
+│   ├── health.py             split latencies; is the data good enough
+│   ├── fibonacci.py          retracement levels + per-symbol/TF drawings
 │   ├── state.py              one symbol's world
 │   ├── engine.py             LeadEngine — the facade
 │   ├── storage.py            lead_engine_* tables
 │   ├── replay.py             replay + backtest metrics
-│   └── api.py                /api/lead-engine/*
+│   ├── snapshot.py           the AI-facing shape: snapshot, multi-TF context
+│   ├── auth.py               external flag, token, rate limit
+│   ├── api.py                /api/lead-engine/*        (the dashboard tab)
+│   └── api_v1.py             /api/v1/lead-engine/*     (external, token-gated)
 └── (everything else)         ← the analyser. Untouched.
+
+lead_engine_mcp/               ← the MCP adapter. Imports NO t3_engine at all.
+├── client.py                  HTTP to /api/v1/lead-engine
+├── tools.py                   16 read-only tools
+└── server.py                  JSON-RPC over stdio
 ```
+
+### The one-directional chain
+
+```
+Bybit → Lead Engine → internal state → REST/SSE API → MCP adapter → AI
+```
+
+Each arrow is a dependency, and none of them points back. The MCP adapter
+holds no market state; the API holds no market state; both can be switched
+off, misconfigured or broken while the engine keeps ingesting and scoring.
+`lead_engine_mcp` is checked by AST never to import `t3_engine`, so it can
+be copied to a client machine and pointed at the deployment — which is the
+normal way to run it. See [`API.md`](API.md) and [`MCP.md`](MCP.md).
 
 The dependency rule is one-directional and mechanically enforced by
 `tests/test_lead_engine_isolation.py`:

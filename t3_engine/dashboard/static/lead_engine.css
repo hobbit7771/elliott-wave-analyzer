@@ -3,6 +3,18 @@
    #tab-lead or .le-, so loading this file cannot change how any other tab
    renders. That is the same isolation the backend has, applied to CSS. */
 
+/* Every realtime number is tabular and fixed-width. Proportional digits
+   are why the panel used to shift horizontally as values changed: 5.9470
+   and 5.9510 are different widths in a proportional face, so a column of
+   them breathes in and out once a second. `tabular-nums` makes every
+   digit the same width; `font-feature-settings` is the fallback for
+   engines that want the older spelling. */
+#tab-lead, .le-num, .le-root {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1, "lnum" 1;
+}
+.le-num { display: inline-block; text-align: right; white-space: nowrap; }
+
 #tab-lead { font-size: 12px; }
 
 #tab-lead .le-head {
@@ -95,3 +107,63 @@
   #tab-lead .le-grid { grid-template-columns: 1fr; }
   #tab-lead .le-feature { grid-template-columns: 110px 1fr 38px; }
 }
+
+
+/* ---- stability -------------------------------------------------------
+   The panel is built ONCE and only its values change afterwards, so these
+   rules exist to stop the remaining sources of visual movement. */
+
+/* Value cells reserve their width so a number gaining a digit does not
+   push its neighbours. */
+#tab-lead .le-row .v, .le-root .le-row .v {
+  min-width: 108px; font-variant-numeric: tabular-nums;
+}
+#tab-lead .le-row .k, .le-root .le-row .k { white-space: nowrap; }
+
+/* Colour transitions are eased rather than switched, so the deadband in
+   the script (which stops the flipping) is backed up by the paint not
+   snapping even when a genuine state change happens. */
+#tab-lead .le-row .v, .le-root .le-row .v { transition: color 180ms linear; }
+#tab-lead .le-meter .fill, .le-root .le-meter .fill {
+  transition: width 220ms cubic-bezier(.4,0,.2,1);
+}
+
+/* The four clocks, shown separately - see health.py for why one number
+   under two names was a defect. */
+.le-clocks { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+.le-clock {
+  border: 1px solid #232733; border-radius: 4px; padding: 3px 7px;
+  font-size: 10px; color: #9aa3b2; font-variant-numeric: tabular-nums;
+}
+.le-clock b { color: #d7dbe3; font-weight: 600; }
+.le-clock.warn { border-color: #6b551b; color: #fbbf24; }
+.le-clock.bad { border-color: #6b2222; color: #f87171; }
+
+/* Layer bars: five independent readings, each with its own confidence. */
+.le-layer { display: grid; grid-template-columns: 92px 1fr 54px 40px; gap: 6px;
+            align-items: center; padding: 3px 0; font-size: 11px; }
+.le-layer .name { color: #8a93a5; text-transform: uppercase; font-size: 10px;
+                  letter-spacing: .05em; }
+.le-layer .track { height: 8px; background: #1a1f29; border-radius: 4px; position: relative; }
+.le-layer .track > i { position: absolute; top: 0; bottom: 0; border-radius: 4px; }
+.le-layer .track > i.long  { left: 50%; background: #34d399; }
+.le-layer .track > i.short { right: 50%; background: #f87171; }
+.le-layer .track::after { content: ""; position: absolute; left: 50%; top: -2px; bottom: -2px;
+                          width: 1px; background: #2c3140; }
+.le-layer .val { text-align: right; font-variant-numeric: tabular-nums; color: #d7dbe3; }
+.le-layer .conf { text-align: right; font-size: 10px; color: #6b7488; }
+
+.le-conflict { font-size: 11px; padding: 4px 8px; border-radius: 4px; margin-top: 6px; }
+.le-conflict.low    { color: #6b7488; border: 1px solid #232733; }
+.le-conflict.medium { color: #fbbf24; border: 1px solid #6b551b; background: #1d1809; }
+.le-conflict.high   { color: #f87171; border: 1px solid #6b2222; background: #1c0f0f; }
+
+.le-badge-score { font-size: 10px; letter-spacing: .05em; color: #a78bfa;
+                  border: 1px solid #4c3a86; border-radius: 3px; padding: 1px 5px; }
+
+/* A symbol that opens its own workspace has to look like it does. */
+#tab-lead .le-open, .le-root .le-open {
+  cursor: pointer; text-decoration: underline; text-underline-offset: 3px;
+  text-decoration-color: #3a4152;
+}
+#tab-lead .le-open:hover { color: #7dd3fc; text-decoration-color: #7dd3fc; }

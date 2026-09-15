@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Market Lead Engine — Workspace</title>
+<link rel="icon" href="/static/icons/icon-192.png" />
+<link rel="apple-touch-icon" href="/static/icons/icon-192.png" />
+<link rel="stylesheet" href="/static/lead_engine.css" />
+<link rel="stylesheet" href="/static/lead_workspace.css" />
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body class="le-root">
+<div id="wsRoot">
+  <header id="wsHead">
+    <div class="wsHeadLeft">
+      <span id="wsSymbol" class="wsSymbol">—</span>
+      <span id="wsPrice" class="wsPrice le-num">—</span>
+      <span id="wsState" class="le-state idle">IDLE</span>
+      <span id="wsQuality" class="le-chip">feed —</span>
+    </div>
+    <div class="wsHeadRight">
+      <div id="wsTimeframes" class="wsTf"></div>
+      <button id="wsIndicators" class="panel-btn">Indicators</button>
+      <button id="wsFib" class="panel-btn">Fib</button>
+      <button id="wsFullscreen" class="panel-btn">Fullscreen</button>
+      <a class="panel-btn" href="/" id="wsBack">Back</a>
+    </div>
+  </header>
+
+  <div id="wsIndicatorMenu" class="wsMenu" hidden>
+    <label><input type="checkbox" data-ema="9" /> EMA 9</label>
+    <label><input type="checkbox" data-ema="18" /> EMA 18</label>
+    <label><input type="checkbox" data-ema="50" /> EMA 50</label>
+    <label><input type="checkbox" data-ema="200" /> EMA 200</label>
+    <hr />
+    <label><input type="checkbox" id="wsShowVolume" checked /> Volume</label>
+    <label><input type="checkbox" id="wsShowSignals" checked /> Lead Engine markers</label>
+  </div>
+
+  <div id="wsFibMenu" class="wsMenu" hidden>
+    <div class="wsMenuTitle">Fibonacci retracement</div>
+    <div id="wsFibRatios" class="wsRatios"></div>
+    <div class="wsMenuRow">
+      <button id="wsFibDraw" class="panel-btn">Draw</button>
+      <button id="wsFibHide" class="panel-btn">Hide</button>
+      <button id="wsFibDelete" class="panel-btn">Delete last</button>
+      <button id="wsFibReset" class="panel-btn">Reset</button>
+    </div>
+    <div class="le-note" id="wsFibHint">
+      Tap or click two points on the chart: the start of the move, then its end.
+      Levels are saved per symbol and timeframe.
+    </div>
+  </div>
+
+  <main id="wsMain">
+    <section id="wsChartPane">
+      <div id="wsChart"></div>
+      <div id="wsChartNote" class="le-note"></div>
+    </section>
+    <aside id="wsPanel">
+      <div id="wsPanelBody"></div>
+    </aside>
+  </main>
+
+  <nav id="wsMobileTabs">
+    <button data-pane="chart" class="active">Chart</button>
+    <button data-pane="panel">Engine</button>
+  </nav>
+</div>
+<script src="/static/lead_panel.js"></script>
+<script src="/static/lead_blocks.js"></script>
+<script src="/static/lead_fib.js"></script>
+<script src="/static/lead_workspace.js"></script>
+</body>
+</html>

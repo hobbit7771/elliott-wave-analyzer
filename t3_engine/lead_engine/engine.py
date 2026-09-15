@@ -78,6 +78,13 @@ class LeadEngine:
 
     # ---- lifecycle ----
 
+    def _btc_state(self) -> Optional[SymbolState]:
+        """The reference instrument's own state, for the BTC lead layer.
+
+        Passed in rather than reached for, so `SymbolState` still knows
+        nothing about the engine that owns it and stays testable alone."""
+        return self.states.get(BTC_SYMBOL)
+
     def _ensure(self, symbol: str) -> SymbolState:
         symbol = symbol.upper()
         with self._lock:
@@ -166,7 +173,7 @@ class LeadEngine:
         state.health.ws_connected = True
         state.health.messages += 1
         if self.stream is not None:
-            state.health.latency_ms = self.stream.stats.latency_ms
+            state.health.ws_latency_ms = self.stream.stats.latency_ms
             state.health.reconnects = self.stream.stats.reconnects
 
         kind = parsed["kind"]
@@ -267,7 +274,7 @@ class LeadEngine:
         if symbol not in self.states:
             return {"enabled": True, "symbol": symbol, "tracked": False,
                     "detail": "not subscribed; call subscribe() first"}
-        frame = self.states[symbol].snapshot(force=force)
+        frame = self.states[symbol].snapshot(force=force, btc_state=self._btc_state())
         self.bus.publish(bus_module.TOPIC_FEATURES, {"symbol": symbol})
         return {"enabled": True, "tracked": True, **frame}
 
@@ -278,7 +285,7 @@ class LeadEngine:
         if symbol not in self.states:
             return {"enabled": True, "symbol": symbol, "tracked": False}
         state = self.states[symbol]
-        state.snapshot()
+        state.snapshot(btc_state=self._btc_state())
         return {"enabled": True, "tracked": True, "symbol": symbol,
                 **state.signals.as_dict()}
 
@@ -288,7 +295,7 @@ class LeadEngine:
         symbol = symbol.upper()
         if symbol not in self.states:
             return {"enabled": True, "symbol": symbol, "tracked": False}
-        frame = self.states[symbol].snapshot()
+        frame = self.states[symbol].snapshot(btc_state=self._btc_state())
         return {"enabled": True, "tracked": True, "symbol": symbol,
                 **frame["pressure"],
                 "prebreak": frame["prebreak"]}
@@ -326,7 +333,7 @@ class LeadEngine:
             state = self.states.get(symbol)
             if state is None:
                 continue
-            frame = state.snapshot()
+            frame = state.snapshot(btc_state=self._btc_state())
             rows.append({
                 "symbol": symbol,
                 "price": frame["price"],

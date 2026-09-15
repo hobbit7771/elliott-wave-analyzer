@@ -22,18 +22,28 @@ Two details are load-bearing:
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from t3_engine.lead_engine import cvd as cvd_module
 from t3_engine.lead_engine.btc_leadlag import BtcLeadLag
+from t3_engine.lead_engine.calibration import Calibrator, label_for
 from t3_engine.lead_engine.candles import CandleBuilder
-from t3_engine.lead_engine.config import LeadEngineConfig, Thresholds
+from t3_engine.lead_engine.config import BTC_SYMBOL, LeadEngineConfig, Thresholds
 from t3_engine.lead_engine.elliott_state import ElliottContext
 from t3_engine.lead_engine.health import StreamHealth, assess
 from t3_engine.lead_engine.liquidation_engine import LiquidationEngine, Liquidation
+from t3_engine.lead_engine.layers import (
+    score_book,
+    score_btc_lead,
+    score_derivatives,
+    score_flow,
+    score_structure,
+)
 from t3_engine.lead_engine.microprice import MicropriceState
+from t3_engine.lead_engine.normalize import Normalizer
 from t3_engine.lead_engine.oi_engine import OpenInterestState
 from t3_engine.lead_engine.orderbook_engine import OrderBook
 from t3_engine.lead_engine.prebreak_engine import (
@@ -42,7 +52,7 @@ from t3_engine.lead_engine.prebreak_engine import (
     PreBreakInputs,
     SHORT,
 )
-from t3_engine.lead_engine.pressure_engine import describe, score as pressure_score
+from t3_engine.lead_engine.pressure_engine import score as pressure_score
 from t3_engine.lead_engine.signal_machine import SignalInputs, SignalMachine
 from t3_engine.lead_engine.smc_engine import Candle, SmcEngine
 from t3_engine.lead_engine.trade_flow import Trade, TradeFlow
@@ -90,6 +100,17 @@ class SymbolState:
         self.prebreak = PreBreakEngine(self.symbol, self.thresholds)
         self.signals = SignalMachine(self.symbol, self.thresholds)
         self.health = StreamHealth(self.symbol)
+        # Per-symbol rolling distributions. Every raw quantity that is not
+        # already bounded is scaled against this instrument's own recent
+        # history rather than a constant - see normalize.py.
+        self.normalizer = Normalizer(self.symbol)
+        # snapshot() is not a read. It pushes normalisation samples,
+        # opens calibration observations and advances the signal machine,
+        # and it is called from the request thread, the recorder thread
+        # and replay. One at a time, or two callers double-count the same
+        # tick and race each other's deques.
+        self._snapshot_lock = threading.RLock()
+        self.calibrator = Calibrator(self.symbol)
         self.last_price: Optional[float] = None
         self.ticker: Dict[str, Any] = {}
         self._snapshot: Optional[Dict[str, Any]] = None
@@ -120,7 +141,12 @@ class SymbolState:
         # The book needs to know this was EXECUTED, not cancelled. See the
         # module docstring; this one line is what separates pulling from
         # normal trading.
-        self.book.note_trade("Buy" if trade.is_taker_buy else "Sell", trade.quantity)
+        self.book.note_trade("Buy" if trade.is_taker_buy else "Sell", trade.quantity,
+                            trade.price)
+        # Settle any calibration observation this price can now answer.
+        # Only prices stamped AFTER an observation can resolve it; see
+        # calibration.Calibrator.resolve.
+        self.calibrator.resolve(trade.price, trade.timestamp_ms)
         self.last_price = trade.price
         self.health.last_trade_ms = trade.timestamp_ms
         self.lead_lag.observe(self.symbol, trade.timestamp_ms, trade.price)
@@ -174,75 +200,76 @@ class SymbolState:
         exchange_closed = sum(1 for c in exchange.candles if c.closed)
         return exchange if exchange_closed >= local_closed else self.local_smc
 
-    def components(self) -> Dict[str, Optional[float]]:
-        """The nine pressure inputs.
+    def layer_scores(self, btc_state: Optional["SymbolState"] = None) -> Dict[str, Any]:
+        """The five independent readings. See layers.py.
 
-        None where a stream has not produced enough to answer - see
-        pressure_engine.score for why None is not zero."""
-        structure = self._structure_engine()
-        book_component = self.book.pressure_component() if self.book.synced else None
-        micro_component = (self.microprice.pressure_component()
-                           if len(self.microprice.series) >= 2 else None)
-        flow_component = self.flow.pressure_component() if len(self.flow.trades) else None
-        velocity_component = self.flow.velocity_component() if len(self.flow.trades) else None
-        liquidity_component = self._liquidity_component()
-        liquidation_component = (self.liquidations.pressure_component()
-                                 if len(self.liquidations.events) else None)
-        oi_component = (self.open_interest.pressure_component()
-                        if len(self.open_interest.series) >= 2 else None)
-        lead_component = self.lead_lag.pressure_component(self.symbol)
-        smc_component = structure.pressure_component() if structure else None
-        elliott_component = self.elliott.pressure_component() if self.elliott.candles else None
+        Replaces the flat nine-component list: a reading can now be
+        attributed to a source, and two sources can be seen to disagree -
+        which is what `detect_conflict` needs and what the old shape made
+        impossible."""
+        structure_engine = self._structure_engine()
+        smc_state = structure_engine.state().as_dict() if structure_engine else {}
+        elliott_component = (self.elliott.pressure_component()
+                             if self.elliott.candles else None)
+        lead = self.lead_lag.as_dict(self.symbol)
+        price = self.last_price or self.book.midpoint()
 
-        # Open interest is not one of the nine named weights; the
-        # specification folds positioning into the liquidation view. It is
-        # blended into the liquidation component rather than given a
-        # weight of its own, so the published weights still sum to one.
-        if liquidation_component is not None and oi_component is not None:
-            liquidation_component = 0.7 * liquidation_component + 0.3 * oi_component
-        elif liquidation_component is None and oi_component is not None:
-            liquidation_component = 0.5 * oi_component
+        # BTC's own flow and book, for the lead layer to carry across.
+        #
+        # Read from BTC's LAST COMPUTED frame rather than re-scored here.
+        # Re-scoring would push a sample into BTC's rolling normaliser
+        # once per tracked symbol per tick - seven symbols, seven copies
+        # of the same observation, which corrupts BTC's own z-scores -
+        # and it would do it from whichever thread happened to be asking,
+        # racing BTC's own snapshot. Using what BTC reported is both
+        # cheaper and the number BTC actually stands behind.
+        btc_flow = btc_book = None
+        if btc_state is not None and btc_state is not self:
+            btc_frame = btc_state.cached_snapshot()
+            if btc_frame:
+                layers_block = (btc_frame.get("pressure") or {}).get("layers") or {}
+                flow_block = layers_block.get("flow") or {}
+                if flow_block.get("score") is not None:
+                    btc_flow = float(flow_block["score"])
+            if btc_state.book.synced:
+                btc_book = btc_state.book.pressure_component()
 
         return {
-            "order_book_imbalance": book_component,
-            "microprice": micro_component,
-            "cvd": self.cvd.pressure_component() if len(self.cvd.series) else None,
-            "trade_velocity": velocity_component,
-            "liquidity_shift": liquidity_component,
-            "liquidations": liquidation_component,
-            "btc_lead_lag": lead_component,
-            "smc": smc_component,
-            "elliott_context": elliott_component,
-            # kept out of the weighted set, reported for the UI
-            "_flow": flow_component,
+            "flow": score_flow(self.flow, self.cvd, self.normalizer),
+            "book": score_book(self.book, self.microprice, self.normalizer),
+            "structure": score_structure(smc_state, elliott_component, price),
+            "derivatives": score_derivatives(self.open_interest, self.liquidations,
+                                             self.ticker, self.normalizer),
+            "btc_lead": score_btc_lead(lead, btc_flow, btc_book,
+                                       is_btc=self.symbol == BTC_SYMBOL),
         }
 
-    def _liquidity_component(self) -> Optional[float]:
-        """Pulling and replenishment, netted into one signed number.
+    def cached_snapshot(self) -> Optional[Dict[str, Any]]:
+        """The last computed frame, or None. Never recomputes - callers
+        that need one computed call `snapshot()`."""
+        return self._snapshot
 
-        Bids being refilled while offers are pulled is upward pressure;
-        the reverse is downward. Expressed as a share so that a fast
-        instrument and a slow one land on the same scale."""
-        if not self.book.synced:
-            return None
-        metrics = self.book.metrics()
-        bid_side = metrics.bid_replenishment - metrics.bid_pulling
-        ask_side = metrics.ask_replenishment - metrics.ask_pulling
-        total = abs(bid_side) + abs(ask_side)
-        if total <= 0:
-            return 0.0
-        return max(-1.0, min(1.0, (bid_side - ask_side) / total))
-
-    def snapshot(self, force: bool = False, now: Optional[float] = None) -> Dict[str, Any]:
+    def snapshot(self, force: bool = False, now: Optional[float] = None,
+                 btc_state: Optional["SymbolState"] = None) -> Dict[str, Any]:
         now = time.time() if now is None else now
+        # Checked before taking the lock as well as after: a cache hit is
+        # the common case and should not queue behind a recompute.
         if not force and self._snapshot is not None and \
                 (now - self._snapshot_at) < self.config.recompute_interval_seconds:
             return self._snapshot
+        with self._snapshot_lock:
+            if not force and self._snapshot is not None and \
+                    (now - self._snapshot_at) < self.config.recompute_interval_seconds:
+                return self._snapshot
+            return self._compute_snapshot(force, now, btc_state)
 
+    def _compute_snapshot(self, force: bool, now: float,
+                          btc_state: Optional["SymbolState"]) -> Dict[str, Any]:
+        now_ms = int(now * 1000)
         book_metrics = self.book.metrics()
-        components = self.components()
-        flow_component = components.pop("_flow", None) or 0.0
-        pressure = pressure_score(components, self.config.weights)
+        layers = self.layer_scores(btc_state)
+        pressure = pressure_score(layers, self.config.layer_weights)
+        flow_component = layers["flow"].score
 
         structure = self._structure_engine()
         smc_state = structure.state().as_dict() if structure else {}
@@ -259,7 +286,7 @@ class SymbolState:
             price=price,
             book=book_metrics,
             microprice_offset_bps=self.microprice.offset_bps(),
-            cvd_component=components.get("cvd") or 0.0,
+            cvd_component=layers["flow"].detail.get("cvd_slope", 0.0),
             flow_component=flow_component,
             velocity_zscore=self.flow.velocity_zscore(),
             velocity_acceleration=self.flow.acceleration(),
@@ -269,12 +296,29 @@ class SymbolState:
         long_break = self.prebreak.evaluate(LONG, prebreak_inputs)
         short_break = self.prebreak.evaluate(SHORT, prebreak_inputs)
 
-        now_ms = int(now * 1000)
+        # Open a calibration observation for anything worth tracking, and
+        # ask whether this score has earned the word "probability" yet.
+        # Opening happens BEFORE the outcome exists - that is the whole
+        # design; see calibration.py.
+        for result in (long_break, short_break):
+            if result.level:
+                self.calibrator.observe(result.direction, result.probability,
+                                        result.level, price, now_ms)
+        long_label = label_for(long_break.probability,
+                               self.calibrator.probability(long_break.probability,
+                                                           15_000, LONG))
+        short_label = label_for(short_break.probability,
+                                self.calibrator.probability(short_break.probability,
+                                                            15_000, SHORT))
+
         verdict = assess(self.health, self.thresholds, now_ms=now_ms, started=True)
         signal = self.signals.update(SignalInputs(
             long_pressure=pressure.long_pressure,
             short_pressure=pressure.short_pressure,
-            conflict=pressure.conflict,
+            conflict=min(pressure.long_pressure, pressure.short_pressure),
+            conflict_level=(pressure.conflict.level if pressure.conflict
+                            else "CONFLICT_LOW"),
+            confidence=pressure.confidence,
             prebreak_long=long_break.probability,
             prebreak_short=short_break.probability,
             long_level=long_break.level,
@@ -290,6 +334,7 @@ class SymbolState:
             "price": price,
             "ticker": dict(self.ticker),
             "orderbook": book_metrics.as_dict(),
+            "walls": self.book.wall_summary(now_ms) if self.book.synced else {},
             "microprice": self.microprice.as_dict(),
             "trade_flow": self.flow.as_dict(),
             "cvd": self.cvd.as_dict(),
@@ -298,8 +343,13 @@ class SymbolState:
             "btc_lead": lead,
             "smc": smc_state,
             "elliott": self.elliott.as_dict(),
-            "pressure": {**pressure.as_dict(), "explanation": describe(pressure)},
-            "prebreak": {"long": long_break.as_dict(), "short": short_break.as_dict()},
+            "pressure": pressure.as_dict(),
+            "layers": {name: layer.as_dict() for name, layer in layers.items()},
+            "prebreak": {
+                "long": {**long_break.as_dict(), "calibration": long_label},
+                "short": {**short_break.as_dict(), "calibration": short_label},
+            },
+            "calibration": self.calibrator.summary(),
             "signal": signal.as_dict(),
             "health": {**self.health.as_dict(now_ms), **verdict.as_dict()},
         }

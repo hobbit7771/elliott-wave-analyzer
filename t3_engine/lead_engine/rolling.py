@@ -16,6 +16,7 @@ would produce different features from the same recorded events.
 from __future__ import annotations
 
 import math
+import threading
 from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Deque, Iterable, List, Optional, Tuple
@@ -31,13 +32,24 @@ WINDOW_LABELS = {
 
 @dataclass
 class TimeSeries:
-    """Timestamped items, newest last, trimmed to `horizon_ms`."""
+    """Timestamped items, newest last, trimmed to `horizon_ms`.
+
+    Every method is guarded by a lock, because this is genuinely
+    cross-thread: the socket thread appends while a request thread walks
+    the same deque to answer `/state`. Without it CPython raises
+    `RuntimeError: deque mutated during iteration` and the endpoint
+    500s - intermittently, under load, which is the worst way to find
+    out. The critical sections are a single append or one pass over at
+    most `max_items`, and readers run a few times a second against an
+    ingest that runs thousands, so the contention is one-sided and
+    small."""
 
     horizon_ms: int = 300_000
     max_items: int = 20_000
 
     def __post_init__(self) -> None:
         self._items: Deque[Tuple[int, object]] = deque()
+        self._lock = threading.Lock()
 
     def add(self, timestamp_ms: int, item: object) -> None:
         # Out-of-order arrivals happen: Bybit interleaves topics and a
@@ -45,10 +57,11 @@ class TimeSeries:
         # stored. Appending anyway keeps the series complete, and every
         # reader below tolerates a series that is not perfectly sorted
         # because it filters on the timestamp rather than on position.
-        self._items.append((int(timestamp_ms), item))
-        self._trim()
+        with self._lock:
+            self._items.append((int(timestamp_ms), item))
+            self._trim_locked()
 
-    def _trim(self) -> None:
+    def _trim_locked(self) -> None:
         if not self._items:
             return
         newest = self._items[-1][0]
@@ -58,31 +71,43 @@ class TimeSeries:
         while len(self._items) > self.max_items:
             self._items.popleft()
 
+    def _trim(self) -> None:
+        with self._lock:
+            self._trim_locked()
+
     def window(self, window_ms: int, now_ms: Optional[int] = None) -> List[object]:
         """Items stamped within `window_ms` of `now_ms` (default: newest)."""
-        if not self._items:
-            return []
-        reference = self._items[-1][0] if now_ms is None else int(now_ms)
-        cutoff = reference - int(window_ms)
-        return [item for stamp, item in self._items if cutoff <= stamp <= reference]
+        with self._lock:
+            if not self._items:
+                return []
+            reference = self._items[-1][0] if now_ms is None else int(now_ms)
+            cutoff = reference - int(window_ms)
+            return [item for stamp, item in self._items
+                    if cutoff <= stamp <= reference]
 
     def newest(self) -> Optional[object]:
-        return self._items[-1][1] if self._items else None
+        with self._lock:
+            return self._items[-1][1] if self._items else None
 
     def newest_timestamp(self) -> Optional[int]:
-        return self._items[-1][0] if self._items else None
+        with self._lock:
+            return self._items[-1][0] if self._items else None
 
     def oldest_timestamp(self) -> Optional[int]:
-        return self._items[0][0] if self._items else None
+        with self._lock:
+            return self._items[0][0] if self._items else None
 
     def all(self) -> List[object]:
-        return [item for _, item in self._items]
+        with self._lock:
+            return [item for _, item in self._items]
 
     def stamped(self) -> List[Tuple[int, object]]:
-        return list(self._items)
+        with self._lock:
+            return list(self._items)
 
     def __len__(self) -> int:
-        return len(self._items)
+        with self._lock:
+            return len(self._items)
 
 
 def summed(items: Iterable[object], key: Callable[[object], float]) -> float:
