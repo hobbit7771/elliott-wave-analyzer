@@ -608,9 +608,19 @@ def test_the_freshness_thresholds_are_the_two_decisions_they_claim_to_be():
     muted = assess(_health(now_ms, 3_000, 400), thresholds, now_ms)
     assert muted.signals_enabled is False
 
-    no_trades = assess(_health(now_ms, 200, 2_000), thresholds, now_ms)
-    assert no_trades.signals_enabled is False
-    assert any("no trade" in reason for reason in no_trades.reasons)
+    # A trade gap with a FRESH book is a quiet market, not a broken feed.
+    # Asserting the opposite here is what the live run disproved: one to
+    # six of seven symbols sat in DATA_FAILURE with a hundred-millisecond
+    # book, zero gaps and no reconnects. See
+    # test_a_quiet_tape_with_a_live_book_is_not_a_data_failure.
+    quiet = assess(_health(now_ms, 200, 2_000), thresholds, now_ms)
+    assert quiet.status == OK and quiet.signals_enabled is True
+    assert any("quiet tape" in note for note in quiet.reasons)
+
+    # The same gap with a STALE book is a fault, and still muted.
+    stale_both = assess(_health(now_ms, 3_000, 2_000), thresholds, now_ms)
+    assert stale_both.signals_enabled is False
+    assert any("no trade" in reason for reason in stale_both.reasons)
 
 
 def test_a_desynced_book_says_why_rather_than_only_that():

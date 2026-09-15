@@ -235,6 +235,8 @@ def assess(health: StreamHealth, thresholds: Thresholds,
     # No socket, or a book that cannot be trusted, is not a matter of
     # degree: there is nothing to have an opinion about.
     mute = structural
+    # Observations that are worth reporting but are not faults.
+    quiet: List[str] = []
 
     book_age = health.book_age_ms_now(now_ms)
     if book_age is None:
@@ -250,11 +252,41 @@ def assess(health: StreamHealth, thresholds: Thresholds,
                            f"(> {thresholds.book_age_degraded_ms / 1000.0:.1f}s)")
             degraded = True
 
+    # A QUIET TAPE IS NOT A BROKEN FEED.
+    #
+    # The first version muted on trade age alone, and the thirty-minute
+    # live run showed what that costs: between one and six of seven
+    # symbols sat in DATA_FAILURE continuously while the socket was
+    # connected, had never reconnected, and had zero sequence gaps. The
+    # book was a hundred milliseconds old. Nothing was wrong - ATOMUSDT
+    # and FILUSDT simply go more than a second and a half without a
+    # print, which is ordinary behaviour for them and not a fault to
+    # report.
+    #
+    # So a trade gap only counts against the feed when the BOOK is stale
+    # too. If book updates keep arriving, the connection is demonstrably
+    # alive and the instrument is merely quiet; the flow layer then has
+    # fewer inputs to answer with and its own confidence falls, which is
+    # the honest way for a silent tape to reach the signal machine - see
+    # layers._combine and MIN_DIRECTIONAL_CONFIDENCE.
     trade_age = health.trade_age_ms_now(now_ms)
+    book_is_fresh = book_age is not None and \
+        book_age <= thresholds.book_age_degraded_ms
     if trade_age is not None and trade_age > thresholds.trade_age_signals_off_ms:
-        reasons.append(f"no trade for {trade_age / 1000.0:.1f}s "
-                       f"(> {thresholds.trade_age_signals_off_ms / 1000.0:.1f}s)")
-        mute = True
+        if trade_age > thresholds.trade_age_dead_ms:
+            # Quiet is one thing; silent for five minutes while the book
+            # keeps ticking is a dead subscription.
+            reasons.append(f"no trade for {trade_age / 60_000.0:.0f}m while the "
+                           f"book is live - the trade feed looks dead")
+            mute = True
+        elif book_is_fresh:
+            quiet.append(f"no trade for {trade_age / 1000.0:.1f}s - quiet tape, "
+                         f"book is {book_age:.0f}ms old")
+        else:
+            reasons.append(f"no trade for {trade_age / 1000.0:.1f}s "
+                           f"(> {thresholds.trade_age_signals_off_ms / 1000.0:.1f}s) "
+                           f"and the book is stale too")
+            mute = True
 
     ticker_age = health.age_seconds(health.last_ticker_ms, now_ms)
     if ticker_age is not None and ticker_age > thresholds.max_ticker_age_seconds:
@@ -275,7 +307,7 @@ def assess(health: StreamHealth, thresholds: Thresholds,
             status = DEGRADED
         return HealthVerdict(status, not mute and not degraded, reasons)
 
-    notes: List[str] = []
+    notes: List[str] = list(quiet)
     oi_age = health.age_seconds(health.last_oi_ms, now_ms)
     if oi_age is not None and oi_age > thresholds.max_oi_age_seconds:
         # Stale open interest costs the engine one component out of nine,

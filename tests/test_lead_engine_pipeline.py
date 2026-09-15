@@ -17,6 +17,7 @@ Two causes, both fixed here and both tested:
 """
 
 import json
+import math
 import time
 
 import pytest
@@ -486,3 +487,114 @@ def test_no_state_that_names_a_side_escapes_the_gate():
                 assert result.state not in directional, (
                     f"{result.state} named a side on confidence 0.05 "
                     f"({liquidation}, p={probability}, pressure={pressure})")
+
+
+# ---- a quiet market is not a broken feed --------------------------------
+
+def _fresh_health(now_ms, book_age, trade_age):
+    from t3_engine.lead_engine.health import StreamHealth
+
+    health = StreamHealth("INJUSDT", ws_connected=True, orderbook_synced=True)
+    health.last_book_ms = health.last_book_receive_ms = now_ms - book_age
+    health.last_trade_ms = health.last_trade_receive_ms = now_ms - trade_age
+    health.last_ticker_ms = now_ms - 500
+    return health
+
+
+def test_a_quiet_tape_with_a_live_book_is_not_a_data_failure():
+    """Measured over thirty minutes on the live deployment: between one
+    and six of seven symbols sat in DATA_FAILURE continuously while the
+    socket was connected, had never reconnected, had zero sequence gaps
+    and a book a hundred milliseconds old.
+
+    Nothing was wrong. ATOMUSDT and FILUSDT go more than a second and a
+    half without a print, which is ordinary for them. Muting on trade age
+    alone reported ordinary behaviour as a fault.
+
+    A silent tape still reaches the signal machine honestly - the flow
+    layer has fewer inputs, so its confidence falls, and the confidence
+    floor stops a side being named. That is the right mechanism; a health
+    verdict is the wrong one."""
+    from t3_engine.lead_engine.config import Thresholds
+    from t3_engine.lead_engine.health import OK, assess
+
+    now_ms = int(time.time() * 1000)
+    thresholds = Thresholds()
+
+    for gap in (4_000, 20_000, 45_000):
+        verdict = assess(_fresh_health(now_ms, 100, gap), thresholds, now_ms=now_ms)
+        assert verdict.status == OK, f"a {gap}ms trade gap was called {verdict.status}"
+        assert verdict.signals_enabled is True
+        assert any("quiet tape" in note for note in verdict.reasons)
+
+
+def test_a_trade_gap_counts_against_the_feed_when_the_book_is_stale_too():
+    """Quiet is a property of the market; stale is a property of the
+    feed. Only the second is a fault, and the book is what tells them
+    apart."""
+    from t3_engine.lead_engine.config import Thresholds
+    from t3_engine.lead_engine.health import assess
+
+    now_ms = int(time.time() * 1000)
+    verdict = assess(_fresh_health(now_ms, 3_000, 4_000), Thresholds(), now_ms=now_ms)
+    assert verdict.signals_enabled is False
+    assert any("book is stale too" in reason for reason in verdict.reasons)
+
+
+def test_a_trade_feed_that_died_is_still_caught():
+    """An instrument can be quiet. It cannot be silent for five minutes
+    while its order book keeps ticking - that is a subscription that
+    died, and without a bound the quiet-tape allowance would hide it."""
+    from t3_engine.lead_engine.config import Thresholds
+    from t3_engine.lead_engine.health import assess
+
+    now_ms = int(time.time() * 1000)
+    verdict = assess(_fresh_health(now_ms, 100, 360_000), Thresholds(), now_ms=now_ms)
+    assert verdict.signals_enabled is False
+    assert any("looks dead" in reason for reason in verdict.reasons)
+
+
+# ---- the levels are not rebuilt on every look --------------------------
+
+def test_levels_are_rebuilt_once_per_closed_bar_not_once_per_direction():
+    """`evaluate` is called once per DIRECTION, so `rebuild` ran twice per
+    snapshot, each time walking find_swings and _measure_bounces over the
+    whole series. Raising retention to 1,500 bars for item 8 made every
+    pass about four times more expensive, and it showed in production:
+    median book age drifted 85ms -> 189ms over sixteen minutes as the
+    buffers filled, p95 reached 3.6s. Profiled at 63% of a snapshot."""
+    from t3_engine.lead_engine.prebreak_engine import LevelTracker
+    from t3_engine.lead_engine.smc_engine import Candle
+
+    tracker = LevelTracker()
+    bars = []
+    for index in range(200):
+        price = 5.70 + 0.4 * math.sin(index / 9.0)
+        bars.append(Candle(start_ms=index * 15_000, open=price, high=price * 1.001,
+                           low=price * 0.999, close=price, volume=10.0, closed=True))
+
+    calls = {"count": 0}
+    import t3_engine.lead_engine.prebreak_engine as module
+    real = module.find_swings
+
+    def counting(candles, *args, **kwargs):
+        calls["count"] += 1
+        return real(candles, *args, **kwargs)
+
+    module.find_swings = counting
+    try:
+        tracker.rebuild(bars)
+        first = calls["count"]
+        assert first == 1
+        for _ in range(10):
+            tracker.rebuild(bars)            # same closed series
+        assert calls["count"] == first, "rebuilt without a new closed bar"
+
+        levels_before = list(tracker.levels)
+        bars.append(Candle(start_ms=200 * 15_000, open=6.4, high=6.5, low=6.3,
+                           close=6.45, volume=10.0, closed=True))
+        tracker.rebuild(bars)
+        assert calls["count"] == first + 1, "a closed bar must rebuild"
+        assert tracker.levels is not levels_before
+    finally:
+        module.find_swings = real

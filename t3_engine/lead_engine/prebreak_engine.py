@@ -102,13 +102,37 @@ class LevelTracker:
         self.candles_seen = 0
         self.closed_seen = 0
         self.swings_found = 0
+        # The closed-bar series the current levels were built from.
+        self._built_key: Optional[Tuple[int, int]] = None
 
     def rebuild(self, candles: List[Candle]) -> None:
+        """Recompute the levels from the swing structure.
+
+        SKIPPED when the closed-bar series has not moved, and that is a
+        real cost rather than a micro-optimisation. `evaluate` is called
+        once per DIRECTION, so this ran twice per snapshot, and each run
+        walks `find_swings` and `_measure_bounces` over the whole series.
+        Raising retention to 1,500 bars for item 8 made each pass ~4x
+        more expensive, and the effect was visible in production: median
+        book age drifted 85ms -> 189ms over sixteen minutes as the buffers
+        filled, with p95 reaching 3.6s. Profiled at 63% of the cost of a
+        snapshot.
+
+        Levels are defined over CLOSED bars, so the answer cannot change
+        until one closes - which makes the skip exact rather than an
+        approximation."""
+        closed_bars = [c for c in candles if c.closed]
+        key = (closed_bars[-1].start_ms if closed_bars else 0, len(closed_bars))
+        if key == self._built_key:
+            return
+        self._built_key = key
+
         self.candles_seen = len(candles)
-        self.closed_seen = sum(1 for c in candles if c.closed)
-        swings = find_swings(candles)
+        self.closed_seen = len(closed_bars)
+        swings = find_swings(closed_bars)
         self.swings_found = len(swings)
         if not swings:
+            self.levels = []
             return
         tolerance = self.thresholds.compression_pct
         fresh: List[Level] = []
@@ -128,9 +152,9 @@ class LevelTracker:
                 existing.last_test_ms = swing.timestamp_ms
                 existing.price = (existing.price + swing.price) / 2.0
         self.levels = fresh
-        self._measure_bounces(candles)
+        self._measure_bounces(closed_bars)
 
-    def _measure_bounces(self, candles: List[Candle]) -> None:
+    def _measure_bounces(self, closed: List[Candle]) -> None:
         """How far price travelled away from each level between touches.
 
         Shrinking bounces mean the level is being defended with less and
@@ -145,7 +169,6 @@ class LevelTracker:
         feature silently reported 0.0 for a level being tested three
         times. Found in replay: `fading_bounces` was the only feature that
         never moved."""
-        closed = [c for c in candles if c.closed]
         tolerance = self.thresholds.compression_pct
         for level in self.levels:
             level.bounces = []
