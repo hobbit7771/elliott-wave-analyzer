@@ -162,6 +162,7 @@
   <button data-tab="mtf">Multi-TF</button>
   <button data-tab="claude">Claude</button>
   <button data-tab="lead">Lead Engine</button>
+  <button data-tab="pnl">Доходность</button>
 </div>
 <div id="layout">
   <div id="chart"></div>
@@ -427,6 +428,12 @@
         <h2>Structures</h2>
         <div id="claudeStructures"></div>
       </div>
+    </div>
+    <div id="tab-pnl" style="display:none;">
+      <!-- WHERE THE ALGORITHM ACTUALLY TRADES. Rendered entirely by
+           static/pnl.js from /api/live/performance. Two separate books,
+           never added together - see the endpoint's docstring. -->
+      <div id="pnlBody"></div>
     </div>
     <div id="tab-lead" style="display:none;">
       <!-- MARKET LEAD ENGINE. Everything below this comment is rendered by
@@ -1243,7 +1250,8 @@ document.getElementById('liveStop').addEventListener('click', async () => {
 // stay clean (no engine overlay ever reaches it), and swapping elements
 // means switching tabs can't disturb the zoom/pan state of either chart.
 const TAB_PANELS = { analysis: 'tab-analysis', ai: 'tab-ai', analyst: 'tab-analyst',
-                     mtf: 'tab-mtf', claude: 'tab-claude', lead: 'tab-lead' };
+                     mtf: 'tab-mtf', claude: 'tab-claude', lead: 'tab-lead',
+                     pnl: 'tab-pnl' };
 document.querySelectorAll('#tabs button').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('#tabs button').forEach(b => b.classList.remove('active'));
@@ -1254,7 +1262,10 @@ document.querySelectorAll('#tabs button').forEach(btn => {
       document.getElementById(id).style.display = tab === active ? '' : 'none';
     });
     const onAnalyst = active === 'analyst' || active === 'mtf' || active === 'claude';
-    const onLead = active === 'lead';
+    const onLead = active === 'lead' || active === 'pnl';
+    // The P&L tab polls only while it is the visible one. A tab nobody is
+    // looking at should not be making a request a second forever.
+    if (window.PnlTab) { if (active === 'pnl') PnlTab.show(); else PnlTab.hide(); }
     // 'block', not '': #analystChart is display:none in the stylesheet, and
     // clearing the inline style just falls back to that rule - which left
     // the tab showing an empty gap where the chart should be.
@@ -2805,5 +2816,6 @@ resumeJobs();
   <script src="/static/lead_panel.js"></script>
   <script src="/static/lead_blocks.js"></script>
   <script src="/static/lead_engine.js"></script>
+  <script src="/static/pnl.js"></script>
 </body>
 </html>

@@ -307,7 +307,23 @@ class Recorder:
         # asks for. Thirty minutes at one sweep per symbol per fifteen
         # seconds is a few hundred numbers - small enough to keep, large
         # enough to mean something.
-        self._book_ages: Deque[float] = deque(maxlen=2_000)
+        #
+        # STAMPED, so the same samples answer two different questions. The
+        # criterion is "median under 250ms AND NOT DRIFTING", and a
+        # statistic computed since process start cannot answer the second
+        # half of it: it lags by construction and it never forgets a bad
+        # minute. One 1.2-second upstream stall on the link to Bybit -
+        # twenty seconds, self-recovered, nothing dropped - pushed the
+        # cumulative p95 from 702ms to 832ms and left it there for the
+        # rest of the run, which reads as a degrading engine and was
+        # nothing of the sort. So the heartbeat reports BOTH: the whole
+        # run, and the last few minutes.
+        self._book_ages: Deque[Tuple[float, float]] = deque(maxlen=4_000)
+
+    # How far back "recent" looks. Long enough that a quiet instrument
+    # still contributes samples, short enough that a spike ages out of it
+    # instead of being carried to the end of the run.
+    RECENT_WINDOW_SECONDS = 300.0
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -361,7 +377,15 @@ class Recorder:
         health = frame.get("health") or {}
         age = health.get("book_age_ms")
         if isinstance(age, (int, float)):
-            self._book_ages.append(float(age))
+            self._book_ages.append((time.time(), float(age)))
+
+    def _ages(self, window_seconds: Optional[float] = None) -> List[float]:
+        """Book-age samples: all of them, or only the recent ones."""
+        samples = list(self._book_ages)
+        if window_seconds is None:
+            return [age for _, age in samples]
+        cutoff = time.time() - window_seconds
+        return [age for stamp, age in samples if stamp >= cutoff]
 
     def _heartbeat(self) -> None:
         """One line a sweep with the socket's own counters.
@@ -385,7 +409,8 @@ class Recorder:
                 rate = (messages - previous_messages) / elapsed
         self._last_heartbeat = (now, messages)
         snapshot = stats.as_dict()
-        ages = list(self._book_ages)
+        ages = self._ages()
+        recent = self._ages(self.RECENT_WINDOW_SECONDS)
         gaps = resyncs = 0
         # Not a count. A bare `data_failure=1` across seven symbols says
         # something is wrong and nothing about what, which is how one
@@ -407,6 +432,7 @@ class Recorder:
             "lead_engine feed: connected=%s messages=%d rate=%s/s "
             "net_latency=%.1fms queue_wait=%.1fms queue=%d/%d dropped=%d "
             "book_age_median=%.0fms book_age_p95=%.0fms samples=%d "
+            "recent_median=%.0fms recent_p95=%.0fms recent_samples=%d "
             "gaps=%d resyncs=%d data_failure=%d%s connects=%d reconnects=%d "
             "topics=%d symbols=%d",
             bool(snapshot.get("connected")), messages,
@@ -417,6 +443,7 @@ class Recorder:
             int(snapshot.get("queue_limit") or 0),
             int(snapshot.get("dropped") or 0),
             self._percentile(ages, 0.5), self._percentile(ages, 0.95), len(ages),
+            self._percentile(recent, 0.5), self._percentile(recent, 0.95), len(recent),
             gaps, resyncs, failures,
             (" [" + "; ".join(failing) + "]") if failing else "",
             int(snapshot.get("connects") or 0),

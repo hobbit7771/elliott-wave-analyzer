@@ -257,6 +257,15 @@ module, and writes nothing but its own journal. Like everything in this
 namespace it is read-only: it reports what the engine's paper positions
 did and cannot open, close or size anything on an exchange.
 
+### Where the algorithm trades
+
+`GET /api/live/performance` (the dashboard namespace, not `/api/v1`)
+returns both paper books side by side and never summed: `paper` (the
+Elliott strategy on closed candles) and `lead` (the microstructure
+ledger). Open positions are marked to the freshest price the session has
+seen, never to their entry; equity is reported per timeframe rather than
+added into a portfolio figure that was never allocated.
+
 ### Chart data
 
 | Path | Query | Returns |

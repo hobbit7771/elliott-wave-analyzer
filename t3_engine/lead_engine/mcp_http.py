@@ -105,13 +105,16 @@ def mcp_hello(request: Request):
     blocked = _guard(request)
     if blocked:
         return blocked
-    from lead_engine_mcp.server import PROTOCOL_VERSION, SERVER_INFO
+    from lead_engine_mcp.server import (
+        PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS, SERVER_INFO,
+    )
     from lead_engine_mcp.tools import tool_list
 
     return {
         "transport": "http",
         "protocol": "jsonrpc-2.0",
         "mcp_protocol_version": PROTOCOL_VERSION,
+        "mcp_protocol_versions": list(SUPPORTED_PROTOCOL_VERSIONS),
         "server": SERVER_INFO,
         "read_only": True,
         "methods": ["initialize", "tools/list", "tools/call", "ping"],

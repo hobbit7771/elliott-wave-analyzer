@@ -47,6 +47,7 @@ t3_engine/
 lead_engine_mcp/               ← the MCP adapter. Imports NO t3_engine at all.
 ├── client.py                  HTTP to /api/v1/lead-engine
 ├── tools.py                   17 read-only tools
+├── widgets.py                 Apps SDK components (ChatGPT)
 └── server.py                  JSON-RPC over stdio
 ```
 
