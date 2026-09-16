@@ -42,11 +42,17 @@ lead_engine_features
 lead_engine_signals
 lead_engine_liquidations
 lead_engine_backtests
+lead_engine_virtual_trades
 ```
 
-No existing table is altered. RLS is enabled on all five, matching the
+No existing table is altered. RLS is enabled on all six, matching the
 rest of the project: the service key bypasses it, the publishable key
 reaches nothing.
+
+`lead_engine_virtual_trades` carries a UNIQUE constraint on `trade_id`,
+and the writer relies on it: a resend upserts instead of colliding. Create
+the table from `SCHEMA_SQL` rather than by hand, or a retried batch will
+fail permanently.
 
 **Without them the engine still runs.** Storage degrades to a bounded
 in-memory buffer and `/status` reports `storage.configured: false`.

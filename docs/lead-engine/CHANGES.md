@@ -411,3 +411,76 @@ refuse over a difference that does not exist, since every method here
 behaves identically on all three revisions. The server now echoes the
 client's version when it is one of `2025-06-18`, `2025-03-26` or
 `2024-11-05`, and otherwise answers with its newest.
+
+---
+
+# Round 7 — the ledger survives the restart
+
+The free Render plan stops a web service about fifteen minutes after the
+last inbound HTTP request. The Bybit socket is outbound and does not
+count, so the engine was being stopped several times an hour — once for
+two hours and nineteen minutes straight — and an in-memory P&L reported
+zero every time it came back. A ledger that resets four times an hour is
+indistinguishable from a strategy that never traded, which is exactly the
+complaint Round 6 set out to answer.
+
+## Added
+
+**`lead_engine_virtual_trades`** — one row per terminal paper trade,
+keyed on `trade_id` (symbol, signal time, sequence), which the ledger
+already assigns.
+
+**`VirtualTrade.to_row()` / `.from_row()`**, and on the ledger
+`drain_persist()` / `restore()`.
+
+## Queued, not written — and that is the whole design
+
+`_retire` is reached from the INGEST thread. An HTTP call there would
+stall the socket reader, which is precisely the failure the two-thread
+ingest exists to prevent. So the ledger performs no I/O at all: it queues
+terminal trades and the recorder — on its own thread, where a slow write
+costs a sweep rather than a dropped frame — drains them onto the existing
+batched write buffer. A test asserts the module imports no database, no
+HTTP client, and calls nothing that writes.
+
+The seam is the recorder for reading too: the engine still holds no
+database handle, which is what kept that boundary checkable in Round 1.
+
+## Four rules that keep a restart honest
+
+**An OPEN position from a dead process is not open.** Nobody was marking
+it against the book while the process was down; its stop was never
+checked and its deadline never tested. Restoring it would eventually book
+an exit at a price nobody observed — RULE 3 again, applied to a gap the
+size of a restart. Only CLOSED and ABANDONED come back.
+
+**Restoring twice does not double the P&L.** The id is the identity, and
+a row already in the journal is skipped.
+
+**A restored trade is never written back.** It came *from* storage;
+re-queueing it would grow the table by its own contents on every restart.
+
+**A resend upserts.** The natural key rejects duplicates with 409, and the
+write buffer puts failed rows back and retries — so without
+`on_conflict=trade_id` a single already-written row would block every row
+behind it, permanently. `supabase_rest.insert` gained the option for
+exactly this; tables without a natural key keep plain-insert semantics.
+
+Reads are attempted once per symbol, whatever the result: retrying a
+failed read every sweep would turn one Supabase outage into a request a
+second per symbol, forever. A ledger that cannot read its history starts
+empty — losing the history makes a worse report, failing to start makes a
+worse engine.
+
+## Reported, not implied
+
+`summary()` carries `restored_from_storage`, and both panels show it.
+"42 trades" means something different when 40 of them predate the current
+process, and the reader should not have to guess which.
+
+The paper (Elliott) engine's positions are still memory-only; the panel
+says so rather than letting its zero read like the ledger's total.
+
+Verified against the live table: both row shapes accepted, nulls
+included, the conflict clause merges rather than duplicating, and
+`restore()` reads the exact shape PostgREST returns.

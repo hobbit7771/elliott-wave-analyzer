@@ -55,6 +55,19 @@ made on the ARRIVAL clock, which is the same clock the signal is stamped
 with. The exchange stamp is kept alongside it and reported, because that
 is when the price was true.
 
+PERSISTENCE, AND WHY IT IS A HAND-OFF RATHER THAN A WRITE. A ledger that
+lives only in memory answers nothing on a host that restarts: the free
+Render plan stops the process after fifteen minutes without an inbound
+request, which reset this P&L to zero roughly four times an hour. So a
+trade that reaches a terminal state is queued on `pending_persist`, and
+the recorder thread drains it.
+
+Queued, NOT written. `_retire` is reached from the ingest thread, and an
+HTTP call there would stall the socket reader - which is the exact
+failure the two-thread ingest exists to prevent. This module therefore
+performs no I/O at all, holds no database handle, and does not import
+storage; it offers rows and something else takes them.
+
 Nothing here can place a real order. It holds no credential, imports no
 execution module, and writes only its own journal.
 """
@@ -171,6 +184,89 @@ class VirtualTrade:
     def fees(self) -> float:
         return self.fee_entry + self.fee_exit
 
+    def to_row(self) -> Dict[str, Any]:
+        """The storage shape. `trade_id` is the natural key - the same
+        trade offered twice must not become two rows, and the id already
+        carries symbol, signal time and sequence."""
+        return {
+            "trade_id": self.id,
+            "symbol": self.symbol,
+            "direction": self.direction,
+            "status": self.status,
+            "signal_state": self.signal_state,
+            "signal_at_ms": self.signal_at_ms,
+            "signal_price": self.signal_price,
+            "break_score": self.break_score,
+            "confidence": self.confidence,
+            "entry_at_ms": self.entry_at_ms,
+            "entry_book_ms": self.entry_book_ms,
+            "entry_price": self.entry_price,
+            "entry_reference": self.entry_reference,
+            "entry_slippage": self.entry_slippage,
+            "quantity": self.quantity,
+            "stop": self.stop,
+            "target": self.target,
+            "exit_at_ms": self.exit_at_ms,
+            "exit_book_ms": self.exit_book_ms,
+            "exit_price": self.exit_price,
+            "exit_reference": self.exit_reference,
+            "exit_reason": self.exit_reason,
+            "exit_slippage": self.exit_slippage,
+            "fee_entry": self.fee_entry,
+            "fee_exit": self.fee_exit,
+            "gross_pnl": self.gross_pnl,
+            "net_pnl": self.net_pnl,
+            "gap_uncertain": self.gap_uncertain,
+            "note": self.note,
+        }
+
+    @classmethod
+    def from_row(cls, row: Dict[str, Any]) -> "VirtualTrade":
+        """Back out of storage. Unknown columns are ignored rather than
+        raising: a row written by a newer build must not stop an older
+        one from reading its own history."""
+        def number(key: str) -> Optional[float]:
+            value = row.get(key)
+            try:
+                return None if value is None else float(value)
+            except (TypeError, ValueError):
+                return None
+
+        def whole(key: str) -> Optional[int]:
+            value = number(key)
+            return None if value is None else int(value)
+
+        return cls(
+            id=str(row.get("trade_id") or ""),
+            symbol=str(row.get("symbol") or ""),
+            direction=str(row.get("direction") or ""),
+            status=str(row.get("status") or CLOSED),
+            signal_state=str(row.get("signal_state") or ""),
+            signal_at_ms=whole("signal_at_ms") or 0,
+            signal_price=number("signal_price"),
+            break_score=number("break_score") or 0.0,
+            confidence=number("confidence") or 0.0,
+            entry_at_ms=whole("entry_at_ms"),
+            entry_book_ms=whole("entry_book_ms"),
+            entry_price=number("entry_price"),
+            entry_reference=number("entry_reference"),
+            entry_slippage=number("entry_slippage") or 0.0,
+            quantity=number("quantity") or 0.0,
+            stop=number("stop"), target=number("target"),
+            exit_at_ms=whole("exit_at_ms"),
+            exit_book_ms=whole("exit_book_ms"),
+            exit_price=number("exit_price"),
+            exit_reference=number("exit_reference"),
+            exit_reason=str(row.get("exit_reason") or ""),
+            exit_slippage=number("exit_slippage") or 0.0,
+            fee_entry=number("fee_entry") or 0.0,
+            fee_exit=number("fee_exit") or 0.0,
+            gross_pnl=number("gross_pnl") or 0.0,
+            net_pnl=number("net_pnl") or 0.0,
+            gap_uncertain=bool(row.get("gap_uncertain")),
+            note=str(row.get("note") or ""),
+        )
+
     def as_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id, "symbol": self.symbol, "direction": self.direction,
@@ -223,6 +319,14 @@ class VirtualLedger:
         self.pending: List[VirtualTrade] = []
         self.open: List[VirtualTrade] = []
         self.closed: List[VirtualTrade] = []
+        # Terminal trades waiting to be filed. Handed off, never written
+        # here - see the module docstring: `_retire` runs on the ingest
+        # thread, and an HTTP call there stalls the socket reader.
+        self.pending_persist: List[VirtualTrade] = []
+        # How many of `closed` came back from storage rather than from
+        # this process. Reported, because "42 trades" means something
+        # different when 40 of them predate the current run.
+        self.restored = 0
         self._last_signal_at = 0
         self._sequence = 0
         # Counters that make the rules auditable rather than claimed.
@@ -425,6 +529,58 @@ class VirtualLedger:
         self.closed.append(trade)
         if len(self.closed) > self.config.journal_limit:
             self.closed = self.closed[-self.config.journal_limit:]
+        self.pending_persist.append(trade)
+
+    # ---- persistence: offered, not performed ----
+
+    def drain_persist(self) -> List[Dict[str, Any]]:
+        """Terminal trades since the last drain, as storage rows.
+
+        Called by whatever owns the database connection, on its own
+        thread. The ledger does not know where these go."""
+        with self._lock:
+            rows = [trade.to_row() for trade in self.pending_persist]
+            self.pending_persist = []
+        return rows
+
+    def restore(self, rows: List[Dict[str, Any]]) -> int:
+        """Seed the journal from storage. Returns how many were taken.
+
+        Only terminal trades are restored, and only into `closed`: an
+        OPEN position from a dead process is not open - nobody has been
+        marking it against the book, its stop was never checked, and
+        resurrecting it would book an exit at a price that was never
+        observed. That is the same rule as RULE 3, applied to a gap the
+        size of a restart.
+
+        Existing ids are skipped, so restoring twice is not a doubled
+        P&L, and nothing restored is queued for writing back."""
+        with self._lock:
+            known = {trade.id for trade in
+                     self.closed + self.open + self.pending}
+            taken = 0
+            for row in rows:
+                try:
+                    trade = VirtualTrade.from_row(row)
+                except Exception:               # noqa: BLE001 - one bad row
+                    continue                    # must not lose the rest
+                if not trade.id or trade.id in known:
+                    continue
+                if trade.status not in (CLOSED, ABANDONED):
+                    continue
+                known.add(trade.id)
+                self.closed.append(trade)
+                taken += 1
+            # Oldest first, then trimmed to the journal's own bound, so a
+            # long history restores its most recent tail.
+            self.closed.sort(key=lambda t: t.signal_at_ms)
+            if len(self.closed) > self.config.journal_limit:
+                self.closed = self.closed[-self.config.journal_limit:]
+            self.restored += taken
+            # A restored trade must not be written back: it came FROM
+            # storage, and re-queueing it would grow the table by its own
+            # contents on every restart.
+            return taken
 
     # ---- reporting ----
 
@@ -478,6 +634,9 @@ class VirtualLedger:
             "open_pnl": round(self.open_pnl(bid, ask), 6),
             "exits_by_reason": by_reason,
             "gap_uncertain_exits": self.gap_uncertain_exits,
+            # How much of the sample predates this process. Without it,
+            # "42 trades" reads as 42 trades this run.
+            "restored_from_storage": self.restored,
             "abandoned_on_gap": self.abandoned_gap,
             "skipped_stale_book": self.skipped_stale_book,
             "skipped_already_open": self.skipped_already_open,

@@ -109,11 +109,24 @@ def select(table: str, filters: Optional[Dict[str, Any]] = None,
 
 
 def insert(table: str, rows: List[Dict[str, Any]],
-           client: Optional[httpx.Client] = None) -> List[Dict[str, Any]]:
+           client: Optional[httpx.Client] = None,
+           on_conflict: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Insert rows, or UPSERT them when `on_conflict` names a unique column.
+
+    Why the option exists: a table with a natural key rejects a duplicate
+    with 409, and a buffered writer that puts failed rows back and retries
+    then blocks on that batch forever - one row that was already written
+    poisons every row behind it. Naming the conflict column turns the
+    retry into a no-op instead, which is what makes a resend safe."""
     if not rows:
         return []
-    out = _request("POST", table, json_body=rows,
-                   extra_headers={"Prefer": "return=representation"}, client=client)
+    prefer = "return=representation"
+    params: List[Tuple[str, str]] = []
+    if on_conflict:
+        prefer += ",resolution=merge-duplicates"
+        params.append(("on_conflict", on_conflict))
+    out = _request("POST", table, params=params, json_body=rows,
+                   extra_headers={"Prefer": prefer}, client=client)
     return out if isinstance(out, list) else []
 
 

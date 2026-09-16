@@ -220,7 +220,7 @@
     var names = Object.keys(lead);
     var t = { closed: 0, wins: 0, losses: 0, gross: 0, fees: 0, net: 0,
               open: 0, pending: 0, openPnl: 0, abandoned: 0,
-              uncertain: 0, stale: 0 };
+              uncertain: 0, stale: 0, restored: 0 };
     var merged = [];
     names.forEach(function (name) {
       var s = (lead[name] || {}).summary || {};
@@ -236,6 +236,7 @@
       t.abandoned += s.abandoned_on_gap || 0;
       t.uncertain += s.gap_uncertain_exits || 0;
       t.stale += s.skipped_stale_book || 0;
+      t.restored += s.restored_from_storage || 0;
       ((lead[name] || {}).journal || []).forEach(function (r) {
         merged.push({ row: r, symbol: name });
       });
@@ -261,7 +262,11 @@
             ? num(100 * t.fees / Math.abs(t.gross), 1) + '%' : '—') +
       row('Не исполнено — разрыв потока', num(t.abandoned, 0)) +
       row('Неточные выходы', num(t.uncertain, 0)) +
-      row('Пропущено — устаревший стакан', num(t.stale, 0));
+      row('Пропущено — устаревший стакан', num(t.stale, 0)) +
+      // Without this "42 сделки" reads as 42 сделки за этот запуск, and
+      // on a host that restarts every fifteen minutes that is almost
+      // never what the number means.
+      row('Из них до перезапуска', num(t.restored, 0));
 
     // Per symbol, but only the ones that did something. A row of zeroes
     // for an instrument that never signalled is noise; the COUNT of
@@ -375,6 +380,11 @@
       'не складываются: это разные стратегии на разных горизонтах — ' +
       'Эллиотт на закрытых свечах против микроструктуры на стакане. ' +
       'Общая цифра скрыла бы, какая из двух работает.</div>';
+
+    html += '<div class="le-note">Журнал Lead Engine сохраняется в базу и ' +
+      'переживает перезапуск: строка «из них до перезапуска» говорит, ' +
+      'какая часть выборки старше текущего процесса. Пейпер-движок ' +
+      'состояние пока не сохраняет — его позиции живут только в памяти.</div>';
 
     body.innerHTML = html;
   }

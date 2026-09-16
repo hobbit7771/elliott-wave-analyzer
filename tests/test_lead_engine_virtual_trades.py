@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from t3_engine.lead_engine.virtual_trades import (
-    ABANDONED, CLOSED, LedgerConfig, OPEN, PENDING, VirtualLedger,
+    ABANDONED, CLOSED, LedgerConfig, OPEN, PENDING, VirtualLedger, VirtualTrade,
 )
 
 
@@ -484,3 +484,210 @@ def test_a_signal_fills_on_a_later_book_and_never_on_an_earlier_one():
     frame = engine.get_state("INJUSDT", force=True)
     assert frame["virtual_trades"]["open_positions"] == 1
     assert frame["virtual_trades"]["recent"][0]["status"] == OPEN
+
+
+# ---- persistence -------------------------------------------------------
+
+def test_a_terminal_trade_is_queued_for_storage_and_drained_once():
+    book = ledger(max_hold_ms=1, stop_pct=0.9, target_pct=0.9)
+    book.on_signal(signal(changed_at=1000.0), now_ms=1_000_000)
+    book.on_book(100.0, 100.0, book_at_ms=1_000_001, received_at_ms=1_000_001)
+    assert book.pending_persist == [], "an OPEN trade is not terminal"
+
+    book.on_book(101.0, 101.0, book_at_ms=1_000_100, received_at_ms=1_000_100)
+    assert len(book.pending_persist) == 1
+
+    rows = book.drain_persist()
+    assert len(rows) == 1
+    assert rows[0]["trade_id"] == book.closed[-1].id
+    assert rows[0]["status"] == CLOSED
+    assert rows[0]["net_pnl"] == pytest.approx(book.closed[-1].net_pnl)
+    # Drained means gone: a second sweep must not file the same trade
+    # again, or the table grows by its own contents every fifteen seconds.
+    assert book.drain_persist() == []
+
+
+def test_an_abandoned_intent_is_stored_too():
+    """A trade that did not happen is a fact about the stream, and the
+    counter that reports it has to survive a restart with the rest."""
+    book = ledger(max_fill_gap_ms=3_000)
+    book.on_signal(signal(changed_at=1000.0), now_ms=1_000_000)
+    book.on_book(120.0, 122.0, book_at_ms=1_004_000, received_at_ms=1_004_000)
+    rows = book.drain_persist()
+    assert len(rows) == 1 and rows[0]["status"] == ABANDONED
+
+
+def test_restoring_rebuilds_the_pnl_a_restart_would_have_erased():
+    source = ledger(max_hold_ms=1, stop_pct=0.9, target_pct=0.9)
+    for index in range(3):
+        base = 1_000_000 + index * 10_000
+        source.on_signal(signal(changed_at=base / 1000.0), now_ms=base)
+        source.on_book(100.0, 100.0, book_at_ms=base + 1, received_at_ms=base + 1)
+        source.on_book(101.0, 101.0, book_at_ms=base + 100, received_at_ms=base + 100)
+    rows = source.drain_persist()
+    before = source.summary()
+
+    # A fresh process: same symbol, nothing in memory.
+    after_restart = ledger(max_hold_ms=1, stop_pct=0.9, target_pct=0.9)
+    assert after_restart.summary()["net_pnl"] == 0
+
+    assert after_restart.restore(rows) == 3
+    restored = after_restart.summary()
+    assert restored["closed_trades"] == before["closed_trades"] == 3
+    assert restored["net_pnl"] == pytest.approx(before["net_pnl"])
+    assert restored["fees_paid"] == pytest.approx(before["fees_paid"])
+    assert restored["restored_from_storage"] == 3
+
+
+def test_restoring_twice_does_not_double_the_pnl():
+    """Retries, overlapping restarts and a re-read after a failed sweep
+    all offer the same rows again. The id is the identity."""
+    source = ledger(max_hold_ms=1, stop_pct=0.9, target_pct=0.9)
+    source.on_signal(signal(changed_at=1000.0), now_ms=1_000_000)
+    source.on_book(100.0, 100.0, book_at_ms=1_000_001, received_at_ms=1_000_001)
+    source.on_book(101.0, 101.0, book_at_ms=1_000_100, received_at_ms=1_000_100)
+    rows = source.drain_persist()
+
+    book = ledger()
+    assert book.restore(rows) == 1
+    once = book.summary()["net_pnl"]
+    assert book.restore(rows) == 0
+    assert book.summary()["net_pnl"] == pytest.approx(once)
+    assert book.summary()["closed_trades"] == 1
+
+
+def test_a_restored_trade_is_not_written_back():
+    """It came FROM storage. Re-queueing it would grow the table by its
+    own contents on every restart."""
+    source = ledger(max_hold_ms=1, stop_pct=0.9, target_pct=0.9)
+    source.on_signal(signal(changed_at=1000.0), now_ms=1_000_000)
+    source.on_book(100.0, 100.0, book_at_ms=1_000_001, received_at_ms=1_000_001)
+    source.on_book(101.0, 101.0, book_at_ms=1_000_100, received_at_ms=1_000_100)
+    rows = source.drain_persist()
+
+    book = ledger()
+    book.restore(rows)
+    assert book.drain_persist() == []
+
+
+def test_an_open_position_from_a_dead_process_is_not_resurrected():
+    """Nobody was marking it against the book while the process was down:
+    its stop was never checked and its deadline never tested. Reopening it
+    would eventually book an exit at a price that was never observed -
+    RULE 3, applied to a gap the size of a restart."""
+    book = ledger()
+    rows = [
+        {"trade_id": "A", "symbol": "TESTUSDT", "status": OPEN,
+         "direction": "long", "signal_at_ms": 1_000_000, "entry_price": 100.0},
+        {"trade_id": "B", "symbol": "TESTUSDT", "status": PENDING,
+         "direction": "long", "signal_at_ms": 1_000_001},
+        {"trade_id": "C", "symbol": "TESTUSDT", "status": CLOSED,
+         "direction": "long", "signal_at_ms": 1_000_002, "net_pnl": 2.0,
+         "exit_reason": "target"},
+    ]
+    assert book.restore(rows) == 1
+    assert book.open == [] and book.pending == []
+    assert [t.id for t in book.closed] == ["C"]
+
+
+def test_a_malformed_row_does_not_lose_the_rest():
+    book = ledger()
+    rows = [
+        {"trade_id": "A", "status": CLOSED, "signal_at_ms": 1, "net_pnl": "nonsense"},
+        {"trade_id": "B", "status": CLOSED, "signal_at_ms": 2, "net_pnl": 3.0},
+    ]
+    assert book.restore(rows) == 2
+    # The unreadable number degrades to 0 rather than taking the row with
+    # it: a trade that happened is still a trade.
+    assert book.summary()["net_pnl"] == pytest.approx(3.0)
+
+
+def test_the_restored_journal_keeps_its_bound_and_its_newest_rows():
+    book = ledger(journal_limit=5)
+    rows = [{"trade_id": f"T{i}", "status": CLOSED, "signal_at_ms": 1_000 + i,
+             "direction": "long", "net_pnl": float(i)} for i in range(30)]
+    book.restore(rows)
+    assert len(book.closed) == 5
+    assert [t.id for t in book.closed] == ["T25", "T26", "T27", "T28", "T29"]
+
+
+def test_the_row_survives_a_round_trip_unchanged():
+    book = ledger(max_hold_ms=1, stop_pct=0.9, target_pct=0.9, slippage_bps=5.0)
+    book.on_signal(signal(changed_at=1000.0), now_ms=1_000_000)
+    book.on_book(99.0, 101.0, book_at_ms=1_000_001, received_at_ms=1_000_001)
+    book.on_book(99.0, 101.0, book_at_ms=1_000_100, received_at_ms=1_000_100)
+    original = book.closed[-1]
+    row = book.drain_persist()[0]
+
+    revived = VirtualTrade.from_row(row)
+    for field in ("id", "symbol", "direction", "status", "signal_state",
+                  "signal_at_ms", "entry_at_ms", "entry_book_ms", "entry_price",
+                  "entry_reference", "quantity", "stop", "target",
+                  "exit_at_ms", "exit_price", "exit_reference", "exit_reason",
+                  "fee_entry", "fee_exit", "gross_pnl", "net_pnl",
+                  "gap_uncertain"):
+        assert getattr(revived, field) == getattr(original, field), field
+
+
+def test_the_ledger_performs_no_io_of_its_own():
+    """The hand-off is the point. `_retire` runs on the INGEST thread, and
+    an HTTP call there stalls the socket reader - which is the failure the
+    two-thread ingest exists to prevent. This module offers rows; the
+    recorder, on its own thread, takes them."""
+    from pathlib import Path
+    import ast
+
+    source = Path("t3_engine/lead_engine/virtual_trades.py").read_text()
+    tree = ast.parse(source)
+    imported = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported += [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            imported.append(node.module or "")
+    # Asserted on the IMPORTS, not on the prose: the docstring names
+    # storage precisely because the module does not touch it.
+    assert all(not name.startswith("t3_engine") for name in imported), imported
+    for forbidden in ("supabase", "httpx", "requests", "psycopg", "sqlalchemy"):
+        assert not any(forbidden in name for name in imported), forbidden
+    # And no call that writes anywhere.
+    calls = {node.func.attr for node in ast.walk(tree)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)}
+    for forbidden in ("insert", "execute", "post", "commit", "record"):
+        assert forbidden not in calls, forbidden
+
+
+def test_every_row_field_has_a_column_in_the_schema():
+    """A key with no column is a 400 on every insert, silently, forever -
+    and the only symptom is a table that stays empty. Checked against the
+    shipped DDL rather than against the live database, so it fails in CI
+    and not in production."""
+    import re
+
+    from t3_engine.lead_engine.storage import SCHEMA_SQL
+
+    block = re.search(
+        r"create table if not exists lead_engine_virtual_trades \((.*?)\n\);",
+        SCHEMA_SQL, re.S)
+    assert block, "the virtual trades table is not in the schema"
+    columns = {line.strip().split()[0]
+               for line in block.group(1).strip().splitlines()
+               if line.strip() and not line.strip().startswith("--")}
+
+    book = ledger(max_hold_ms=1, stop_pct=0.9, target_pct=0.9)
+    book.on_signal(signal(changed_at=1000.0), now_ms=1_000_000)
+    book.on_book(100.0, 100.0, book_at_ms=1_000_001, received_at_ms=1_000_001)
+    book.on_book(101.0, 101.0, book_at_ms=1_000_100, received_at_ms=1_000_100)
+    row = book.drain_persist()[0]
+
+    missing = set(row) - columns
+    assert not missing, f"no column for {sorted(missing)}"
+
+
+def test_the_natural_key_is_upserted_not_inserted():
+    """The table rejects a duplicate `trade_id`. A buffered writer that
+    retries a failed batch would then block on it forever: one row that
+    was already written poisons every row behind it."""
+    from t3_engine.lead_engine.storage import CONFLICT_KEYS, TABLE_VIRTUAL_TRADES
+
+    assert CONFLICT_KEYS[TABLE_VIRTUAL_TRADES] == "trade_id"

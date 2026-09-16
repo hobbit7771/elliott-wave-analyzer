@@ -8,6 +8,7 @@ system's `analysis_cache`, `candles`, `ai_trade_events` and friends:
     lead_engine_liquidations   forced closes, as they arrive
     lead_engine_sessions       one row per engine start
     lead_engine_backtests      replay results
+    lead_engine_virtual_trades the paper ledger's terminal trades
 
 The ONE thing shared with the rest of the project is the PostgREST
 transport in t3_engine/database/supabase_rest.py - the credential, the
@@ -42,9 +43,14 @@ TABLE_SIGNALS = "lead_engine_signals"
 TABLE_LIQUIDATIONS = "lead_engine_liquidations"
 TABLE_SESSIONS = "lead_engine_sessions"
 TABLE_BACKTESTS = "lead_engine_backtests"
+TABLE_VIRTUAL_TRADES = "lead_engine_virtual_trades"
 
 ALL_TABLES = (TABLE_FEATURES, TABLE_SIGNALS, TABLE_LIQUIDATIONS,
-              TABLE_SESSIONS, TABLE_BACKTESTS)
+              TABLE_SESSIONS, TABLE_BACKTESTS, TABLE_VIRTUAL_TRADES)
+
+# Tables with a natural key, and the column that carries it. An insert
+# into one of these upserts instead of failing on a duplicate.
+CONFLICT_KEYS = {TABLE_VIRTUAL_TRADES: "trade_id"}
 
 # Rows are pushed in batches this size. A realtime engine that made one
 # HTTP call per feature frame would spend more time in the network stack
@@ -124,6 +130,33 @@ class Storage:
     def record_liquidation(self, symbol: str, event: Dict[str, Any]) -> None:
         self.record(TABLE_LIQUIDATIONS, {"symbol": symbol, **event})
 
+    def record_virtual_trade(self, row: Dict[str, Any]) -> None:
+        """One terminal paper trade.
+
+        Buffered like everything else. These arrive a handful an hour, not
+        four a second, so they will usually leave on the interval flush
+        rather than a full batch - which is what the interval is for."""
+        self.record(TABLE_VIRTUAL_TRADES, row)
+
+    def load_virtual_trades(self, symbol: str, limit: int = 500) -> List[Dict[str, Any]]:
+        """This symbol's stored trades, newest first, or [].
+
+        Never raises: a ledger that cannot read its history starts empty,
+        which is the state it was in before any of this existed. Losing
+        the history makes a worse report; failing to start makes a worse
+        engine."""
+        if not self.configured():
+            return []
+        try:
+            return supabase_rest.select(
+                TABLE_VIRTUAL_TRADES, {"symbol": symbol.upper()},
+                order="signal_at_ms.desc", limit=max(1, int(limit)))
+        except Exception as exc:                 # noqa: BLE001 - see docstring
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            logger.warning("lead_engine storage: virtual trades for %s not read: %s",
+                           symbol, self.last_error)
+            return []
+
     def record_session(self, row: Dict[str, Any]) -> None:
         self.record(TABLE_SESSIONS, row)
         self.flush(TABLE_SESSIONS)
@@ -156,7 +189,13 @@ class Storage:
                     self.buffers[name] = (self.buffers[name] + pending)[-500:]
                 continue
             try:
-                supabase_rest.insert(name, pending)
+                # The virtual-trades table has a natural key, so a resend
+                # must merge rather than 409 - see supabase_rest.insert.
+                # Without it one already-written row would block every
+                # row behind it in the retry buffer, permanently.
+                supabase_rest.insert(
+                    name, pending,
+                    on_conflict=CONFLICT_KEYS.get(name))
                 written += len(pending)
                 with self._lock:
                     self.written[name] = self.written.get(name, 0) + len(pending)
@@ -254,6 +293,45 @@ create table if not exists lead_engine_backtests (
     detail jsonb
 );
 
+-- The paper ledger's terminal trades. `trade_id` is the natural key: the
+-- ledger already names a trade by symbol, signal time and sequence, so a
+-- row offered twice (a retry, an overlapping restart) collides rather
+-- than doubling the P&L.
+create table if not exists lead_engine_virtual_trades (
+    id bigserial primary key,
+    trade_id text not null unique,
+    symbol text not null,
+    direction text,
+    status text,
+    signal_state text,
+    signal_at_ms bigint not null,
+    signal_price double precision,
+    break_score double precision,
+    confidence double precision,
+    entry_at_ms bigint,
+    entry_book_ms bigint,
+    entry_price double precision,
+    entry_reference double precision,
+    entry_slippage double precision,
+    quantity double precision,
+    stop double precision,
+    target double precision,
+    exit_at_ms bigint,
+    exit_book_ms bigint,
+    exit_price double precision,
+    exit_reference double precision,
+    exit_reason text,
+    exit_slippage double precision,
+    fee_entry double precision,
+    fee_exit double precision,
+    gross_pnl double precision,
+    net_pnl double precision,
+    gap_uncertain boolean default false,
+    note text
+);
+create index if not exists lead_engine_virtual_trades_symbol_at
+    on lead_engine_virtual_trades (symbol, signal_at_ms desc);
+
 -- Row level security on, matching the rest of this project: the service
 -- key bypasses it, the publishable key reaches nothing.
 alter table lead_engine_sessions     enable row level security;
@@ -261,6 +339,7 @@ alter table lead_engine_features     enable row level security;
 alter table lead_engine_signals      enable row level security;
 alter table lead_engine_liquidations enable row level security;
 alter table lead_engine_backtests    enable row level security;
+alter table lead_engine_virtual_trades enable row level security;
 """
 
 
@@ -300,6 +379,10 @@ class Recorder:
         self._thread: Optional[threading.Thread] = None
         self._last_signal: Dict[str, float] = {}
         self._last_liquidation: Dict[str, int] = {}
+        # Symbols whose paper ledger has already been seeded from
+        # storage. Once each, on this thread - the engine itself holds no
+        # database handle, and this is the seam that bridges them.
+        self._ledgers_restored: set = set()
         self.sweeps = 0
         self.rows = 0
         self._last_heartbeat: Optional[Tuple[float, int]] = None
@@ -354,16 +437,60 @@ class Recorder:
             except Exception:                    # noqa: BLE001 - a symbol
                 continue                         # that cannot be read is skipped
             try:
+                self._restore_ledger(symbol, state)
                 self._note_freshness(symbol, frame)
                 self.storage.record_features(symbol, frame)
                 written += 1
                 written += self._record_transition(symbol, state)
                 written += self._record_liquidations(symbol, state)
+                written += self._record_virtual_trades(symbol, state)
             except Exception:                    # noqa: BLE001 - storage
                 logger.debug("lead_engine recorder: %s not filed", symbol, exc_info=True)
         self.rows += written
         self._heartbeat()
         return written
+
+    def _restore_ledger(self, symbol: str, state) -> None:
+        """Seed one paper ledger from storage, once.
+
+        The reason this exists at all: the deployment restarts - the free
+        Render plan stops the process about fifteen minutes after the
+        last inbound request - and an in-memory P&L then reports zero
+        several times an hour, which is indistinguishable from a strategy
+        that never traded. Attempted once per symbol whatever the result,
+        because retrying a failed read on every sweep would turn one
+        outage into a request a second."""
+        if symbol in self._ledgers_restored:
+            return
+        self._ledgers_restored.add(symbol)
+        ledger = getattr(state, "ledger", None)
+        if ledger is None:
+            return
+        try:
+            rows = self.storage.load_virtual_trades(
+                symbol, limit=ledger.config.journal_limit)
+            taken = ledger.restore(rows)
+            if taken:
+                logger.info("lead_engine: %s paper ledger restored %d trades "
+                            "from storage", symbol, taken)
+        except Exception:                        # noqa: BLE001 - a ledger
+            logger.debug("lead_engine: %s ledger not restored",   # that cannot be
+                         symbol, exc_info=True)                   # seeded starts empty
+
+    def _record_virtual_trades(self, symbol: str, state) -> int:
+        """Drain the ledger's terminal trades onto the write buffer.
+
+        This is the half of the hand-off that owns the database. The
+        ledger queues on the ingest thread and never blocks; this runs on
+        the recorder's own thread, where a slow write costs a sweep
+        rather than a dropped frame."""
+        ledger = getattr(state, "ledger", None)
+        if ledger is None:
+            return 0
+        rows = ledger.drain_persist()
+        for row in rows:
+            self.storage.record_virtual_trade(row)
+        return len(rows)
 
     @staticmethod
     def _percentile(values: List[float], fraction: float) -> float:
