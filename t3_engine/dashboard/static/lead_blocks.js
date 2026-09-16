@@ -142,6 +142,7 @@
       "Not filled - stream gap": "Не исполнено - разрыв потока",
       "Uncertain exits": "Неточные выходы",
       "Skipped - stale book": "Пропущено - устаревший стакан",
+      "Restored from storage": "Из них до перезапуска",
       "Journal": "Журнал"
   };
 
@@ -387,6 +388,7 @@
       p.row('vt:abandoned', label('Not filled - stream gap')) +
       p.row('vt:uncertain', label('Uncertain exits')) +
       p.row('vt:stale', label('Skipped - stale book')) +
+      p.row('vt:restored', label('Restored from storage')) +
       '<div class="le-subhead">' + esc(label('Journal')) + '</div>' +
       '<div class="le-journal" data-le="vt:journal"></div>');
 
@@ -637,6 +639,7 @@
     p.set('vt:abandoned', vt.abandoned_on_gap || 0);
     p.set('vt:uncertain', vt.gap_uncertain_exits || 0);
     p.set('vt:stale', vt.skipped_stale_book || 0);
+    p.set('vt:restored', vt.restored_from_storage || 0);
     p.html('vt:journal', journalRows(vt.recent));
   }
 

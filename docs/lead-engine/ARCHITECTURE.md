@@ -36,7 +36,7 @@ t3_engine/
 │   ├── fibonacci.py          retracement levels + per-symbol/TF drawings
 │   ├── state.py              one symbol's world
 │   ├── engine.py             LeadEngine — the facade
-│   ├── storage.py            lead_engine_* tables
+│   ├── storage.py            lead_engine_* tables + the ledger's seam
 │   ├── replay.py             replay + backtest metrics
 │   ├── snapshot.py           the AI-facing shape: snapshot, multi-TF context
 │   ├── auth.py               external flag, token, rate limit

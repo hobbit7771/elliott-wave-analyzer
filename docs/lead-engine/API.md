@@ -245,6 +245,13 @@ stamped with; the exchange's own stamp is reported alongside it
 true. A clock offset between this process and the exchange therefore
 cannot decide whether a fill happens.
 
+The journal is persisted: terminal trades are written to
+`lead_engine_virtual_trades` and read back on start, so the P&L survives a
+restart. `restored_from_storage` says how much of the sample predates the
+current process. An OPEN position is never restored — nobody marked it
+against the book while the process was down, so resurrecting it would
+book an exit at a price that was never observed.
+
 `summary` carries `gross_pnl`, `fees_paid`, `net_pnl`, `open_pnl` (marked
 at what it would cost to CLOSE, not at the mid), `win_rate_pct`,
 `exits_by_reason`, and the counters that make the rules auditable rather

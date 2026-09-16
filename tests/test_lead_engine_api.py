@@ -397,3 +397,125 @@ def test_starting_the_engine_starts_the_recorder_and_files_a_session():
         assert engine.status()["recorder"]["running"] is True
     finally:
         engine.stop()
+
+
+# ---- the paper ledger's hand-off to storage ---------------------------
+
+def test_the_recorder_files_the_paper_ledger_and_seeds_it_back():
+    """The two halves of the hand-off, through the real seam.
+
+    The ledger queues terminal trades on the ingest thread and never
+    writes; the recorder, on its own thread, drains them onto the buffer
+    and seeds the ledger from storage once per symbol. The reason it
+    matters: the deployment restarts every fifteen minutes on the free
+    plan, and an in-memory P&L reports zero several times an hour -
+    indistinguishable from a strategy that never traded."""
+    from t3_engine.lead_engine.storage import Recorder, TABLE_VIRTUAL_TRADES
+
+    engine = _engine_with_events()
+    state = engine.states["INJUSDT"]
+    ledger = state.ledger
+
+    # One trade reaches a terminal state, the way the ingest path leaves
+    # it: queued, not written.
+    ledger.on_signal({"state": "PRE_BREAK_LONG", "direction": "long",
+                      "changed_at": 1_700_000.0, "confidence": 0.8}, now_ms=1_700_000_000)
+    ledger.on_book(5.70, 5.71, book_at_ms=1_700_000_100,
+                   received_at_ms=1_700_000_100)
+    ledger.on_book(5.40, 5.41, book_at_ms=1_700_000_500,
+                   received_at_ms=1_700_000_500)          # through the stop
+    assert len(ledger.pending_persist) == 1
+    assert engine.storage.stats()["buffered"].get(TABLE_VIRTUAL_TRADES, 0) == 0
+
+    recorder = Recorder(engine, engine.storage)
+    recorder.sweep_once()
+    buffered = engine.storage.stats()["buffered"]
+    assert buffered[TABLE_VIRTUAL_TRADES] == 1
+    assert ledger.pending_persist == [], "drained, so the next sweep re-files nothing"
+
+    recorder.sweep_once()
+    assert engine.storage.stats()["buffered"][TABLE_VIRTUAL_TRADES] == 1
+
+
+def test_a_restart_gets_its_pnl_back_from_storage(monkeypatch):
+    from t3_engine.lead_engine.storage import Recorder
+
+    engine = _engine_with_events()
+    state = engine.states["INJUSDT"]
+    assert state.ledger.summary()["net_pnl"] == 0
+
+    stored = [{"trade_id": "INJUSDT-1-1", "symbol": "INJUSDT", "status": "CLOSED",
+               "direction": "long", "signal_at_ms": 1_700_000_000,
+               "exit_reason": "target", "gross_pnl": 3.0, "net_pnl": 2.4,
+               "fee_entry": 0.3, "fee_exit": 0.3}]
+    monkeypatch.setattr(engine.storage, "load_virtual_trades",
+                        lambda symbol, limit=500: stored if symbol == "INJUSDT" else [])
+
+    recorder = Recorder(engine, engine.storage)
+    recorder.sweep_once()
+
+    summary = state.ledger.summary()
+    assert summary["closed_trades"] == 1
+    assert summary["net_pnl"] == pytest.approx(2.4)
+    assert summary["restored_from_storage"] == 1
+
+
+def test_the_ledger_is_seeded_once_per_symbol_not_once_per_sweep(monkeypatch):
+    """A read on every sweep would turn one Supabase outage into a request
+    every fifteen seconds, per symbol, forever."""
+    from t3_engine.lead_engine.storage import Recorder
+
+    engine = _engine_with_events()
+    calls = []
+    monkeypatch.setattr(engine.storage, "load_virtual_trades",
+                        lambda symbol, limit=500: calls.append(symbol) or [])
+
+    recorder = Recorder(engine, engine.storage)
+    for _ in range(4):
+        recorder.sweep_once()
+    assert calls.count("INJUSDT") == 1
+
+
+def test_a_failed_read_leaves_the_engine_running(monkeypatch):
+    """Losing the history makes a worse report; failing to start makes a
+    worse engine."""
+    from t3_engine.lead_engine.storage import Recorder
+
+    engine = _engine_with_events()
+
+    def boom(symbol, limit=500):
+        raise RuntimeError("supabase is down")
+
+    monkeypatch.setattr(engine.storage, "load_virtual_trades", boom)
+    recorder = Recorder(engine, engine.storage)
+    assert recorder.sweep_once() > 0
+    assert engine.states["INJUSDT"].ledger.summary()["closed_trades"] == 0
+
+
+def test_a_resend_upserts_rather_than_blocking_the_buffer(monkeypatch):
+    """The retry path, exercised: storage puts failed rows back and tries
+    again, so the second attempt must merge on the natural key instead of
+    colliding with the row it already wrote."""
+    from t3_engine.lead_engine import storage as storage_module
+
+    calls = []
+
+    def fake_insert(table, rows, client=None, on_conflict=None):
+        calls.append((table, len(rows), on_conflict))
+        return rows
+
+    monkeypatch.setattr(storage_module.supabase_rest, "insert", fake_insert)
+    monkeypatch.setattr(storage_module.supabase_rest, "configured", lambda: True)
+
+    store = storage_module.Storage()
+    store.record_virtual_trade({"trade_id": "X-1", "symbol": "X", "signal_at_ms": 1})
+    store.flush(storage_module.TABLE_VIRTUAL_TRADES)
+    store.record_virtual_trade({"trade_id": "X-1", "symbol": "X", "signal_at_ms": 1})
+    store.flush(storage_module.TABLE_VIRTUAL_TRADES)
+
+    assert [c[2] for c in calls] == ["trade_id", "trade_id"]
+    # Features carry no natural key and must keep plain-insert semantics.
+    store.record_features("X", {"generated_at": 1.0, "pressure": {}, "orderbook": {},
+                                "prebreak": {}, "signal": {}, "health": {}})
+    store.flush(storage_module.TABLE_FEATURES)
+    assert calls[-1][2] is None
