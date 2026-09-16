@@ -484,3 +484,69 @@ says so rather than letting its zero read like the ledger's total.
 Verified against the live table: both row shapes accepted, nulls
 included, the conflict clause merges rather than duplicating, and
 `restore()` reads the exact shape PostgREST returns.
+
+---
+
+# Round 8 — why the algorithm was not opening trades
+
+Reported with a screenshot: the order book visibly trading, and the panel
+reporting "no resistance identified above the current price in the visible
+swings", zero levels, zero signals, zero virtual trades. Two separate
+defects, one of them arithmetic.
+
+## The engine started cold, and three minutes is not enough
+
+The level tracker built its history from the trade stream at fifteen
+seconds a bar and had no history at all before that. Three minutes in it
+holds twelve closed bars — plenty by count, which is why this never looked
+like a starvation problem. But a fractal swing needs a bar higher than the
+two that FOLLOW it, and in a trending stretch no bar ever is. Reproduced
+exactly: twelve bars, zero swings, and a test now states it as arithmetic
+rather than as a complaint.
+
+Zero swings → zero levels → no PRE_BREAK → no direction → no virtual
+trade, while the tape runs. And on the free Render plan the process is
+stopped every fifteen minutes, so it never accumulated the ten-odd minutes
+the fine series needs to turn at least once. The engine spent most of its
+life unable to name a level.
+
+**`LeadEngine._backfill_structure`** seeds each symbol's minute series
+from Bybit REST at start — four hours, one request per symbol, on its own
+thread, and it never raises: an engine that cannot reach REST is an engine
+with less history, not a dead one.
+
+**The fallback rule was also wrong.** It read "use the minute series when
+the fine one is EMPTY", and empty is not the failing case — twelve
+useless bars are not empty. It now reads "…until the fine one has
+`MIN_CLOSED_BARS_FOR_LEVELS` closed bars of its own", which is ten
+minutes of 15-second history: long enough that the series has certainly
+turned. Below that the seeded minutes are simply the better answer,
+because they reach back before this process existed.
+
+Measured on the same trending three minutes: 0 swings and 0 levels cold,
+60 swings and 7 levels seeded.
+
+## A bar with no value was drawing itself full
+
+`.le-feature .bar > i` is a block element with no width in the
+stylesheet, so it filled its parent. Before any value arrived — and
+whenever the pre-break engine finds no level and returns **no features at
+all** — every one of the ten bars rendered at 100%. An engine that had
+found nothing was drawing itself as an engine that had found everything,
+which is what the screenshot shows.
+
+Two fixes, because either alone leaves a hole: `width: 0` in both
+stylesheets, and the feature loop now walks a declared list rather than
+the keys the engine happened to return, clearing the absent ones to "—"
+and zero. A loop over `Object.keys(features)` on an empty map writes
+nothing, which also left the PREVIOUS frame's numbers on screen as if
+they were current.
+
+## And the diagnosis was in the API but not on the screen
+
+`LevelTracker.diagnose` has distinguished "not enough history" from "no
+swing confirmed" from "every level is on the wrong side" since the
+diagnostics went in. It reached `/state` and was never rendered, so the
+panel kept saying the one sentence that cannot be acted on. The pre-break
+cards now show the reason and the counts underneath it — but only when
+there is no level, since with one the note above already says everything.

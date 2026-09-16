@@ -665,3 +665,146 @@ def test_the_heartbeat_reports_recent_freshness_as_well_as_lifetime():
     # The recent one says what is true now.
     assert percentile(recent, 0.5) == 100.0
     assert percentile(recent, 0.95) == 100.0
+
+
+# ---- a cold start must still be able to name a level -------------------
+
+def _trending_minutes(state, seconds=180, seed=7):
+    """Feed a fresh state a trending stretch of live trades.
+
+    Trending on purpose: that is the case that breaks, and a random walk
+    would hide it behind luck."""
+    import random
+
+    from t3_engine.lead_engine.trade_flow import Trade
+
+    random.seed(seed)
+    start, price = 1_700_000_000_000, 75_900.0
+    for second in range(seconds):
+        for _ in range(8):
+            price *= 1 + random.gauss(0, 0.00012)
+            state.on_trade(Trade(
+                timestamp_ms=start + second * 1000 + random.randint(0, 999),
+                price=price, quantity=0.05, is_taker_buy=True))
+    return price
+
+
+def _seed_minutes(state, bars=240):
+    """What LeadEngine._backfill_structure does: closed minute bars from
+    before this process existed."""
+    import random
+
+    from t3_engine.lead_engine.smc_engine import Candle as SmcCandle
+    from t3_engine.lead_engine.state import STRUCTURE_INTERVAL
+
+    random.seed(99)
+    price = 74_000.0
+    base = 1_700_000_000_000 - bars * 60_000
+    for index in range(bars):
+        opened = price
+        price *= 1 + random.gauss(0, 0.0012)
+        state.on_kline(STRUCTURE_INTERVAL, SmcCandle(
+            start_ms=base + index * 60_000, open=opened,
+            high=max(opened, price) * 1.0008, low=min(opened, price) * 0.9992,
+            close=price, volume=10.0, closed=True))
+
+
+def _fresh_state(symbol="BTCUSDT"):
+    from t3_engine.lead_engine.btc_leadlag import BtcLeadLag
+    from t3_engine.lead_engine.config import LeadEngineConfig
+    from t3_engine.lead_engine.state import SymbolState
+
+    config = LeadEngineConfig(enabled=True, symbols=[symbol])
+    return SymbolState(symbol, config, BtcLeadLag(), config.thresholds)
+
+
+def test_three_trending_minutes_alone_cannot_produce_a_swing():
+    """The defect, stated as arithmetic rather than as a complaint.
+
+    Three minutes gives the level tracker twelve 15-second bars - plenty
+    by count. But a fractal swing needs a bar higher than the two that
+    FOLLOW it, and in a trend no bar ever is. Zero swings means zero
+    levels, zero levels means no PRE_BREAK, and no PRE_BREAK means the
+    engine never names a direction - while the order book trades on."""
+    from t3_engine.lead_engine.smc_engine import find_swings
+
+    state = _fresh_state()
+    _trending_minutes(state)
+    closed = [c for c in state.level_candles.series() if c.closed]
+
+    assert len(closed) >= 10, "the tracker was fed plenty of bars"
+    assert find_swings(closed) == [], "and not one of them is a swing"
+
+
+def test_seeded_history_gives_a_cold_start_its_levels_back():
+    """The same three minutes, with the minute series backfilled."""
+    cold = _fresh_state()
+    _trending_minutes(cold)
+    cold_levels = cold.snapshot(force=True)["prebreak"]["levels"]
+    assert cold_levels["swings_found"] == 0
+    assert cold_levels["levels"] == 0
+
+    warm = _fresh_state()
+    _seed_minutes(warm)
+    _trending_minutes(warm)
+    warm_levels = warm.snapshot(force=True)["prebreak"]["levels"]
+    assert warm_levels["swings_found"] > 0
+    assert warm_levels["levels"] > 0
+    assert (warm_levels["nearest_support"] is not None
+            or warm_levels["nearest_resistance"] is not None)
+
+
+def test_the_fine_series_takes_over_once_it_can_confirm_a_swing():
+    """The seeded minute bars are a crutch for the first ten minutes, not
+    a replacement: the level tracker exists at fifteen seconds because a
+    minute is too coarse for a horizon measured in minutes."""
+    from t3_engine.lead_engine.state import MIN_CLOSED_BARS_FOR_LEVELS
+
+    state = _fresh_state()
+    _seed_minutes(state)
+    # Long enough that the fine series passes the threshold on its own.
+    _trending_minutes(state, seconds=(MIN_CLOSED_BARS_FOR_LEVELS + 5) * 15)
+
+    fine_closed = sum(1 for c in state.level_candles.series() if c.closed)
+    assert fine_closed >= MIN_CLOSED_BARS_FOR_LEVELS
+    levels = state.snapshot(force=True)["prebreak"]["levels"]
+    # Counted over the FINE series now - fewer bars than the 240 seeded
+    # minutes, which is how the switch is visible at all.
+    assert levels["closed_bars"] == fine_closed
+
+
+def test_the_backfill_never_takes_the_engine_down(monkeypatch):
+    """An engine that cannot reach REST is an engine with less history,
+    not a dead one."""
+    from t3_engine.lead_engine import engine as engine_module
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("bybit is unreachable")
+
+    monkeypatch.setattr(engine_module.candles_rest, "fetch_candles", boom)
+    engine = LeadEngine(LeadEngineConfig(enabled=True, symbols=["INJUSDT"]))
+    engine._ensure("INJUSDT")
+    engine._backfill_structure()               # must not raise
+    assert "INJUSDT" in engine.states
+
+
+def test_the_backfill_seeds_closed_bars_and_skips_the_forming_one(monkeypatch):
+    from t3_engine.lead_engine import engine as engine_module
+    from t3_engine.lead_engine.state import STRUCTURE_INTERVAL
+
+    rows = [{"time": 1_700_000_000 + i * 60, "open": 100.0 + i, "high": 101.0 + i,
+             "low": 99.0 + i, "close": 100.5 + i, "volume": 5.0, "closed": True}
+            for i in range(20)]
+    # Bybit's newest bar is still forming; the socket is about to send it.
+    rows.append({"time": 1_700_000_000 + 20 * 60, "open": 120.0, "high": 121.0,
+                 "low": 119.0, "close": 120.5, "volume": 1.0, "closed": False})
+
+    monkeypatch.setattr(engine_module.candles_rest, "fetch_candles",
+                        lambda *a, **k: rows)
+    engine = LeadEngine(LeadEngineConfig(enabled=True, symbols=["INJUSDT"]))
+    engine._backfill_structure()
+
+    smc = engine.states["INJUSDT"].smc[STRUCTURE_INTERVAL]
+    assert len(smc.candles) == 20
+    assert all(candle.closed for candle in smc.candles)
+    assert smc.candles[0].start_ms == 1_700_000_000 * 1000

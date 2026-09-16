@@ -37,10 +37,21 @@ from t3_engine.lead_engine.bybit_ws import BybitLeadStream, parse_topic
 from t3_engine.lead_engine.config import BTC_SYMBOL, LeadEngineConfig
 from t3_engine.lead_engine.liquidation_engine import liquidation_from_message
 from t3_engine.lead_engine.oi_engine import OpenInterestPoller
+from t3_engine.lead_engine import candles_rest
+from t3_engine.lead_engine.smc_engine import Candle as SmcCandle
 from t3_engine.lead_engine.smc_engine import candle_from_kline
 from t3_engine.lead_engine.storage import Recorder, Storage
-from t3_engine.lead_engine.state import SymbolState
+from t3_engine.lead_engine.state import STRUCTURE_INTERVAL, SymbolState
 from t3_engine.lead_engine.trade_flow import Trade
+
+# The structure series is subscribed as Bybit's "1"; the REST helper
+# spells the same interval "1m". Two vocabularies for one thing, so the
+# translation lives here rather than being written out at the call site.
+STRUCTURE_INTERVAL_LABEL = "1m"
+
+# How many closed minute bars to seed. Four hours: long enough that the
+# series has certainly turned, short enough to be one request per symbol.
+BACKFILL_BARS = 240
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +163,12 @@ class LeadEngine:
                            "kline_intervals": list(self.config.kline_intervals)},
                 "note": "lead engine start",
             })
+            # History, before the first live bar closes. See
+            # _backfill_structure: without it the engine spends its first
+            # ten minutes unable to name a level, and on a host that
+            # restarts every fifteen that is most of its life.
+            threading.Thread(target=self._backfill_structure,
+                             name="lead-engine-backfill", daemon=True).start()
             self.started_at = time.time()
             self.start_error = ""
             logger.info("lead_engine: started on %d symbols", len(self.config.symbols))
@@ -160,6 +177,56 @@ class LeadEngine:
             self.start_error = f"{type(exc).__name__}: {exc}"
             logger.exception("lead_engine: failed to start; the rest of the app is unaffected")
             return False
+
+    def _backfill_structure(self) -> None:
+        """Seed each symbol's minute structure from Bybit REST.
+
+        THE PROBLEM THIS SOLVES. The engine used to start with no history
+        at all and build it from the trade stream, at fifteen seconds a
+        bar. Three minutes in it holds twelve bars - and if those twelve
+        trended, a fractal detector finds no swing in them, because no bar
+        is higher than the two that follow it. No swing, no level, no
+        PRE_BREAK, no direction: the panel reports "no resistance
+        identified above the current price" while the order book is
+        visibly trading. Ten minutes of history fixes it, and the free
+        Render plan stops the process after fifteen.
+
+        A minute of Bybit REST gives what an hour of waiting would.
+
+        Runs on its own thread and never raises: an engine that cannot
+        reach the REST endpoint is an engine with less history, not a
+        dead one - it simply builds the bars itself as it always did."""
+        interval = STRUCTURE_INTERVAL_LABEL
+        for symbol in list(self.config.symbols):
+            try:
+                rows = candles_rest.fetch_candles(
+                    symbol, interval, limit=BACKFILL_BARS,
+                    base_url=self.config.rest_base)
+            except Exception:                    # noqa: BLE001 - see docstring
+                logger.debug("lead_engine: %s structure not backfilled",
+                             symbol, exc_info=True)
+                continue
+            if not rows:
+                continue
+            state = self.states.get(symbol) or self._ensure(symbol)
+            seeded = 0
+            for row in rows:
+                # The forming bar is skipped: it is not a closed bar and
+                # the socket is about to send it anyway.
+                if not row.get("closed", True):
+                    continue
+                try:
+                    state.on_kline(STRUCTURE_INTERVAL, SmcCandle(
+                        start_ms=int(row["time"]) * 1000,
+                        open=float(row["open"]), high=float(row["high"]),
+                        low=float(row["low"]), close=float(row["close"]),
+                        volume=float(row.get("volume") or 0.0), closed=True))
+                    seeded += 1
+                except (KeyError, TypeError, ValueError):
+                    continue
+            if seeded:
+                logger.info("lead_engine: %s seeded with %d closed %s bars",
+                            symbol, seeded, interval)
 
     def stop(self) -> None:
         if self.stream is not None:

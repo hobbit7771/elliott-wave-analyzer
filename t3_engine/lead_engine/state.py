@@ -74,6 +74,15 @@ STRUCTURE_INTERVAL = "1"
 # seconds is the right granularity for a horizon measured in minutes.
 LEVEL_INTERVAL_MS = 15_000
 
+# How many CLOSED fine bars the level tracker needs before it is trusted
+# on its own. A fractal swing needs 2*FRACTAL_WIDTH+1 = 5 bars to exist at
+# all, but five bars can only ever produce a swing if the middle one
+# happens to be the extreme - in a trend it never is. Forty bars is ten
+# minutes of 15-second history, which is enough for the series to have
+# turned at least once; below that the minute series is the better answer
+# because it reaches back before this process started.
+MIN_CLOSED_BARS_FOR_LEVELS = 40
+
 
 @dataclass
 class SymbolState:
@@ -370,8 +379,26 @@ class SymbolState:
         # reads the minute one. Two different questions - see
         # LEVEL_INTERVAL_MS.
         candles = self.level_candles.series()
-        if not candles and structure is not None:
-            candles = structure.candles
+        # ...but only once the fine series can actually CONFIRM a swing.
+        #
+        # The old rule was "fall back when the fine series is empty", and
+        # empty is not the failing case. Three minutes after a start the
+        # tracker holds twelve 15-second bars - plenty by count - and if
+        # those twelve trended, a fractal detector finds nothing in them
+        # by definition: no bar is higher than the two that follow it. No
+        # swing means no level, no level means no PRE_BREAK, and no
+        # PRE_BREAK means the engine never names a direction. On a host
+        # that restarts every fifteen minutes that is most of its life,
+        # and it is exactly the "algorithm is not opening trades" the
+        # order book was visibly trading through.
+        #
+        # So the minute series - which carries history from BEFORE this
+        # process existed, see LeadEngine._backfill_structure - is used
+        # until the fine one has enough closed bars of its own.
+        if structure is not None and structure.candles:
+            fine_closed = sum(1 for c in candles if c.closed)
+            if fine_closed < MIN_CLOSED_BARS_FOR_LEVELS:
+                candles = structure.candles
         prebreak_inputs = PreBreakInputs(
             price=price,
             book=book_metrics,

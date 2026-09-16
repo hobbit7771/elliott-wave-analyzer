@@ -85,7 +85,9 @@ body.le-root {
 #wsPanel .le-feature { display: grid; grid-template-columns: 118px 1fr 40px; gap: 6px;
                        align-items: center; padding: 2px 0; font-size: 11px; }
 #wsPanel .le-feature .bar { height: 6px; background: #1a1f29; border-radius: 3px; }
-#wsPanel .le-feature .bar > i { display: block; height: 100%; border-radius: 3px;
+/* width:0 by default - see lead_engine.css: without it a bar with no
+   value renders full, which reads as a maxed-out feature. */
+#wsPanel .le-feature .bar > i { display: block; width: 0; height: 100%; border-radius: 3px;
                                 background: #7c8cf8; width: 0; }
 #wsPanel .le-feature .num { text-align: right; color: #9aa3b2; }
 
