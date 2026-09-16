@@ -53,6 +53,14 @@ STRUCTURE_INTERVAL_LABEL = "1m"
 # series has certainly turned, short enough to be one request per symbol.
 BACKFILL_BARS = 240
 
+# The backfill competes with the ingest thread for the GIL, so it waits
+# for the socket to settle and yields between symbols. Both are small:
+# the whole seed still completes inside fifteen seconds, which is one
+# fine bar, and the engine has its levels long before it could have built
+# a single swing on its own.
+BACKFILL_START_DELAY_SECONDS = 2.0
+BACKFILL_GAP_SECONDS = 0.5
+
 logger = logging.getLogger(__name__)
 
 # How long to wait before asking Bybit for the same symbol's book again.
@@ -197,6 +205,13 @@ class LeadEngine:
         reach the REST endpoint is an engine with less history, not a
         dead one - it simply builds the bars itself as it always did."""
         interval = STRUCTURE_INTERVAL_LABEL
+        # Let the socket settle before competing with it. Measured: the
+        # seven REST calls and the JSON parse of 240 candles each hold the
+        # GIL in bursts, and the first heartbeat after a start reported
+        # book_age p95 of 1012ms against 636ms once the run settled. The
+        # data is muted as stale while that lasts, so nothing acts on it -
+        # but a second of slack here costs nothing and the tail is real.
+        time.sleep(BACKFILL_START_DELAY_SECONDS)
         for symbol in list(self.config.symbols):
             try:
                 rows = candles_rest.fetch_candles(
@@ -227,6 +242,9 @@ class LeadEngine:
             if seeded:
                 logger.info("lead_engine: %s seeded with %d closed %s bars",
                             symbol, seeded, interval)
+            # Hand the ingest thread the GIL between symbols rather than
+            # running seven parses back to back.
+            time.sleep(BACKFILL_GAP_SECONDS)
 
     def stop(self) -> None:
         if self.stream is not None:

@@ -773,7 +773,20 @@ def test_the_fine_series_takes_over_once_it_can_confirm_a_swing():
     assert levels["closed_bars"] == fine_closed
 
 
-def test_the_backfill_never_takes_the_engine_down(monkeypatch):
+@pytest.fixture
+def instant_backfill(monkeypatch):
+    """Zero the politeness delays.
+
+    They exist so the seed does not fight the ingest thread for the GIL
+    on a live process - see BACKFILL_START_DELAY_SECONDS - and a test has
+    no ingest thread to be polite to."""
+    from t3_engine.lead_engine import engine as engine_module
+
+    monkeypatch.setattr(engine_module, "BACKFILL_START_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(engine_module, "BACKFILL_GAP_SECONDS", 0.0)
+
+
+def test_the_backfill_never_takes_the_engine_down(monkeypatch, instant_backfill):
     """An engine that cannot reach REST is an engine with less history,
     not a dead one."""
     from t3_engine.lead_engine import engine as engine_module
@@ -788,7 +801,8 @@ def test_the_backfill_never_takes_the_engine_down(monkeypatch):
     assert "INJUSDT" in engine.states
 
 
-def test_the_backfill_seeds_closed_bars_and_skips_the_forming_one(monkeypatch):
+def test_the_backfill_seeds_closed_bars_and_skips_the_forming_one(
+        monkeypatch, instant_backfill):
     from t3_engine.lead_engine import engine as engine_module
     from t3_engine.lead_engine.state import STRUCTURE_INTERVAL
 
