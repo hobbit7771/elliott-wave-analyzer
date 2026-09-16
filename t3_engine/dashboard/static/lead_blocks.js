@@ -18,6 +18,14 @@
 
   var LAYERS = ['flow', 'book', 'structure', 'derivatives', 'btc_lead'];
 
+  // The pre-break features, in display order. Declared once because the
+  // same list has to build the rows AND clear them: a feature that is
+  // built but not cleared keeps the last frame's bar when the engine
+  // stops returning it.
+  var FEATURES = ['compression', 'fading_bounces', 'depth_drain', 'defender_pulling',
+                  'attacker_stacking', 'flow_pressure', 'microprice_lean',
+                  'velocity_rising', 'btc_alignment', 'repeated_tests'];
+
   /* ---- labels -------------------------------------------------------
 
      A HAND-WRITTEN dictionary, and the page is marked `translate="no"`
@@ -355,9 +363,7 @@
       p.row('st:res', label('Nearest resistance')));
 
     ['short', 'long'].forEach(function (side) {
-      var rows = ['compression', 'fading_bounces', 'depth_drain', 'defender_pulling',
-                  'attacker_stacking', 'flow_pressure', 'microprice_lean',
-                  'velocity_rising', 'btc_alignment', 'repeated_tests']
+      var rows = FEATURES
         .map(function (name) {
           return '<div class="le-feature"><span>' + esc(name.replace(/_/g, ' ')) + '</span>' +
             '<span class="bar"><i data-le="F:' + side + ':' + name + ':bar"></i></span>' +
@@ -367,7 +373,8 @@
         p.row('F:' + side + ':level', label('Level')) +
         p.row('F:' + side + ':tests', label('Tests')) +
         p.row('F:' + side + ':score', label('Break score')) +
-        '<div class="le-note" data-le="F:' + side + ':note"></div>' + rows);
+        '<div class="le-note" data-le="F:' + side + ':note"></div>' +
+        '<div class="le-note" data-le="F:' + side + ':why"></div>' + rows);
     });
 
     html += card('Virtual trades',
@@ -574,6 +581,7 @@
     p.set('st:res', fmt((pre.long || {}).level, 5));
 
     /* pre-break */
+    var levels = pre.levels || {};
     ['short', 'long'].forEach(function (side) {
       var pb = pre[side] || {};
       var features = pb.features || {};
@@ -581,8 +589,36 @@
       p.set('F:' + side + ':tests', pb.tests === undefined ? '—' : pb.tests);
       p.set('F:' + side + ':score', fmt(pb.break_score, 1));
       p.set('F:' + side + ':note', pb.note || '');
-      Object.keys(features).forEach(function (name) {
-        var value = Math.max(0, Math.min(1, Number(features[name]) || 0));
+      // WHY there is no level - shown only when there isn't one, since
+      // with a level the note above already says everything. The tracker
+      // has distinguished "not enough history" from "no swing confirmed"
+      // from "every level is on the wrong side" since the diagnostics
+      // went in; it was simply never rendered, which is why "no
+      // resistance identified above the current price" read as a dead
+      // engine rather than as a young one.
+      var why = '';
+      if (pb.level === null || pb.level === undefined) {
+        why = (side === 'long' ? levels.resistance_note : levels.support_note) || '';
+        if (why && levels.closed_bars !== undefined) {
+          why += '  (' + levels.closed_bars + ' закрытых баров, ' +
+                 (levels.swings_found || 0) + ' swing, ' +
+                 (levels.levels || 0) + ' уровней)';
+        }
+      }
+      p.set('F:' + side + ':why', why);
+      // Every feature is written on every frame, not only the ones the
+      // engine returned. When no level is found the `features` map is
+      // EMPTY, and a loop over its keys leaves the previous frame's bars
+      // and numbers on screen - stale values presented as current. The
+      // absent ones are cleared to "—" and zero width.
+      FEATURES.forEach(function (name) {
+        var raw = features[name];
+        if (raw === undefined || raw === null) {
+          p.set('F:' + side + ':' + name, '—');
+          p.width('F:' + side + ':' + name + ':bar', 0);
+          return;
+        }
+        var value = Math.max(0, Math.min(1, Number(raw) || 0));
         p.set('F:' + side + ':' + name, value.toFixed(2));
         p.width('F:' + side + ':' + name + ':bar', value * 100);
       });
