@@ -174,7 +174,14 @@ def _pick(payload: Dict[str, Any], key: str) -> Dict[str, Any]:
 
 
 def tool_list() -> List[Dict[str, Any]]:
-    """The MCP `tools/list` payload."""
+    """The MCP `tools/list` payload.
+
+    Three of these carry an Apps SDK widget (see widgets.py); the rest
+    return data only. A host that knows nothing about `openai/*` keys
+    ignores them, so the same list serves a plain MCP client and
+    ChatGPT."""
+    from lead_engine_mcp import widgets
+
     return [
         {"name": name,
          "description": spec["description"],
@@ -183,7 +190,7 @@ def tool_list() -> List[Dict[str, Any]]:
          # without reading the documentation.
          "annotations": {"readOnlyHint": True, "destructiveHint": False,
                          "idempotentHint": True, "openWorldHint": True},
-         "_meta": {"schema_version": SCHEMA_VERSION}}
+         "_meta": {"schema_version": SCHEMA_VERSION, **widgets.tool_meta(name)}}
         for name, spec in sorted(TOOLS.items())
     ]
 

@@ -208,3 +208,88 @@
   #tab-lead .le-jrow .j-px, .le-root .le-jrow .j-px,
   #tab-lead .le-jrow .j-fee, .le-root .le-jrow .j-fee { display: none; }
 }
+
+/* ---- the P&L tab ----------------------------------------------------
+ *
+ * Every host in this project restates the base card/row rules under its
+ * own scope - the tab under `#tab-lead`, the workspace under `#wsPanel`
+ * (lead_workspace.css) - so the P&L tab does the same rather than
+ * widening forty existing selectors. Skipping this is exactly what made
+ * the first render come out as "Статусостановлен": the markup was right
+ * and nothing was styling it.
+ */
+#tab-pnl { font-size: 12px; }
+#tab-pnl .le-grid { display: block; }
+#tab-pnl .le-card {
+  border: 1px solid #232733; border-radius: 8px; background: #11151d;
+  padding: 10px 12px; margin: 0 0 12px;
+}
+#tab-pnl .le-card h3 {
+  margin: 0 0 8px; font-size: 11px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: #9aa3b2; font-weight: 600;
+}
+#tab-pnl .le-chip {
+  font-size: 10px; font-weight: 400; color: #8a93a5; text-transform: none;
+  letter-spacing: 0; margin-left: 6px;
+}
+#tab-pnl .le-row {
+  display: flex; justify-content: space-between; gap: 10px;
+  padding: 3px 0; border-bottom: 1px solid #171c25;
+}
+#tab-pnl .le-row:last-child { border-bottom: none; }
+#tab-pnl .le-row .k { color: #8a93a5; white-space: nowrap; }
+#tab-pnl .le-row .v {
+  color: #d7dbe3; text-align: right; font-variant-numeric: tabular-nums;
+}
+#tab-pnl .le-row .v.up, #tab-pnl .le-row .v .up { color: #34d399; }
+#tab-pnl .le-row .v.down, #tab-pnl .le-row .v .down { color: #f87171; }
+#tab-pnl .le-row .v.dim, #tab-pnl .le-row .v .dim { color: #6b7488; }
+#tab-pnl .le-row .v b { font-weight: 600; }
+#tab-pnl .le-note { color: #7c869a; font-size: 11px; line-height: 1.5; margin: 6px 0; }
+#tab-pnl .le-subhead {
+  margin: 10px 0 4px; font-size: 11px; letter-spacing: 0.06em;
+  text-transform: uppercase; color: #8a93a5;
+}
+#tab-pnl .le-journal { font-size: 11px; }
+#tab-pnl .le-jrow {
+  display: grid; gap: 4px; align-items: center;
+  padding: 3px 0; border-bottom: 1px solid #1c2130;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+#tab-pnl .le-jrow:last-child { border-bottom: none; }
+#tab-pnl .le-jrow.skipped { opacity: 0.55; }
+#tab-pnl .le-jrow > span { overflow: hidden; text-overflow: ellipsis; }
+#tab-pnl .le-jrow .le-num { text-align: right; }
+#tab-pnl .le-jrow .j-time { color: #6b7488; }
+#tab-pnl .le-jrow .j-state { color: #8a93a5; }
+#tab-pnl .le-jrow .j-side { font-weight: 600; }
+#tab-pnl .le-jrow .j-side.long  { color: #34d399; }
+#tab-pnl .le-jrow .j-side.short { color: #f87171; }
+#tab-pnl .le-jrow .up   { color: #34d399; }
+#tab-pnl .le-jrow .down { color: #f87171; }
+#tab-pnl .le-jrow .dim  { color: #6b7488; }
+#tab-pnl .pnl-head {
+  color: #6b7488; text-transform: uppercase; font-size: 10px;
+  letter-spacing: 0.05em;
+}
+
+/* One column shape per table. */
+#tab-pnl .pnl-tf   { grid-template-columns: 46px 1fr 1fr 62px 58px 58px; }
+#tab-pnl .pnl-pos  { grid-template-columns: 56px 44px 1fr 1fr 78px 1fr; }
+#tab-pnl .pnl-fill { grid-template-columns: 58px 44px 1fr 1fr 1fr; }
+#tab-pnl .pnl-sym  { grid-template-columns: 1fr 58px 62px 1fr 48px; }
+#tab-pnl .pnl-lead { grid-template-columns: 54px 72px 50px 1fr 68px 68px 74px 72px; }
+
+@media (max-width: 560px) {
+  #tab-pnl .pnl-tf   { grid-template-columns: 42px 1fr 1fr 54px; }
+  #tab-pnl .pnl-pos  { grid-template-columns: 52px 40px 1fr 1fr; }
+  #tab-pnl .pnl-fill { grid-template-columns: 54px 40px 1fr 1fr; }
+  #tab-pnl .pnl-sym  { grid-template-columns: 1fr 50px 1fr 44px; }
+  #tab-pnl .pnl-lead { grid-template-columns: 50px 66px 46px 1fr 70px; }
+  #tab-pnl .pnl-tf   > :nth-child(n+5),
+  #tab-pnl .pnl-pos  > :nth-child(n+5),
+  #tab-pnl .pnl-fill > :nth-child(n+5),
+  #tab-pnl .pnl-sym  > :nth-child(3),
+  #tab-pnl .pnl-lead > :nth-child(5),
+  #tab-pnl .pnl-lead > :nth-child(6) { display: none; }
+}

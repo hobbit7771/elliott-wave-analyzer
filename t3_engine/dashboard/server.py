@@ -32,7 +32,7 @@ import logging
 import os
 import re
 import time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import Body, FastAPI, HTTPException, Query
@@ -565,6 +565,184 @@ def live_ai_analysis(symbol: str, timeframe: Timeframe, candles: List) -> Option
         "analysed_at": cached.created_at,
         "candles_since": newer,
         "stale": newer > 0,
+    }
+
+
+def _position_row(position, mark: Optional[float]) -> Dict[str, Any]:
+    """One open position, with what it is worth RIGHT NOW.
+
+    Unrealized P&L needs a mark, and the mark is the last traded price of
+    the instrument - not the entry, and not the last CLOSED candle, which
+    on 4h can be hours stale. A position reported at its entry price is a
+    position that is never losing, which is the same failure the virtual
+    ledger's rules exist to prevent."""
+    side = getattr(position.side, "value", str(position.side))
+    unrealized = None
+    if mark is not None and position.quantity:
+        direction = 1.0 if str(side).upper().startswith("L") else -1.0
+        unrealized = (mark - position.entry_price) * position.quantity * direction
+    return {
+        "position_id": position.position_id,
+        "side": side,
+        "entry_price": position.entry_price,
+        "quantity": round(position.quantity, 8),
+        "initial_quantity": round(position.initial_quantity, 8),
+        "stop_loss": position.stop_loss,
+        # A leg carries a FRACTION of the remaining position, not a
+        # quantity - reporting a `quantity` field here would have been a
+        # silent None on every row.
+        "take_profits": [
+            {"price": getattr(leg, "price", None),
+             "fraction": getattr(leg, "fraction", None),
+             "label": getattr(leg, "label", None),
+             "filled": bool(getattr(leg, "filled", False))}
+            for leg in (position.take_profits or [])
+        ],
+        "opened_at": position.opened_at,
+        "wave_label": getattr(position.wave_label, "value", None),
+        "realized_pnl": round(position.realized_pnl, 6),
+        "unrealized_pnl": None if unrealized is None else round(unrealized, 6),
+        "mark": mark,
+        "mae": round(position.mae, 6), "mfe": round(position.mfe, 6),
+        "trailing_stop_active": bool(position.trailing_stop_active),
+    }
+
+
+def _engine_performance(symbol: str, engine: LiveTradingEngine) -> Dict[str, Any]:
+    """What one autostarted paper engine has actually done.
+
+    Every number here is read from the engine's own objects rather than
+    from a running total kept beside them, so a restart cannot make it
+    drift from what the position manager thinks."""
+    mark = None
+    try:
+        # The freshest price the session has seen. The forming bar knows
+        # it before any closed candle does.
+        for timeframe in engine.trading_timeframes:
+            forming = engine.candle_builder.current_candle(timeframe)
+            if forming is not None:
+                mark = forming.close
+                break
+        if mark is None:
+            for timeframe in engine.trading_timeframes:
+                history = engine.history.get(timeframe) or []
+                if history:
+                    mark = history[-1].close
+                    break
+    except Exception:                        # noqa: BLE001
+        mark = None
+
+    timeframes: Dict[str, Any] = {}
+    open_rows: List[Dict[str, Any]] = []
+    # NOT summed into a portfolio equity. Each timeframe is the SAME
+    # strategy running its own book off the same nominal capital, so
+    # adding five 10,000 books into "50,000" invents capital that was
+    # never allocated. What IS additive is the money made: realized and
+    # unrealized P&L across the books.
+    realized_total = unrealized_total = 0.0
+    for timeframe, backtest in engine.engines.items():
+        manager = backtest.position_manager
+        risk = backtest.risk_manager
+        opens = [p for p in manager.positions.values() if not p.closed]
+        rows = [_position_row(p, mark) for p in opens]
+        open_rows.extend({**row, "timeframe": timeframe.value} for row in rows)
+        realized = sum(p.realized_pnl for p in manager.closed_positions)
+        unrealized = sum(r["unrealized_pnl"] or 0.0 for r in rows)
+        realized_total += realized
+        unrealized_total += unrealized
+        timeframes[timeframe.value] = {
+            "equity": round(risk.equity, 4),
+            "initial_equity": round(risk.initial_equity, 4),
+            "peak_equity": round(risk.peak_equity, 4),
+            "open_positions": len(opens),
+            "closed_positions": len(manager.closed_positions),
+            "realized_pnl": round(realized, 6),
+            "unrealized_pnl": round(unrealized, 6),
+            "candles": len(engine.history.get(timeframe) or []),
+            "seeded": engine.seeded.get(timeframe, 0),
+            # Whether this timeframe is trading a saved AI count at all.
+            # Without one, in ai_only mode, it cannot open anything - and
+            # "no trades" then means "nothing to trade", not "no setups".
+            "ai_count": bool(engine.ai_counts.get(timeframe)),
+        }
+
+    fills = list(engine.fills)
+    exits = [f for f in fills if f["event"] != "ENTRY"]
+    return {
+        "symbol": symbol,
+        "running": symbol in _live_tasks and not _live_tasks[symbol].done(),
+        "mode": "paper",
+        "started_at": _live_started_at.get(symbol),
+        "error": _live_errors.get(symbol),
+        "trades_received": engine.trades_received,
+        "live_source": engine.live_source,
+        "mark": mark,
+        "ai_only": engine.ai_only,
+        # Per-timeframe capital, stated once, because every book starts
+        # from the same figure and adding them would be fiction.
+        "equity_per_timeframe": round(
+            next(iter(engine.engines.values())).risk_manager.initial_equity, 4
+        ) if engine.engines else 0.0,
+        "realized_pnl": round(realized_total, 6),
+        "unrealized_pnl": round(unrealized_total, 6),
+        "pnl": round(realized_total + unrealized_total, 6),
+        "open_positions": open_rows,
+        "entries": sum(1 for f in fills if f["event"] == "ENTRY"),
+        "exits": len(exits),
+        "take_profits": sum(1 for f in exits if f["event"] == "TP_HIT"),
+        "stops": sum(1 for f in exits if f["event"] == "STOP_LOSS"),
+        "timeframes": timeframes,
+        "fills": fills[-40:][::-1],
+        # Survives a restart; the in-memory `fills` above does not.
+        "journal": trade_journal.summary_for(engine.live_source, symbol),
+    }
+
+
+@app.get("/api/live/performance")
+def live_performance(symbol: Optional[str] = Query(None)) -> Dict[str, Any]:
+    """Where the algorithm is actually trading, and what it has made.
+
+    Two DIFFERENT books, reported side by side and never added together:
+
+      `paper`   the Elliott strategy running on closed candles through
+                the same BacktestEngine a backtest uses - positions,
+                stops, take-profit legs, equity.
+      `lead`    the Lead Engine's virtual ledger: its own microstructure
+                signals marked against the live order book, entered at
+                the next fresh book after the signal. Minutes, not hours.
+
+    They disagree by construction - different signals, different horizons,
+    different instruments - and a single blended number would hide which
+    of the two is working."""
+    wanted = normalize_symbol(symbol) if symbol else None
+    paper = {name: _engine_performance(name, engine)
+             for name, engine in _live_engines.items()
+             if wanted is None or name == wanted}
+
+    lead: Dict[str, Any] = {}
+    try:
+        if lead_engine_config.enabled():
+            engine = get_lead_engine()
+            for name in engine.symbols():
+                if wanted is not None and name != wanted:
+                    continue
+                payload = engine.get_virtual_trades(name, limit=40)
+                if payload.get("tracked"):
+                    lead[name] = {"summary": payload["summary"],
+                                  "journal": payload["journal"]}
+    except Exception:                        # noqa: BLE001
+        logger.debug("live performance: lead ledger unavailable", exc_info=True)
+
+    return {
+        "server_time": int(time.time() * 1000),
+        "autostart": live_autostart_symbols(),
+        "paper": paper,
+        "lead": lead,
+        # Said in the payload, not only in the UI, because anything that
+        # reads this endpoint should have to see it.
+        "disclaimer": ("PAPER ONLY. No order is placed on any exchange, "
+                       "in either book. The application holds no exchange "
+                       "credential and has no write path to one."),
     }
 
 

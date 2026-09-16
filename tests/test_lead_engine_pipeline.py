@@ -16,6 +16,7 @@ Two causes, both fixed here and both tested:
      and sorted the whole book about fifty times per call.
 """
 
+from collections import deque
 import json
 import math
 import time
@@ -628,3 +629,39 @@ def test_the_first_sync_is_not_counted_as_a_resync():
     book.reset("frames dropped")
     assert book.resyncs == 1
     assert book.sequence_stats()["desync_reason"] == "frames dropped"
+
+
+def test_the_heartbeat_reports_recent_freshness_as_well_as_lifetime():
+    """"Median under 250ms AND NOT DRIFTING" needs two statistics.
+
+    A percentile computed since process start lags by construction and
+    never forgets a bad minute. On the live run one 1.2-second upstream
+    stall - twenty seconds, self-recovered, nothing dropped - pushed the
+    cumulative p95 from 702ms to 832ms and left it there for the rest of
+    the run. Read literally that is an engine degrading; it was a network
+    hiccup that had already passed. The recent window is what makes the
+    difference visible.
+    """
+    from t3_engine.lead_engine import storage as storage_module
+
+    recorder = storage_module.Recorder.__new__(storage_module.Recorder)
+    recorder._book_ages = deque(maxlen=4_000)
+
+    now = time.time()
+    # Ten minutes ago: one very bad patch. Just now: healthy.
+    for _ in range(50):
+        recorder._book_ages.append((now - 600, 2_000.0))
+    for _ in range(50):
+        recorder._book_ages.append((now - 5, 100.0))
+
+    lifetime = recorder._ages()
+    recent = recorder._ages(storage_module.Recorder.RECENT_WINDOW_SECONDS)
+    assert len(lifetime) == 100
+    assert len(recent) == 50, "the ten-minute-old spike is outside the window"
+
+    percentile = storage_module.Recorder._percentile
+    # The lifetime median is dragged upward by a patch that is long over.
+    assert percentile(lifetime, 0.95) == 2_000.0
+    # The recent one says what is true now.
+    assert percentile(recent, 0.5) == 100.0
+    assert percentile(recent, 0.95) == 100.0

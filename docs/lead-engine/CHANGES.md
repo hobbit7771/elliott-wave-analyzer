@@ -304,3 +304,110 @@ The module holds no credential, imports no HTTP client, and contains no
 order verb; a test asserts each of those on the source. Like everything in
 the v1 namespace the endpoint is a `GET` that reports what the paper
 positions did — it cannot open, close or size anything on an exchange.
+
+---
+
+# Round 6 — a surface for the money
+
+Both books were running and neither had one. "я не вижу где алгоритм
+торгует, нет ни вкладки доходности ничего нет" was a correct reading of
+the application: the paper engine's equity, positions and fills existed
+only inside the process, and the virtual ledger was a card at the bottom
+of a long panel. A paper engine whose P&L you cannot see is
+indistinguishable from one that is not trading at all.
+
+## Added
+
+**`GET /api/live/performance`** — both books, side by side, never summed:
+
+* `paper` — the Elliott strategy on CLOSED candles through the same
+  `BacktestEngine` a backtest uses: equity per timeframe, open positions
+  marked to the live price, take-profit legs, fills, realized and
+  unrealized P&L, and the database journal that survives a restart.
+* `lead` — the microstructure ledger from Round 5.
+
+They disagree by construction — different signals, different horizons,
+different instruments — so a single blended number would hide which of the
+two is working. There isn't one, and a test asserts there isn't.
+
+**The Доходность tab** (`static/pnl.js`), polling only while visible.
+
+## Three things it would have been easy to get wrong
+
+**An open position marked at its entry price never loses.** The mark is
+the freshest price the session has seen — the forming bar, which knows it
+before any closed candle does — not the entry and not the last closed
+candle, which on 4h can be hours stale.
+
+**Equity is not summed across timeframes.** Every timeframe runs its own
+book off the same nominal capital, so five 10 000 books are not 50 000 of
+capital; reporting that invents money that was never allocated. What IS
+additive is the money made, and that is what the card shows.
+
+**A take-profit leg carries a `fraction`, not a `quantity`.** Reporting a
+`quantity` field would have been a silent `None` on every row.
+
+**An empty journal is explained, not left blank.** In `ai_only` mode a
+timeframe cannot open anything until a saved AI count exists for it, and
+the strategy trades closed candles on 5m and up — so twenty minutes of
+uptime is a handful of bars, not a handful of missed setups. The panel
+says which of those it is.
+
+## Fixed: two counters that could not answer their own question
+
+**`resyncs` counted the first sync.** The engine resets every book before
+subscribing — correct, and a no-op on an empty book — but the counter
+incremented anyway, so a clean seventeen-minute run reported `resyncs=7`
+on seven symbols before the first frame had arrived. Read literally that
+failed an acceptance criterion the run had passed. A reset of a book that
+was never synced is no longer counted.
+
+**The freshness percentiles were computed since process start**, which
+cannot answer "median under 250ms AND NOT DRIFTING": such a statistic lags
+by construction and never forgets a bad minute. On the live run one
+1.2-second stall on the link to Bybit — twenty seconds, self-recovered,
+nothing dropped, no resync — pushed the cumulative p95 from 702ms to
+832ms and left it there for the rest of the run, which reads as an engine
+degrading and was nothing of the sort. The heartbeat now reports a
+five-minute window alongside the lifetime figures.
+
+**`data_failure` was a bare number.** One flickering symbol out of seven
+looked identical to a feed-wide problem. The line now names the symbol and
+the signal machine's own reason — which is how the stall above was
+diagnosed in one reading rather than guessed at.
+
+## Also in Round 6 — the engine as a ChatGPT app
+
+`lead_engine_mcp/widgets.py`. A connector returns JSON and the model reads
+it out loud; an app returns a component. Three tools now render one:
+`get_market_snapshot`, `get_virtual_trades`, `get_health`.
+
+Served as MCP resources (`ui://widget/<name>.html`, mimeType
+`text/html+skybridge`), opted into per tool through
+`_meta["openai/outputTemplate"]`. `initialize` advertises the `resources`
+capability, so a host that knows nothing about widgets never asks and
+receives exactly the JSON it received before.
+
+**The split that keeps it cheap.** `structuredContent` reaches the widget
+AND the model's context; `_meta` reaches the widget only. So the summary
+goes in the first and the forty-row journal in the second — putting rows
+in `structuredContent` is the commonest way an app becomes slow and
+expensive without ever looking wrong.
+
+**No widget touches the network.** They render from `toolOutput` and
+nothing else. A widget that fetched would need the API token inside the
+browser, publishing a credential to everyone who can see the
+conversation, and could show the person something the model never saw. A
+test asserts every network primitive is absent from the widget HTML, and
+another re-asserts that this layer, like the rest of the package, imports
+no `t3_engine`.
+
+**Protocol negotiation**, found while checking that a host could actually
+connect. `initialize` answered with a hard-coded `2024-11-05` whatever the
+client asked for. The spec has the client state its version and the server
+answer with the one it will speak, so a client on a newer revision was
+being told this server only does an older one — and a strict host can
+refuse over a difference that does not exist, since every method here
+behaves identically on all three revisions. The server now echoes the
+client's version when it is one of `2025-06-18`, `2025-03-26` or
+`2024-11-05`, and otherwise answers with its newest.

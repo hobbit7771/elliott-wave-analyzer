@@ -81,7 +81,7 @@ committed, never in a frontend bundle, and never returned by any response.
 | | |
 | --- | --- |
 | Transport | stdio, one JSON-RPC message per line |
-| Protocol version | `2024-11-05` |
+| Protocol version | negotiated: `2025-06-18`, `2025-03-26` or `2024-11-05` |
 | Server name | `lead-engine` |
 | Capabilities | `{"tools": {"listChanged": false}}` |
 | Methods | `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, `ping` |
@@ -131,6 +131,38 @@ Seventeen, all reads. `timeframe` accepts `1m 3m 5m 15m 30m 1h 4h 1d`.
   PAPER: those positions exist nowhere but that ledger. Read
   `abandoned_on_gap` and `gap_uncertain_exits` alongside the P&L — they
   say how much of the sample the stream could actually vouch for.
+
+## 5a. As a ChatGPT app
+
+The same server is also an Apps SDK app. Three tools return a COMPONENT
+as well as data, rendered in the conversation:
+
+| Tool | Widget | Shows |
+| --- | --- | --- |
+| `get_market_snapshot` | `ui://widget/market-snapshot.html` | state badge, pressure gauges, the five layers, freshness |
+| `get_virtual_trades` | `ui://widget/virtual-trades.html` | the paper ledger: net P&L, fees, and the journal |
+| `get_health` | `ui://widget/feed-health.html` | per-symbol book age, trade age, and why signals are off |
+
+Served through `resources/list` and `resources/read` with mimeType
+`text/html+skybridge`; `initialize` advertises the `resources` capability,
+so a host that knows nothing about widgets simply never asks and gets the
+plain JSON it always got.
+
+**Two channels, different audiences.** A tool result carries both:
+
+* `structuredContent` reaches the widget **and the model's context**, so
+  it holds the summary — never the rows. A forty-row journal there is
+  forty rows of tokens on every call, for a table the model was not asked
+  to read.
+* `_meta` reaches the widget only, and carries the journal, the layer
+  ladder and anything else that is drawn rather than reasoned about.
+
+**No widget touches the network.** They render from `toolOutput` and
+nothing else: no fetch, no CDN, no external stylesheet. A widget that
+fetched would need the API token inside the browser — publishing a
+credential to everyone who can see the conversation — and could show
+something the model never saw. A test asserts the absence of every
+network primitive in the widget HTML.
 
 ## 6. What a tool returns
 

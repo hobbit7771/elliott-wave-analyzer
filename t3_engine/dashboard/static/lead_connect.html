@@ -38,7 +38,17 @@
       <pre class="cnCode" id="cnMcpUrl">—</pre>
       <div class="le-note">Транспорт — JSON-RPC 2.0 поверх HTTP POST. Методы:
         <code>initialize</code>, <code>tools/list</code>, <code>tools/call</code>,
+        <code>resources/list</code>, <code>resources/read</code>,
         <code>ping</code>. 17 инструментов, все только на чтение.</div>
+      <div class="le-note">
+        <b>Это приложение, а не просто коннектор.</b> Три инструмента
+        возвращают не только JSON, но и виджет, который рисуется прямо в
+        диалоге: <code>get_market_snapshot</code> — давление, сигнал и
+        слои; <code>get_virtual_trades</code> — журнал виртуальных сделок
+        с P&amp;L; <code>get_health</code> — свежесть данных по всем
+        инструментам. Виджеты рисуются только из ответа инструмента:
+        они ничего не загружают и не содержат ключа.
+      </div>
     </div>
 
     <div class="le-card">

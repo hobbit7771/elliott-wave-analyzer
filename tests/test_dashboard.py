@@ -1437,10 +1437,19 @@ def test_polling_only_sends_progress_the_caller_does_not_have():
     with patch.object(server_module, "run_analyst", side_effect=run):
         body = client.post("/api/ai/analyst/start",
                            json={"source": "synthetic", "cycles": 2}).json()
+        # Wait for the CONDITION, not for a fixed 200ms. The worker runs
+        # on its own thread, and under a loaded full-suite run it can
+        # still be starting when a flat sleep expires - which failed this
+        # test once in 900 and passed it every time it was run alone.
         import time
-        time.sleep(0.2)
-        first = client.get("/api/ai/job", params={"job_id": body["job_id"]}).json()
-        texts = [line["text"] for line in first["progress"]]
+        deadline = time.time() + 5.0
+        while True:
+            first = client.get("/api/ai/job",
+                               params={"job_id": body["job_id"]}).json()
+            texts = [line["text"] for line in first["progress"]]
+            if ("step one" in texts and "step two" in texts) or time.time() > deadline:
+                break
+            time.sleep(0.02)
         assert "step one" in texts and "step two" in texts
         # A twelve-minute run must not re-send its whole transcript every
         # few seconds.

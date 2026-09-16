@@ -32,13 +32,39 @@ from typing import Any, Dict, Optional
 from lead_engine_mcp import SCHEMA_VERSION, __version__
 from lead_engine_mcp.client import LeadEngineClient
 from lead_engine_mcp.tools import call_tool, tool_list
+from lead_engine_mcp import widgets
 
 # stderr, never stdout. See the module docstring.
 logging.basicConfig(stream=sys.stderr, level=logging.INFO,
                     format="%(asctime)s %(levelname)s lead_engine_mcp: %(message)s")
 logger = logging.getLogger(__name__)
 
-PROTOCOL_VERSION = "2024-11-05"
+# Newest first. The protocol revisions this server actually implements -
+# the method set below is identical across all of them, which is why more
+# than one can be offered honestly.
+SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
+
+# What we answer with when the client asks for nothing in particular.
+PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
+
+
+def negotiate_protocol(requested: Any) -> str:
+    """The version this session will use.
+
+    The spec has the client state its version in `initialize` and the
+    server answer with the one it will speak. Answering with a fixed
+    string regardless - which this did - means a client on a newer
+    revision is told the server only does an older one, and a strict host
+    (ChatGPT's app runtime among them) can refuse the connection over a
+    difference that does not exist: every method here behaves the same on
+    all three revisions.
+
+    So: echo the client's version when it is one we support, and
+    otherwise answer with our newest and let the client decide."""
+    wanted = str(requested or "").strip()
+    if wanted in SUPPORTED_PROTOCOL_VERSIONS:
+        return wanted
+    return PROTOCOL_VERSION
 
 SERVER_INFO = {"name": "lead-engine", "version": __version__}
 
@@ -75,8 +101,13 @@ def handle(message: Dict[str, Any],
 
     if method == "initialize":
         return _result(request_id, {
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {"tools": {"listChanged": False}},
+            "protocolVersion": negotiate_protocol(params.get("protocolVersion")),
+            # `resources` is what makes this an APP rather than a
+            # connector: the widgets in widgets.py are served through it,
+            # and a host that does not support them simply never asks.
+            "capabilities": {"tools": {"listChanged": False},
+                             "resources": {"listChanged": False,
+                                           "subscribe": False}},
             "serverInfo": SERVER_INFO,
             "instructions": INSTRUCTIONS,
         })
@@ -90,19 +121,42 @@ def handle(message: Dict[str, Any],
     if method == "tools/list":
         return _result(request_id, {"tools": tool_list()})
 
+    if method == "resources/list":
+        return _result(request_id, {"resources": widgets.resource_list()})
+
+    if method == "resources/read":
+        uri = str(params.get("uri") or "")
+        found = widgets.resource_read(uri)
+        if found is None:
+            return _error(request_id, -32602, f"unknown resource {uri!r}")
+        return _result(request_id, {"contents": [found]})
+
+    # Templates are a discovery convenience; this server has a fixed set,
+    # so the honest answer is an empty list rather than an error a host
+    # would log on every connection.
+    if method == "resources/templates/list":
+        return _result(request_id, {"resourceTemplates": []})
+
     if method == "tools/call":
         name = params.get("name")
         arguments = params.get("arguments") or {}
         payload = call_tool(name, arguments, client)
         failed = isinstance(payload, dict) and "error" in payload
-        return _result(request_id, {
+        # structuredContent reaches the model AND the widget; _meta
+        # reaches the widget only. See widgets.split_payload - the rows
+        # go in _meta so they are not re-read into context on every call.
+        split = widgets.split_payload(str(name), payload)
+        result: Dict[str, Any] = {
             # Content as compact JSON text: an agent parses it, and a
             # human reading a transcript can still see what came back.
             "content": [{"type": "text",
                          "text": json.dumps(payload, separators=(",", ":"), default=str)}],
             "isError": bool(failed),
-            "_meta": {"schema_version": SCHEMA_VERSION},
-        })
+            "_meta": {"schema_version": SCHEMA_VERSION, **split["meta"]},
+        }
+        if not failed and split["structured"]:
+            result["structuredContent"] = split["structured"]
+        return _result(request_id, result)
 
     if request_id is None:
         return None                     # an unknown notification is ignored
