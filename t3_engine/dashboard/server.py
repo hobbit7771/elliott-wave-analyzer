@@ -698,6 +698,30 @@ def _engine_performance(symbol: str, engine: LiveTradingEngine) -> Dict[str, Any
     }
 
 
+def _research_paper_block() -> Dict[str, Any]:
+    """The research PAPER terminal's live state, for the dashboard.
+
+    A THIRD book, reported beside the other two and never added to them:
+    these are the pre-registered microstructure hypotheses trading
+    through the execution simulator, on frozen parameters. Mixing them
+    into one number would hide which of the three is doing anything."""
+    try:
+        from t3_engine.research import paper as research_paper
+    except Exception:                           # noqa: BLE001
+        return {"available": False, "traders": {}}
+    traders = research_paper.get_traders()
+    if not traders:
+        return {"available": False, "traders": {},
+                "note": "RESEARCH_PAPER_ENABLED is not set on this deployment."}
+    out: Dict[str, Any] = {"available": True, "traders": {}}
+    for key, trader in traders.items():
+        try:
+            out["traders"][key] = trader.report()
+        except Exception:                       # noqa: BLE001
+            out["traders"][key] = {"error": "unreadable"}
+    return out
+
+
 @app.get("/api/live/performance")
 def live_performance(symbol: Optional[str] = Query(None)) -> Dict[str, Any]:
     """Where the algorithm is actually trading, and what it has made.
@@ -737,6 +761,7 @@ def live_performance(symbol: Optional[str] = Query(None)) -> Dict[str, Any]:
         "server_time": int(time.time() * 1000),
         "autostart": live_autostart_symbols(),
         "paper": paper,
+        "research": _research_paper_block(),
         "lead": lead,
         # Said in the payload, not only in the UI, because anything that
         # reads this endpoint should have to see it.
