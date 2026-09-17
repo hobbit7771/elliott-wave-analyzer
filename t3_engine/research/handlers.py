@@ -306,10 +306,159 @@ def handle_stress(spec: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def handle_microstructure(spec: Dict[str, Any]) -> Dict[str, Any]:
+    """Measure the market facts the cost model rests on.
+
+    WHY THIS IS WORTH DOING ON A SHORT WINDOW, when a P&L is not. A
+    strategy result over forty minutes is one draw from one regime and
+    says almost nothing. But the DISTRIBUTION OF MARKET STATE over those
+    forty minutes is a real measurement of that period - the spread was
+    what it was - and two of the three hypotheses can be falsified by it
+    without a single simulated trade:
+
+      * If the spread is below the maker fee floor most of the time,
+        passive spread capture cannot work here however it is
+        parameterised. That follows from arithmetic, not from a backtest.
+      * If the trigger conjunction for A or C never occurs, the strategy
+        is untestable on this instrument rather than unprofitable on it,
+        and those are different answers.
+
+    It also measures ADVERSE SELECTION directly, which is the number the
+    cost model currently ASSUMES at half the spread. Where the mid goes
+    after an aggressive trade IS the cost a resting order on that side
+    would have paid, and it is measurable from the tape alone.
+    """
+    symbol = str(spec["symbol"]).upper()
+    index = segment_index(symbol, int(spec.get("from_ms") or 0),
+                          int(spec.get("to_ms") or 0))
+    if not index:
+        raise ValueError("no segments match the requested window")
+    ids = [r["segment_id"] for r in index]
+    cap = int(spec.get("max_frames") or jobs.MAX_FRAMES_PER_JOB)
+
+    spreads: List[float] = []
+    depth_bid: List[float] = []
+    depth_ask: List[float] = []
+    trade_sizes: List[float] = []
+    # (aggressor side, mid at the trade) with the mid that followed
+    marks: List[Tuple[str, float, int]] = []
+    horizons = [int(h) for h in (spec.get("horizons_ms") or [1_000, 5_000, 30_000])]
+    adverse: Dict[int, List[float]] = {h: [] for h in horizons}
+    mids: List[Tuple[int, float]] = []
+    book_states = 0
+    trades = 0
+
+    for event in ds.events_from_frames(_capped(stream_frames(ids), cap), symbol):
+        if event.kind == "book":
+            book = event.payload
+            if not book.valid:
+                continue
+            book_states += 1
+            spread = book.spread_bps
+            if spread is not None:
+                spreads.append(spread)
+            depth_bid.append(book.depth_within_bps("bid", 10.0))
+            depth_ask.append(book.depth_within_bps("ask", 10.0))
+            mids.append((event.exchange_ms or event.recv_ms, book.mid))
+        elif event.kind == "trade":
+            trade = event.payload
+            trades += 1
+            trade_sizes.append(trade.size)
+            if mids:
+                marks.append((trade.side, mids[-1][1],
+                              event.exchange_ms or event.recv_ms))
+
+    # Adverse selection: for a trade whose aggressor BOUGHT, a resting
+    # ASK was lifted. If the mid then rises, that seller was picked off,
+    # and by how much is exactly the cost the cost model assumes.
+    index_by_ms = mids
+    for side, mid_then, at_ms in marks:
+        for horizon in horizons:
+            later = _mid_at(index_by_ms, at_ms + horizon)
+            if later is None or mid_then <= 0:
+                continue
+            move_bps = 10_000.0 * (later - mid_then) / mid_then
+            # Positive = the resting side that was hit lost.
+            adverse[horizon].append(move_bps if side == "Buy" else -move_bps)
+
+    fee_floor = 2 * 2.0          # two maker legs at the published 2bps
+    below_floor = sum(1 for s in spreads if s < fee_floor)
+    out: Dict[str, Any] = {
+        "symbol": symbol,
+        "segments": len(index),
+        "book_states": book_states,
+        "trades": trades,
+        "spread_bps": _describe(spreads),
+        "spread_below_maker_fee_floor_pct": round(
+            100.0 * below_floor / len(spreads), 2) if spreads else None,
+        "maker_fee_floor_bps": fee_floor,
+        "depth_10bps_bid": _describe(depth_bid),
+        "depth_10bps_ask": _describe(depth_ask),
+        "trade_size": _describe(trade_sizes),
+        "adverse_selection_bps": {
+            str(h): _describe(values) for h, values in adverse.items()},
+    }
+    out["verdict"] = _microstructure_verdict(out)
+    return out
+
+
+def _mid_at(mids: Sequence[Tuple[int, float]], at_ms: int) -> Optional[float]:
+    """The first mid stamped at or after `at_ms`. Strictly forward-looking
+    ON PURPOSE - this measures what happened next, which is the whole
+    point of an adverse-selection estimate - and it is never fed to a
+    strategy."""
+    low, high = 0, len(mids)
+    while low < high:
+        middle = (low + high) // 2
+        if mids[middle][0] < at_ms:
+            low = middle + 1
+        else:
+            high = middle
+    return mids[low][1] if low < len(mids) else None
+
+
+def _describe(values: Sequence[float]) -> Dict[str, Any]:
+    if not values:
+        return {"n": 0}
+    ordered = sorted(values)
+
+    def pct(p: float) -> float:
+        return ordered[min(len(ordered) - 1,
+                           int(round(p / 100.0 * (len(ordered) - 1))))]
+
+    total = sum(values)
+    return {"n": len(values), "mean": round(total / len(values), 4),
+            "p05": round(pct(5), 4), "p25": round(pct(25), 4),
+            "median": round(pct(50), 4), "p75": round(pct(75), 4),
+            "p95": round(pct(95), 4), "max": round(ordered[-1], 4)}
+
+
+def _microstructure_verdict(measured: Dict[str, Any]) -> Dict[str, Any]:
+    """What these distributions already rule out."""
+    out: Dict[str, Any] = {}
+    spread = measured.get("spread_bps") or {}
+    below = measured.get("spread_below_maker_fee_floor_pct")
+    if spread.get("n"):
+        out["spread_capture"] = (
+            f"median spread {spread['median']}bps against a "
+            f"{measured['maker_fee_floor_bps']}bps maker fee floor; "
+            f"{below}% of observed books are below it")
+        out["spread_capture_viable"] = bool(
+            spread.get("median", 0.0) > measured["maker_fee_floor_bps"])
+    adverse = (measured.get("adverse_selection_bps") or {})
+    for horizon, stats in adverse.items():
+        if stats.get("n"):
+            out[f"adverse_selection_{horizon}ms"] = (
+                f"median {stats['median']}bps, mean {stats['mean']}bps "
+                f"over {stats['n']} trades")
+    return out
+
+
 def build() -> Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]]:
     return {
         "manifest": handle_manifest,
         "backtest": handle_backtest,
         "ablation": handle_ablation,
         "stress": handle_stress,
+        "microstructure": handle_microstructure,
     }
