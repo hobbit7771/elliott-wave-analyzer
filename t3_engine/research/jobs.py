@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 import time
 import traceback
@@ -80,18 +81,40 @@ def claim_next() -> Optional[Dict[str, Any]]:
 
 
 def finish(job: Dict[str, Any], result: Dict[str, Any]) -> None:
-    _rest().insert(TABLE_JOBS, [{**job, "status": DONE, "result": result,
+    _rest().insert(TABLE_JOBS, [{**job, "status": DONE,
+                                 "result": json_safe(result),
+                                 "attempts": int(job.get("attempts") or 0) + 1,
                                  "error": "", "finished_at": _now()}],
                    on_conflict="job_id")
 
 
 def fail(job: Dict[str, Any], error: str) -> None:
+    # The attempt counter is written back INCREMENTED. Writing the row as
+    # it was claimed reset it, so a job that failed three times still read
+    # as having been tried none and would retry forever.
     _rest().insert(TABLE_JOBS, [{**job, "status": FAILED, "error": error[:4000],
+                                 "attempts": int(job.get("attempts") or 0) + 1,
                                  "finished_at": _now()}], on_conflict="job_id")
 
 
+def json_safe(value: Any) -> Any:
+    """Strip what JSON cannot carry, rather than losing the whole row.
+
+    A single infinity - from a profit factor with no losing trade in the
+    sample - made the encoder reject the entire experiment, so a run that
+    had completed correctly was recorded as a failure. Non-finite floats
+    become null and the caller's own field says why."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(k): json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(v) for v in value]
+    return value
+
+
 def record_experiment(record) -> None:
-    _rest().insert(TABLE_EXPERIMENTS, [record.as_row()],
+    _rest().insert(TABLE_EXPERIMENTS, [json_safe(record.as_row())],
                    on_conflict="experiment_id")
 
 
