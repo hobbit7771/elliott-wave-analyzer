@@ -389,3 +389,63 @@ def test_a_failed_job_writes_its_attempt_count_back_incremented():
 
     assert written[0]["attempts"] == 3 and written[0]["status"] == "failed"
     assert written[1]["attempts"] == 1 and written[1]["status"] == "done"
+
+
+# ---- the microstructure measurement --------------------------------------
+
+def test_the_adverse_selection_probe_looks_strictly_forward():
+    """It measures what happened NEXT, which is the whole point - and it
+    is never fed to a strategy, which is why that is allowed here and
+    nowhere else."""
+    from t3_engine.research.handlers import _mid_at
+
+    mids = [(100, 5.0), (200, 5.1), (300, 5.2)]
+    assert _mid_at(mids, 150) == 5.1          # the first stamp AT OR AFTER
+    assert _mid_at(mids, 200) == 5.1
+    assert _mid_at(mids, 301) is None         # never invents one
+
+
+def test_the_probe_signs_adverse_selection_against_the_side_that_was_hit():
+    """A buyer lifting the ask means a resting SELLER was hit. If the mid
+    then rises, that seller was picked off - and the sign has to say so,
+    or the measurement reads backwards."""
+    from t3_engine.research import handlers
+
+    mids = [(0, 100.0), (1_000, 101.0)]        # the mid rose 100 bps
+    up = 10_000.0 * (101.0 - 100.0) / 100.0
+    # Aggressor bought -> resting ask was hit -> the move is its loss.
+    assert up > 0
+    # Aggressor sold -> resting bid was hit -> the same move is its gain.
+    assert -up < 0
+    assert handlers._mid_at(mids, 1_000) == 101.0
+
+
+def test_describe_reports_a_distribution_not_a_single_number():
+    from t3_engine.research.handlers import _describe
+
+    stats = _describe([1, 2, 3, 4, 5, 6, 7, 8, 9, 100])
+    assert stats["n"] == 10
+    assert stats["median"] == 5
+    assert stats["max"] == 100
+    # The mean is dragged by the outlier and the median is not; both are
+    # reported so the difference is visible.
+    assert stats["mean"] > stats["median"]
+    assert _describe([]) == {"n": 0}
+
+
+def test_the_verdict_calls_spread_capture_unviable_below_the_fee_floor():
+    from t3_engine.research.handlers import _microstructure_verdict
+
+    tight = _microstructure_verdict({
+        "spread_bps": {"n": 100, "median": 1.8, "mean": 1.9},
+        "spread_below_maker_fee_floor_pct": 96.0,
+        "maker_fee_floor_bps": 4.0,
+        "adverse_selection_bps": {}})
+    assert tight["spread_capture_viable"] is False
+
+    wide = _microstructure_verdict({
+        "spread_bps": {"n": 100, "median": 12.0, "mean": 13.0},
+        "spread_below_maker_fee_floor_pct": 4.0,
+        "maker_fee_floor_bps": 4.0,
+        "adverse_selection_bps": {}})
+    assert wide["spread_capture_viable"] is True
