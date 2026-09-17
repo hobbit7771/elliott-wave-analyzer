@@ -212,9 +212,12 @@ def assess(report: Dict[str, Any], rows: Sequence[JournalRow],
     checks["net_pnl_positive"] = report.get("net_pnl", 0.0) > criteria.min_net_pnl
     checks["expectancy_positive"] = (report.get("expectancy_bps", 0.0)
                                      > criteria.min_expectancy_bps)
-    pf = report.get("profit_factor", 0.0)
-    checks["profit_factor"] = (pf >= criteria.min_profit_factor
-                               if pf != float("inf") else True)
+    pf = report.get("profit_factor")
+    # An UNDEFINED profit factor is not a pass. A sample with no losing
+    # trade is a sample too small to have found one, and treating that as
+    # infinite quality is how a five-trade run gets approved.
+    checks["profit_factor"] = bool(pf is not None
+                                   and pf >= criteria.min_profit_factor)
     groups = episodes(closed)
     checks["enough_episodes"] = len(groups) >= criteria.min_episodes
 

@@ -309,3 +309,83 @@ def test_the_classifier_accepts_irregular_stamps_with_real_size_entropy():
     manifest = ds.describe(frames, name="irregular", source="test",
                            provenance="test")
     assert manifest.classification == ds.REAL_CAPTURE, manifest.warnings
+
+
+# ---- what JSON cannot carry ----------------------------------------------
+
+def test_a_profit_factor_with_no_losses_is_undefined_not_infinite():
+    """"No losing trade yet" is not "infinitely profitable" - it is a
+    sample too small to have found one. And infinity is not JSON, so
+    emitting it destroyed the experiment row it was meant to describe:
+    a backtest that had run correctly was recorded as a failure."""
+    from t3_engine.research.execution import Fill
+    from t3_engine.research.portfolio import Portfolio
+
+    portfolio = Portfolio(strategy_version="v", config={})
+    entry = Fill("f1", "o1", "X", "Buy", 100.0, 1.0, "taker", 1_000, fee=0.05)
+    exit_ = Fill("f2", "o2", "X", "Sell", 110.0, 1.0, "taker", 2_000, fee=0.05)
+    portfolio.open_position(symbol="X", direction=LONG, fills=[entry],
+                            signal_id="s")
+    portfolio.close_position("X", fills=[exit_], reason="TARGET")
+
+    report = portfolio.report()
+    assert report["profit_factor"] is None
+    assert "no losing trades" in report["profit_factor_undefined_reason"]
+
+    import json
+    json.dumps(report)          # would have raised before
+
+
+def test_an_undefined_profit_factor_does_not_pass_acceptance():
+    """Otherwise a five-trade run with no loser gets approved."""
+    from t3_engine.research.portfolio import JournalRow
+
+    rows = [JournalRow(trade_id=f"t{i}", strategy_version="v", config_hash="c",
+                       signal_id="s", symbol="X", direction=LONG, qty=1.0,
+                       entry_at_ms=i * 3_600_000, entry_price=100.0,
+                       entry_liquidity="taker", entry_order_id="o",
+                       entry_fill_ids=["f"], exit_at_ms=i * 3_600_000 + 60_000,
+                       exit_price=101.0, exit_reason="TARGET", net_pnl=1.0)
+            for i in range(5)]
+    verdict = bt.assess({"net_pnl": 5.0, "expectancy_bps": 10.0,
+                         "profit_factor": None},
+                        rows, bt.block_bootstrap(bt.episode_returns(rows)))
+    assert verdict["checks"]["profit_factor"] is False
+    assert verdict["verdict"] != "CONFIRMED_ON_HELD_OUT_DATA"
+
+
+def test_json_safe_strips_non_finite_floats_without_losing_the_row():
+    import json
+
+    from t3_engine.research.jobs import json_safe
+
+    payload = {"ok": 1.5, "inf": float("inf"), "nan": float("nan"),
+               "nested": {"list": [1.0, float("-inf")]}, "text": "fine"}
+    safe = json_safe(payload)
+    assert safe == {"ok": 1.5, "inf": None, "nan": None,
+                    "nested": {"list": [1.0, None]}, "text": "fine"}
+    json.dumps(safe)
+
+
+def test_a_failed_job_writes_its_attempt_count_back_incremented():
+    """Writing the row as it was claimed reset the counter, so a job that
+    failed three times still read as having been tried none - and would
+    retry forever."""
+    from t3_engine.research import jobs
+
+    written = []
+
+    class FakeRest:
+        def insert(self, table, rows, on_conflict=None):
+            written.extend(rows)
+
+    original = jobs._rest
+    jobs._rest = lambda: FakeRest()
+    try:
+        jobs.fail({"job_id": "j1", "attempts": 2}, "boom")
+        jobs.finish({"job_id": "j2", "attempts": 0}, {"ok": True})
+    finally:
+        jobs._rest = original
+
+    assert written[0]["attempts"] == 3 and written[0]["status"] == "failed"
+    assert written[1]["attempts"] == 1 and written[1]["status"] == "done"

@@ -378,8 +378,16 @@ class Portfolio:
             "expectancy_bps": round(sum(bps) / len(bps), 4) if bps else 0.0,
             "avg_win": round(gross_win / len(wins), 6) if wins else 0.0,
             "avg_loss": round(-gross_loss / len(losses), 6) if losses else 0.0,
+            # NOT infinity when there are no losses. "No losing trade yet"
+            # is not "infinitely profitable", it is a sample too small to
+            # have found one - and infinity is not JSON, so emitting it
+            # also destroyed the experiment row it was meant to describe.
             "profit_factor": round(gross_win / gross_loss, 4) if gross_loss > 0
-            else (float("inf") if gross_win > 0 else 0.0),
+            else None,
+            "profit_factor_undefined_reason": (
+                None if gross_loss > 0
+                else ("no losing trades in the sample" if wins
+                      else "no closed trades")),
             "max_drawdown": round(self._max_drawdown, 6),
             "turnover": round(turnover, 2),
             "avg_hold_seconds": round(
