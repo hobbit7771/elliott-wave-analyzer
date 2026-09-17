@@ -1506,16 +1506,42 @@ def start_lead_engine() -> None:
         logger.info("lead engine: disabled (%s is not true)", lead_engine_config.ENABLED_ENV)
         return
     try:
-        started = get_lead_engine().start()
+        engine = get_lead_engine()
+        started = engine.start()
         logger.info("lead engine: start() returned %s", started)
     except Exception:                       # noqa: BLE001 - see docstring
         logger.exception("lead engine failed to start; the dashboard is unaffected")
+        return
+    # The research recorder, if the environment asked for one. Started
+    # after the engine so it records a stream that exists, and guarded
+    # separately so a recorder that cannot start leaves an engine that
+    # runs - the same isolation rule, one level down.
+    try:
+        from t3_engine.research import capture as research_capture
+
+        recorder = research_capture.start_recorder(engine.symbols())
+        if recorder is not None:
+            engine.set_capture_tap(recorder.observe)
+            logger.info("research capture: %s", recorder.stats.as_dict())
+    except Exception:                       # noqa: BLE001
+        logger.exception("research capture failed to start; the engine is unaffected")
 
 
 @app.on_event("shutdown")
 def stop_lead_engine() -> None:
     if not lead_engine_config.enabled():
         return
+    try:
+        from t3_engine.research import capture as research_capture
+
+        recorder = research_capture.get_recorder()
+        if recorder is not None:
+            # Flush what is buffered before the process goes. A shutdown
+            # that discards a minute of frames leaves a gap that looks
+            # like a feed failure in the manifest.
+            recorder.stop(flush=True)
+    except Exception:                       # noqa: BLE001
+        logger.exception("research capture did not stop cleanly")
     try:
         get_lead_engine().stop()
     except Exception:                       # noqa: BLE001
