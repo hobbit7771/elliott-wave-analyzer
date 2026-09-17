@@ -943,3 +943,103 @@ def test_replacing_an_older_bar_in_place_does_not_duplicate_it():
     assert engine.candles[1].close == 104.0
     assert [c.start_ms for c in engine.candles] == [base, base + 60_000,
                                                     base + 120_000]
+
+
+# ---- the backfill merge rules ------------------------------------------
+
+def _bar(start_ms, o, h, l, c, volume=1.0, closed=True):
+    from t3_engine.lead_engine.candles import Candle
+    return Candle(start_ms=start_ms, open=o, high=h, low=l, close=c,
+                  volume=volume, closed=closed)
+
+
+def _smc(bars):
+    from t3_engine.lead_engine.smc_engine import SmcEngine
+    engine = SmcEngine("INJUSDT", "1m")
+    for bar in bars:
+        engine.update(bar)
+    return engine
+
+
+def test_a_closed_bar_is_never_replaced_by_a_forming_update():
+    """The backfill delivers the minute CLOSED. The live socket may then
+    republish the same minute still forming - one tick's worth of it. The
+    finished bar's real high and low must not be overwritten by whatever
+    had printed in the fraction the socket saw."""
+    engine = _smc([_bar(60_000, 10, 12, 9, 11, volume=100, closed=True)])
+    engine.update(_bar(60_000, 10, 10.2, 9.9, 10.1, volume=3, closed=False))
+
+    only = engine.candles[0]
+    assert only.closed is True
+    assert (only.high, only.low, only.volume) == (12, 9, 100)
+
+
+def test_a_close_arriving_over_a_forming_bar_does_replace_it():
+    """The other direction has to keep working, or no bar ever finishes."""
+    engine = _smc([_bar(60_000, 10, 10.2, 9.9, 10.1, volume=3, closed=False)])
+    engine.update(_bar(60_000, 10, 12, 9, 11, volume=100, closed=True))
+
+    only = engine.candles[0]
+    assert only.closed is True and only.high == 12 and only.volume == 100
+
+
+def test_a_newer_forming_update_still_replaces_an_older_forming_one():
+    engine = _smc([_bar(60_000, 10, 10.2, 9.9, 10.1, volume=3, closed=False)])
+    engine.update(_bar(60_000, 10, 10.8, 9.9, 10.7, volume=9, closed=False))
+    assert engine.candles[0].high == 10.8 and engine.candles[0].volume == 9
+
+
+def test_warm_start_live_first_and_a_repeated_backfill_all_converge():
+    """Three arrival orders for the same facts. If they disagree, the
+    series depends on the race rather than on the market, and every level
+    computed from it is an artefact of thread scheduling."""
+    history = [_bar(60_000 * i, 10 + i, 11 + i, 9 + i, 10.5 + i, volume=50, closed=True)
+               for i in range(1, 9)]
+    live_forming = _bar(60_000 * 9, 19, 19.1, 18.9, 19.05, volume=2, closed=False)
+    # The live socket also republishes two minutes the history covers.
+    live_stale = [_bar(60_000 * 7, 17, 17.05, 16.99, 17.01, volume=1, closed=False),
+                  _bar(60_000 * 8, 18, 18.02, 17.98, 18.0, volume=1, closed=False)]
+
+    cold = _smc(history + [live_forming])
+    warm = _smc(live_stale + [live_forming] + history)
+    repeated = _smc(history + [live_forming] + history + live_stale)
+
+    def series(engine):
+        return [(c.start_ms, c.open, c.high, c.low, c.close, c.volume, c.closed)
+                for c in engine.candles]
+
+    assert series(cold) == series(warm) == series(repeated)
+    assert [c.start_ms for c in cold.candles] == sorted(c.start_ms for c in cold.candles)
+    # Nine distinct minutes, not eleven: the republished minutes merged.
+    assert len(cold.candles) == 9
+    # And the eight historical ones are still closed with their real range.
+    assert all(c.closed for c in cold.candles[:8])
+    assert cold.candles[6].high == 18 and cold.candles[6].volume == 50
+
+
+def test_the_levels_are_the_same_whichever_order_the_bars_arrived_in():
+    """The property that actually matters downstream."""
+    history = [_bar(60_000 * i, 10 + (i % 5), 11 + (i % 5), 9 + (i % 5),
+                    10.5 + (i % 5), volume=50, closed=True)
+               for i in range(1, 40)]
+    live_stale = [_bar(60_000 * 38, 13, 13.01, 12.99, 13.0, volume=1, closed=False)]
+
+    cold = _smc(history)
+    warm = _smc(live_stale + history)
+    assert cold.state().as_dict() == warm.state().as_dict()
+
+
+def test_a_zero_score_never_names_a_side():
+    """A directionless market must produce no direction at all. The
+    cheapest way to manufacture a strategy is to let a tie default long."""
+    from t3_engine.lead_engine.signal_machine import SignalInputs, SignalMachine
+
+    machine = SignalMachine("INJUSDT")
+    snapshot = machine.update(SignalInputs(
+        long_pressure=0.0, short_pressure=0.0, conflict=0.0,
+        prebreak_long=0.0, prebreak_short=0.0, long_level=None,
+        short_level=None, liquidation_state="NONE", healthy=True))
+
+    assert snapshot.state == "IDLE"
+    assert snapshot.direction not in ("long", "short")
+    assert not snapshot.direction

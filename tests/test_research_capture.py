@@ -211,3 +211,52 @@ def test_it_only_records_a_symbol_that_is_actually_subscribed(monkeypatch):
     cap.reset_recorder()
     assert cap.start_recorder(["INJUSDT"]) is None
     cap.reset_recorder()
+
+
+def test_the_real_writer_calls_supabase_with_a_signature_that_exists():
+    """The unit tests above all pass a fake writer, so the REAL writer's
+    call was never exercised - and it shipped with a keyword argument
+    `insert()` does not take. Every flush failed in production with
+    "unexpected keyword argument 'upsert'" until this test existed.
+
+    Bind the call against the actual function rather than mocking the
+    module, so a rename on either side fails here rather than in a log."""
+    import inspect
+
+    from t3_engine.database import supabase_rest
+
+    captured = {}
+
+    def fake_insert(table, rows, client=None, on_conflict=None):
+        captured.update(table=table, rows=rows, on_conflict=on_conflict)
+        return []
+
+    # The fake must be substitutable for the real one, or this test
+    # proves nothing about the real one.
+    real = inspect.signature(supabase_rest.insert)
+    assert set(real.parameters) == set(inspect.signature(fake_insert).parameters)
+
+    original_insert = supabase_rest.insert
+    original_configured = supabase_rest.configured
+    supabase_rest.insert = fake_insert
+    supabase_rest.configured = lambda: True
+    try:
+        cap._supabase_writer([{"segment_id": "s:1", "payload": "x"}])
+    finally:
+        supabase_rest.insert = original_insert
+        supabase_rest.configured = original_configured
+
+    assert captured["table"] == cap.TABLE_CAPTURES
+    assert captured["on_conflict"] == "segment_id"
+
+
+def test_an_unconfigured_supabase_refuses_rather_than_discarding_frames():
+    from t3_engine.database import supabase_rest
+
+    original = supabase_rest.configured
+    supabase_rest.configured = lambda: False
+    try:
+        with pytest.raises(RuntimeError, match="refusing to discard"):
+            cap._supabase_writer([{"segment_id": "s:1"}])
+    finally:
+        supabase_rest.configured = original
