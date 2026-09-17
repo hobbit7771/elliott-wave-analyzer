@@ -1525,6 +1525,19 @@ def start_lead_engine() -> None:
             logger.info("research capture: %s", recorder.stats.as_dict())
     except Exception:                       # noqa: BLE001
         logger.exception("research capture failed to start; the engine is unaffected")
+    # The research worker. Experiments are queued as Supabase rows and run
+    # HERE, because this process can reach both Bybit and Supabase and the
+    # sandbox this is developed from can reach neither. It takes one job
+    # at a time and yields to the ingest thread while it works.
+    try:
+        from t3_engine.research import jobs as research_jobs
+
+        if research_capture.enabled():
+            worker = research_jobs.start_worker()
+            logger.info("research worker: %s",
+                        worker.stats() if worker else "not started")
+    except Exception:                       # noqa: BLE001
+        logger.exception("research worker failed to start; the engine is unaffected")
 
 
 @app.on_event("shutdown")
@@ -1540,6 +1553,11 @@ def stop_lead_engine() -> None:
             # that discards a minute of frames leaves a gap that looks
             # like a feed failure in the manifest.
             recorder.stop(flush=True)
+        from t3_engine.research import jobs as research_jobs
+
+        worker = research_jobs.get_worker()
+        if worker is not None:
+            worker.stop()
     except Exception:                       # noqa: BLE001
         logger.exception("research capture did not stop cleanly")
     try:

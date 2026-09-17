@@ -3,14 +3,19 @@
 CAUSAL MEANS ONE THING HERE: every window is closed at the RECEIVE time
 of the event being processed, and nothing reads an element stamped later
 than that. A feature that peeks one frame ahead makes every strategy
-built on it profitable and none of them real, and the peek is usually
-invisible - an "average over the last N events" computed after appending
-the current one is already a peek if the current one is the trigger.
+built on it profitable and none of them real.
 
-So the order is fixed: features are read, THEN the event is folded in.
-`update()` returns the view as it was BEFORE the event, and the strategy
-sees that. `MarketView.decided_at_ms` is a receive time for the same
-reason - it is the stamp an order may be sent with.
+The guarantee comes from the ORDER EVENTS ARE FED, not from any trick
+inside this class. `view()` reflects everything folded in so far and
+nothing else, so the runner folds the arriving event first and then
+reads - which is correct, because that event HAS arrived. What must
+never happen is a later event being folded in before an earlier one is
+decided on, and that is the runner's contract: events are processed in
+RECEIVE order, because that is the order this process really learned
+them.
+
+`MarketView.decided_at_ms` is a receive time for the same reason - it is
+the only stamp an order may honestly be sent with.
 
 WHAT EACH FEATURE CLAIMS.
 
