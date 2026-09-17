@@ -383,3 +383,124 @@ def test_a_drawing_reports_its_direction_without_changing_its_maths():
     assert up.direction == "low_to_high" and down.direction == "high_to_low"
     assert up.as_dict()["levels"][0]["price"] == pytest.approx(6.0)
     assert down.as_dict()["levels"][0]["price"] == pytest.approx(5.0)
+
+
+# ---- calibration survives a restart -------------------------------------
+
+def test_the_calibrator_persists_only_settled_observations():
+    """A PENDING observation belongs to a process that no longer exists.
+    Its outcome would have to be measured against prices nobody was
+    watching, and inventing them is exactly the kind of fill this project
+    refuses to invent anywhere else."""
+    from t3_engine.lead_engine.calibration import (Calibrator, HORIZONS_MS,
+                                                   Observation,
+                                                   observation_to_row)
+
+    calibrator = Calibrator("INJUSDT")
+    settled = Observation(symbol="INJUSDT", direction="short", score=62.0,
+                          level=5.7, price=5.72, opened_ms=1_000)
+    for horizon in HORIZONS_MS:
+        settled.outcomes[horizon] = True
+    calibrator.resolved.append(settled)
+    calibrator.pending.append(Observation(symbol="INJUSDT", direction="long",
+                                          score=48.0, level=5.6, price=5.61,
+                                          opened_ms=2_000))
+
+    rows = [observation_to_row(o) for o in calibrator.drain_persist()]
+    assert len(rows) == 1
+    assert rows[0]["observation_id"] == "INJUSDT:short:1000"
+    assert rows[0]["outcomes"] == {str(h): True for h in HORIZONS_MS}
+
+
+def test_draining_twice_does_not_write_the_same_observation_twice():
+    from t3_engine.lead_engine.calibration import (Calibrator, HORIZONS_MS,
+                                                   Observation)
+
+    calibrator = Calibrator("INJUSDT")
+    observation = Observation(symbol="INJUSDT", direction="short", score=62.0,
+                              level=5.7, price=5.72, opened_ms=1_000)
+    for horizon in HORIZONS_MS:
+        observation.outcomes[horizon] = True
+    calibrator.resolved.append(observation)
+
+    assert len(calibrator.drain_persist()) == 1
+    assert calibrator.drain_persist() == []
+
+
+def test_a_restarted_calibrator_comes_back_with_its_record():
+    """Thirty settled cases per bucket, a handful an hour, and a plan
+    that stops the process every fifteen idle minutes. Without this it
+    could never finish - which is why it reported "not calibrated" from
+    the day it was written."""
+    from t3_engine.lead_engine.calibration import (Calibrator, HORIZONS_MS,
+                                                   Observation,
+                                                   observation_from_row,
+                                                   observation_to_row)
+
+    before = Calibrator("INJUSDT")
+    for i in range(40):
+        observation = Observation(symbol="INJUSDT", direction="short",
+                                  score=62.0, level=5.7, price=5.72,
+                                  opened_ms=1_000 + i * 60_000)
+        for horizon in HORIZONS_MS:
+            observation.outcomes[horizon] = (i % 3 != 0)
+        before.resolved.append(observation)
+    rows = [observation_to_row(o) for o in before.drain_persist()]
+    assert len(rows) == 40
+
+    after = Calibrator("INJUSDT")
+    taken = after.restore(observation_from_row(r) for r in rows)
+    assert taken == 40
+    assert len(after.resolved) == 40
+    # And the table it computes is the same one it had before.
+    assert after.table("short") == before.table("short")
+
+
+def test_restoring_the_same_rows_twice_does_not_double_the_buckets():
+    """A retry after a read timeout must not halve the apparent noise."""
+    from t3_engine.lead_engine.calibration import (Calibrator, HORIZONS_MS,
+                                                   Observation,
+                                                   observation_from_row,
+                                                   observation_to_row)
+
+    source = Calibrator("INJUSDT")
+    for i in range(5):
+        observation = Observation(symbol="INJUSDT", direction="long", score=55.0,
+                                  level=5.6, price=5.61,
+                                  opened_ms=1_000 + i * 60_000)
+        for horizon in HORIZONS_MS:
+            observation.outcomes[horizon] = True
+        source.resolved.append(observation)
+    rows = [observation_to_row(o) for o in source.drain_persist()]
+
+    target = Calibrator("INJUSDT")
+    assert target.restore(observation_from_row(r) for r in rows) == 5
+    assert target.restore(observation_from_row(r) for r in rows) == 0
+    assert len(target.resolved) == 5
+
+
+def test_a_restored_observation_is_not_written_back_out_again():
+    """Otherwise every restart re-uploads the whole history."""
+    from t3_engine.lead_engine.calibration import (Calibrator, HORIZONS_MS,
+                                                   Observation,
+                                                   observation_from_row,
+                                                   observation_to_row)
+
+    source = Calibrator("INJUSDT")
+    observation = Observation(symbol="INJUSDT", direction="long", score=55.0,
+                              level=5.6, price=5.61, opened_ms=1_000)
+    for horizon in HORIZONS_MS:
+        observation.outcomes[horizon] = True
+    source.resolved.append(observation)
+    rows = [observation_to_row(o) for o in source.drain_persist()]
+
+    target = Calibrator("INJUSDT")
+    target.restore(observation_from_row(r) for r in rows)
+    assert target.drain_persist() == []
+
+
+def test_a_malformed_stored_row_is_skipped_rather_than_crashing_the_restore():
+    from t3_engine.lead_engine.calibration import observation_from_row
+
+    assert observation_from_row({"symbol": "INJUSDT"}) is None
+    assert observation_from_row({}) is None
