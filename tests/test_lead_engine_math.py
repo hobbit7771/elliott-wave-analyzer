@@ -504,3 +504,73 @@ def test_a_malformed_stored_row_is_skipped_rather_than_crashing_the_restore():
 
     assert observation_from_row({"symbol": "INJUSDT"}) is None
     assert observation_from_row({}) is None
+
+
+def test_a_recycled_memory_address_cannot_swallow_a_new_observation():
+    """The bug this replaced: `resolved` is a bounded deque, so an old
+    observation is evicted and collected, and CPython hands its address
+    to the next object that fits. Keyed on id(), a new observation
+    landing on a recycled address was treated as already written and
+    SILENTLY NEVER PERSISTED."""
+    import collections
+
+    from t3_engine.lead_engine.calibration import (Calibrator, HORIZONS_MS,
+                                                   Observation)
+
+    def settled(opened_ms):
+        observation = Observation(symbol="INJUSDT", direction="short",
+                                  score=60.0, level=5.7, price=5.72,
+                                  opened_ms=opened_ms)
+        for horizon in HORIZONS_MS:
+            observation.outcomes[horizon] = True
+        return observation
+
+    calibrator = Calibrator("INJUSDT")
+    calibrator.resolved = collections.deque(maxlen=3)
+    for opened in (1_000, 2_000, 3_000):
+        calibrator.resolved.append(settled(opened))
+    assert len(calibrator.drain_persist()) == 3
+
+    # Evict the first two and add two genuinely new observations.
+    for opened in (4_000, 5_000):
+        calibrator.resolved.append(settled(opened))
+    drained = calibrator.drain_persist()
+    assert sorted(o.opened_ms for o in drained) == [4_000, 5_000]
+
+
+def test_the_persisted_set_stays_bounded_by_the_deque():
+    """It grew one entry per observation for ever, which a 45-minute
+    uptime measurement showed as part of a 0.3MB/min climb."""
+    import collections
+
+    from t3_engine.lead_engine.calibration import (Calibrator, HORIZONS_MS,
+                                                   Observation)
+
+    calibrator = Calibrator("INJUSDT")
+    calibrator.resolved = collections.deque(maxlen=5)
+    for opened in range(0, 200_000, 1_000):
+        observation = Observation(symbol="INJUSDT", direction="long",
+                                  score=55.0, level=5.6, price=5.61,
+                                  opened_ms=opened)
+        for horizon in HORIZONS_MS:
+            observation.outcomes[horizon] = True
+        calibrator.resolved.append(observation)
+        calibrator.drain_persist()
+
+    assert len(calibrator._persisted) <= 5
+
+
+def test_the_drain_key_matches_the_key_the_row_is_written_under():
+    """What is written, what is reloaded and what counts as
+    already-written all have to agree, or a restart re-uploads the
+    history or silently drops it."""
+    from t3_engine.lead_engine.calibration import (HORIZONS_MS, Observation,
+                                                   _key, observation_to_row)
+
+    observation = Observation(symbol="INJUSDT", direction="short", score=62.0,
+                              level=5.7, price=5.72, opened_ms=1_000)
+    for horizon in HORIZONS_MS:
+        observation.outcomes[horizon] = True
+    symbol, direction, opened = _key(observation)
+    assert observation_to_row(observation)["observation_id"] == \
+        f"{symbol}:{direction}:{opened}"
