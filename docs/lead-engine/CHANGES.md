@@ -550,3 +550,78 @@ diagnostics went in. It reached `/state` and was never rendered, so the
 panel kept saying the one sentence that cannot be acted on. The pre-break
 cards now show the reason and the counts underneath it — but only when
 there is no level, since with one the note above already says everything.
+
+
+---
+
+# Round 9 — the audit, and a tuning that was not done
+
+Asked to re-check everything, run it against history, and tune it to
+perfection.
+
+## What was checked
+
+* **957 tests pass.**
+* **Replay of 10,288 recorded Bybit frames** through a fresh engine: zero
+  errors, 15,000 frames/s, the book synced across 2,400 deltas with zero
+  gaps, zero resyncs and zero crossed books, and every ledger invariant
+  holding (no fill at or before its own signal, no exit before its entry,
+  `net == gross - fees`).
+
+  The first replay pass reported DATA_FAILURE on all twenty snapshots -
+  correctly. The capture is two days old and the health module measures
+  staleness against the wall clock, so the signal machine was muted and
+  the pass proved the ingest path and nothing about the decisions. Re-run
+  with the capture's own clock: WATCH 35, IDLE 16, max break score 44.2 -
+  consistent with the live recording, and the confidence gate and the
+  CONFLICT_HIGH block both observed firing.
+
+## A bug this found, in code from the previous round
+
+`SmcEngine.update` appended any candle that was not the newest, leaving
+the series non-monotonic - and `find_swings` compares each bar with its
+neighbours BY INDEX and never reads a timestamp. Out-of-order bars
+therefore produce a different swing set, different levels and a different
+break score from the same data.
+
+The REST backfill made this reachable: it seeds 240 historical minutes on
+its own thread while the kline socket is already running, so on a warm
+start the live bars arrive first and the history lands behind them - and
+deterministically so on the `subscribe()` path, where the stream never
+stopped. Measured on 240 bars plus twelve warm minutes: nearest support
+**98.27 in order, 98.13 out of order**.
+
+`update` now places a candle in time order, replacing rather than
+duplicating a minute that is already there. The two paths the socket
+actually takes - same bar as the newest, or strictly newer - stay O(1).
+
+## The tuning that was not done
+
+See [`CALIBRATION_FINDINGS.md`](CALIBRATION_FINDINGS.md). Short version:
+28.7 hours of recorded output, properly de-duplicated into 45 independent
+episodes across ten hours, shows an apparent edge that **inverts** when
+the horizon moves from 30 to 60 minutes, and that nets -1.8 bps against
+13 bps of round-trip cost. The binding constraint is costs, not the
+threshold: a signal whose median favourable excursion is 11.7 bps cannot
+pay 13 bps to trade.
+
+The thresholds were left alone. Lowering them on this evidence would
+manufacture trades with negative expected value, which is worse than not
+trading because it would look like progress.
+
+## A flaky test, made deterministic
+
+`test_the_rate_limit_bites_but_leaves_room_for_a_reading_a_second` fired
+sixteen real HTTP requests and expected a 429 among them. That asserts
+something about the machine, not about the limiter: the refusal only
+appears if eleven round trips complete inside the limiter's one-second
+window. It passed alone and failed inside the full suite, having found
+nothing wrong.
+
+`RateLimiter.check` already takes the clock as an argument, so the
+counting is now tested against a clock the test controls - the per-second
+rule, the burst cap, the cap lifting, and one token's noise not spending
+another's budget. A single HTTP test remains for the part only HTTP can
+prove: that the limiter's refusal reaches the caller as a 429. All four
+were checked against a deliberately broken limiter first; three fail when
+the per-second rule is disabled, so they bite.

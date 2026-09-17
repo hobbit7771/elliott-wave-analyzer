@@ -10,6 +10,7 @@ back.
 import asyncio
 import io
 import json
+import time
 
 import pytest
 from fastapi import Request
@@ -102,11 +103,69 @@ def test_a_wrong_token_is_refused_without_saying_why(external_on):
     assert response.json()["error"] == "Invalid token."
 
 
-def test_the_rate_limit_bites_but_leaves_room_for_a_reading_a_second(external_on):
+def test_the_rate_limit_leaves_room_for_a_reading_a_second():
+    """The window is measured against a CLOCK WE CONTROL, not the wall.
+
+    Firing sixteen real requests and expecting a 429 among them asserts
+    something about the machine, not about the limiter: the refusal only
+    appears if eleven HTTP round trips complete inside one second. Under a
+    loaded test run they do not, the window rolls between calls, and the
+    test fails having found nothing wrong. Inject the clock instead."""
+    limiter = auth.RateLimiter()
+    at = 1_000.0
+    allowed = [limiter.check("token", at + i * 0.01)[0]
+               for i in range(auth.RATE_LIMIT_PER_SECOND + 6)]
+    assert allowed.count(True) == auth.RATE_LIMIT_PER_SECOND
+    assert allowed[auth.RATE_LIMIT_PER_SECOND] is False
+
+    # The brief's actual requirement: a reading once a second is never
+    # refused. Two hundred of them, one per second, all pass.
+    steady = auth.RateLimiter()
+    assert all(steady.check("token", 5_000.0 + second)[0] for second in range(200))
+
+
+def test_the_burst_cap_bites_even_when_the_per_second_limit_does_not():
+    """Ten a second for ten seconds is a hundred requests and must not be
+    allowed through on the strength of each second being legal."""
+    limiter = auth.RateLimiter()
+    # Every 0.15s: about seven a second, so the per-second rule never
+    # fires, and the whole run fits inside one burst window.
+    allowed = [limiter.check("token", 2_000.0 + i * 0.15)[0] for i in range(45)]
+    assert allowed.count(True) == auth.BURST
+    assert allowed[auth.BURST] is False
+    # ...and the cap lifts once the burst window has passed.
+    assert limiter.check("token", 2_000.0 + auth.BURST_WINDOW_SECONDS + 60.0)[0]
+
+
+def test_each_token_is_limited_on_its_own_budget():
+    limiter = auth.RateLimiter()
+    for i in range(auth.RATE_LIMIT_PER_SECOND):
+        assert limiter.check("noisy", 3_000.0 + i * 0.01)[0]
+    assert not limiter.check("noisy", 3_000.1)[0]
+    assert limiter.check("quiet", 3_000.1)[0]
+
+
+def test_a_refused_request_comes_back_as_429_over_http(external_on):
+    """That the limiter's no reaches the caller is the part HTTP has to
+    prove; the counting is proven above without a clock race."""
     headers = {"x-api-key": TOKEN}
-    codes = [client.get(f"{V1}/status", headers=headers).status_code for _ in range(16)]
-    assert 200 in codes and 429 in codes
-    assert codes.count(200) >= auth.RATE_LIMIT_PER_SECOND
+    assert client.get(f"{V1}/status", headers=headers).status_code == 200
+
+    # Fill the budget at one fixed instant through the limiter's own API,
+    # so the one request that follows is the only thing racing the clock.
+    limiter = auth.limiter()
+    token_id = TOKEN[:6]
+    now = time.time()
+    for _ in range(auth.RATE_LIMIT_PER_SECOND):
+        limiter.check(token_id, now)
+
+    response = client.get(f"{V1}/status", headers=headers)
+    assert response.status_code == 429
+    assert "rate limit" in response.json()["error"]
+    assert response.json()["read_only"] is True
+
+    limiter.reset()
+    assert client.get(f"{V1}/status", headers=headers).status_code == 200
 
 
 # ---- read only ----------------------------------------------------------

@@ -822,3 +822,124 @@ def test_the_backfill_seeds_closed_bars_and_skips_the_forming_one(
     assert len(smc.candles) == 20
     assert all(candle.closed for candle in smc.candles)
     assert smc.candles[0].start_ms == 1_700_000_000 * 1000
+
+
+# ---- the series must be in time order, whoever fills it ----------------
+
+def _minute_bars(count, seed, base_ms, start_price=100.0):
+    import random
+
+    from t3_engine.lead_engine.smc_engine import Candle as SmcCandle
+
+    random.seed(seed)
+    out, price = [], start_price
+    for index in range(count):
+        opened = price
+        price *= 1 + random.gauss(0, 0.002)
+        out.append(SmcCandle(start_ms=base_ms + index * 60_000, open=opened,
+                             high=max(opened, price) * 1.001,
+                             low=min(opened, price) * 0.999,
+                             close=price, volume=1.0, closed=True))
+    return out, price
+
+
+def test_an_older_bar_lands_in_its_place_not_at_the_end():
+    """`find_swings` compares each bar with its NEIGHBOURS BY INDEX and
+    never reads a timestamp, so a series out of order yields a different
+    swing set from the same bars.
+
+    Not hypothetical: the REST backfill seeds 240 historical minutes on
+    its own thread while the kline socket is already running, so on a warm
+    start the live bars arrive first and the history lands behind them."""
+    from t3_engine.lead_engine.smc_engine import SmcEngine
+
+    base = 1_700_000_000_000
+    history, last = _minute_bars(240, 5, base)
+    live, _ = _minute_bars(12, 11, base + 240 * 60_000, last)
+
+    in_order = SmcEngine("X", "1")
+    for candle in history + live:
+        in_order.update(candle)
+
+    # The real sequence: stream first, backfill second.
+    warm_restart = SmcEngine("X", "1")
+    for candle in live:
+        warm_restart.update(candle)
+    for candle in history:
+        warm_restart.update(candle)
+
+    stamps = [c.start_ms for c in warm_restart.candles]
+    assert stamps == sorted(stamps), "the series must be monotonic in time"
+    assert stamps == [c.start_ms for c in in_order.candles]
+    assert ([c.close for c in warm_restart.candles]
+            == [c.close for c in in_order.candles])
+
+
+def test_out_of_order_bars_do_not_change_the_levels():
+    """The consequence that matters. Measured before the fix on exactly
+    this data: nearest support 98.27 in order, 98.13 out of order - a
+    different level under stress, and so a different break score."""
+    from t3_engine.lead_engine.config import Thresholds
+    from t3_engine.lead_engine.prebreak_engine import LevelTracker
+    from t3_engine.lead_engine.smc_engine import SmcEngine
+
+    base = 1_700_000_000_000
+    history, last = _minute_bars(240, 5, base)
+    live, _ = _minute_bars(12, 11, base + 240 * 60_000, last)
+    price = live[-1].close
+
+    def levels_for(order):
+        engine = SmcEngine("X", "1")
+        for candle in order:
+            engine.update(candle)
+        tracker = LevelTracker(thresholds=Thresholds())
+        tracker.rebuild(engine.candles)
+        return tracker
+
+    ordered = levels_for(history + live)
+    racing = levels_for(live + history)
+
+    assert ordered.swings_found == racing.swings_found
+    assert (sorted(round(l.price, 9) for l in ordered.levels)
+            == sorted(round(l.price, 9) for l in racing.levels))
+    for kind in ("support", "resistance"):
+        a, b = ordered.nearest(price, kind), racing.nearest(price, kind)
+        assert (a is None) == (b is None), kind
+        if a is not None:
+            assert a.price == b.price, kind
+
+
+def test_a_republished_forming_bar_still_replaces_rather_than_duplicates():
+    """The fast path the socket actually takes, unchanged: Bybit resends
+    the forming candle on every tick with the same `start`."""
+    from t3_engine.lead_engine.smc_engine import Candle as SmcCandle
+    from t3_engine.lead_engine.smc_engine import SmcEngine
+
+    engine = SmcEngine("X", "1")
+    for close in (100.0, 101.0, 102.0):
+        engine.update(SmcCandle(start_ms=1_700_000_000_000, open=100.0,
+                                high=close, low=99.0, close=close,
+                                volume=1.0, closed=False))
+    assert len(engine.candles) == 1
+    assert engine.candles[0].close == 102.0
+
+
+def test_replacing_an_older_bar_in_place_does_not_duplicate_it():
+    """A backfill that overlaps a bar the socket already delivered must
+    correct it, not add a second copy of the same minute."""
+    from t3_engine.lead_engine.smc_engine import Candle as SmcCandle
+    from t3_engine.lead_engine.smc_engine import SmcEngine
+
+    base = 1_700_000_000_000
+    engine = SmcEngine("X", "1")
+    for index in (0, 1, 2):
+        engine.update(SmcCandle(start_ms=base + index * 60_000, open=100.0,
+                                high=101.0, low=99.0, close=100.0,
+                                volume=1.0, closed=True))
+    engine.update(SmcCandle(start_ms=base + 60_000, open=100.0, high=105.0,
+                            low=95.0, close=104.0, volume=9.0, closed=True))
+
+    assert len(engine.candles) == 3
+    assert engine.candles[1].close == 104.0
+    assert [c.start_ms for c in engine.candles] == [base, base + 60_000,
+                                                    base + 120_000]

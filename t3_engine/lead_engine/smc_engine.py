@@ -29,6 +29,8 @@ feature was computed.
 
 from __future__ import annotations
 
+from bisect import bisect_left
+
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -218,15 +220,42 @@ class SmcEngine:
         self._last_bos_level: Optional[float] = None
 
     def update(self, candle: Candle) -> None:
-        """Replace the newest candle when it is the same bar, else append.
+        """Place a candle in the series, in TIME ORDER.
 
         Bybit republishes the forming candle on every tick with the same
         `start`, so appending blindly would fill the series with hundreds
-        of copies of one bar and destroy every swing calculation."""
+        of copies of one bar and destroy every swing calculation. The two
+        fast paths - same bar as the newest, or strictly newer - are the
+        two the socket takes, and they stay O(1).
+
+        THE THIRD PATH IS WHY THIS IS NOT JUST AN APPEND. An older bar
+        used to be appended at the end, leaving the series non-monotonic,
+        and `find_swings` is purely positional: it compares each bar with
+        its NEIGHBOURS BY INDEX and never looks at a timestamp. A series
+        out of order therefore yields a different swing set, different
+        levels, and a different break score from the same bars.
+
+        That is not hypothetical. The REST backfill seeds 240 historical
+        minutes on its own thread while the kline socket is already
+        running, so on any warm start - and deterministically on the
+        `subscribe()` path, where the stream never stopped - the live bars
+        arrive first and the history lands behind them. Measured on a
+        240-bar series with twelve warm minutes: the same bars gave
+        nearest support 98.27 in order and 98.13 out of order."""
         if self.candles and self.candles[-1].start_ms == candle.start_ms:
             self.candles[-1] = candle
-        else:
+        elif not self.candles or candle.start_ms > self.candles[-1].start_ms:
             self.candles.append(candle)
+        else:
+            # Out of order: find where it belongs, replacing the bar
+            # already at that moment rather than duplicating it.
+            index = bisect_left([c.start_ms for c in self.candles],
+                                candle.start_ms)
+            if index < len(self.candles) and \
+                    self.candles[index].start_ms == candle.start_ms:
+                self.candles[index] = candle
+            else:
+                self.candles.insert(index, candle)
         if len(self.candles) > MAX_CANDLES:
             self.candles = self.candles[-MAX_CANDLES:]
         # A trimmed series changes how many closed bars there are, which
