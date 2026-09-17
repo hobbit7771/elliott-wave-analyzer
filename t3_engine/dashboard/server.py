@@ -1570,6 +1570,12 @@ def start_lead_engine() -> None:
         recorder = research_capture.start_recorder(engine.symbols())
         if recorder is not None:
             fan.add(recorder.observe)
+            # Open the session with the books the engine already holds.
+            # Bybit sends a snapshot only on SUBSCRIBE, which happened
+            # before this tap existed, so without a seed the capture is a
+            # stream of deltas with nothing to apply them to.
+            recorder.set_seed_hook(
+                lambda r: research_capture.seed_from_engine(r, engine) > 0)
             logger.info("research capture: %s", recorder.stats.as_dict())
         if len(fan):
             engine.set_capture_tap(fan)
