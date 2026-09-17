@@ -65,6 +65,14 @@ BYBIT_LINEAR_MAKER_BPS = 2.0
 # Funding is charged every eight hours, at 00:00, 08:00 and 16:00 UTC.
 FUNDING_INTERVAL_MS = 8 * 60 * 60 * 1000
 
+# How much of the spread a resting order gives back, per maker leg, when
+# nobody has measured it. One half is the uninformed-maker result: a
+# quote is lifted exactly when someone wanted to trade against it, and on
+# average that costs the provider the edge the spread was meant to earn.
+# An assumption, varied in the stress scenarios and replaced the moment
+# real fills can measure it.
+DEFAULT_ADVERSE_SELECTION_SHARE = 0.5
+
 
 @dataclass(frozen=True)
 class FeeSchedule:
@@ -208,11 +216,34 @@ class CostModel:
 
     def break_even_bps(self, regime: str, spread_bps: float,
                        extra_slippage_bps: float = 0.0,
-                       adverse_selection_bps: float = 0.0) -> float:
-        """The gross move, in bps, at which a trade stops losing money."""
+                       adverse_selection_bps: Optional[float] = None) -> float:
+        """The gross move, in bps, at which a trade stops losing money.
+
+        A MAKER'S BREAK-EVEN WITHOUT AN ADVERSE-SELECTION TERM IS NOT A
+        BREAK-EVEN, and leaving it at zero produces a genuinely absurd
+        answer: at a spread of exactly two maker fees, maker/maker
+        break-even computes to 0.00bps and every positive expectation,
+        however tiny, "pays for itself". It does not. A resting order is
+        filled precisely when someone wanted to trade against it, which
+        is not a random moment.
+
+        So when the caller does not supply a measured figure, each maker
+        leg is charged `DEFAULT_ADVERSE_SELECTION_SHARE` of the spread.
+        At the default of one half that is the classic uninformed-maker
+        result - a market maker adversely selected by half the spread
+        earns nothing from the spread, leaving the fees as the whole cost
+        - and it is an ASSUMPTION, which is why the stress scenarios vary
+        it and why measuring it from fills replaces it."""
+        if adverse_selection_bps is None:
+            adverse_selection_bps = (self.maker_legs(regime) * spread_bps
+                                     * DEFAULT_ADVERSE_SELECTION_SHARE)
         return self.modelled_round_trip_bps(
             regime, spread_bps, extra_slippage_bps,
             adverse_selection_bps).total_cost_bps
+
+    @staticmethod
+    def maker_legs(regime: str) -> int:
+        return {TAKER_TAKER: 0, MAKER_TAKER: 1, MAKER_MAKER: 2}[regime]
 
     # ---- sensitivity ---------------------------------------------------
 
