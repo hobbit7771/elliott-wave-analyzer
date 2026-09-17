@@ -364,3 +364,72 @@ def test_a_flush_never_ends_in_the_middle_of_a_merge_window():
     segment = recorder.flush(force=True)
     assert segment is not None and segment.frames == 1
     assert cap.decode_segment(segment.payload)[0]["data"]["b"] == [["5.75", "90"]]
+
+
+# ---- the seeded snapshot ------------------------------------------------
+
+def test_a_capture_without_a_snapshot_cannot_be_replayed_at_all():
+    """The defect this exists to fix, stated as a test. Bybit sends a
+    snapshot only on SUBSCRIBE; the recorder is installed after that, so
+    it joins a stream of deltas with nothing to apply them to."""
+    from t3_engine.research.book import BookReconstructor
+
+    book = BookReconstructor()
+    for i in range(50):
+        state = book.apply({"type": "delta", "ts": i, "r": i,
+                            "data": {"u": i, "b": [["5.75", "10"]], "a": []}})
+        assert state is None
+    assert book.synced is False
+
+
+def test_a_seeded_snapshot_makes_the_following_deltas_replayable():
+    from t3_engine.research.book import BookReconstructor
+
+    recorder = _recorder()
+    assert recorder.seed_snapshot("INJUSDT",
+                                  {5.75: 100.0, 5.74: 200.0},
+                                  {5.76: 80.0, 5.77: 150.0}, at_ms=1_000)
+    recorder.observe(*_delta(1_100, bids=[("5.75", "90")], u=7))
+    frames = cap.decode_segment(recorder.flush(force=True).payload)
+
+    assert frames[0]["type"] == "snapshot" and frames[0]["synthetic"] is True
+    book = BookReconstructor()
+    for frame in frames:
+        book.apply(frame)
+    state = book.state()
+    assert state.best_bid == 5.75 and state.best_ask == 5.76
+    assert state.size_at("bid", 5.75) == 90.0        # the delta applied
+    assert recorder.stats.seeded_snapshots == 1
+
+
+def test_a_seed_is_marked_synthetic_so_the_manifest_cannot_mistake_it():
+    recorder = _recorder()
+    recorder.seed_snapshot("INJUSDT", {5.75: 1.0}, {5.76: 1.0}, at_ms=1)
+    frame = cap.decode_segment(recorder.flush(force=True).payload)[0]
+    assert frame["synthetic"] is True
+    assert frame["data"]["u"] == 0
+
+
+def test_an_unsynced_or_empty_book_is_not_seeded_half_formed():
+    recorder = _recorder()
+    assert recorder.seed_snapshot("INJUSDT", {}, {5.76: 1.0}) is False
+    assert recorder.seed_snapshot("INJUSDT", {5.75: 1.0}, {}) is False
+    assert recorder.seed_snapshot("OTHERUSDT", {5.75: 1.0}, {5.76: 1.0}) is False
+    assert recorder.stats.seeded_snapshots == 0
+
+
+def test_seed_from_engine_skips_a_symbol_whose_book_is_not_synced():
+    class FakeBook:
+        def __init__(self, synced):
+            self.synced = synced
+            self.bids = {5.75: 10.0}
+            self.asks = {5.76: 10.0}
+
+    class FakeEngine:
+        states = {"INJUSDT": type("S", (), {"book": FakeBook(False)})()}
+
+    recorder = _recorder()
+    assert cap.seed_from_engine(recorder, FakeEngine()) == 0
+
+    FakeEngine.states["INJUSDT"].book.synced = True
+    assert cap.seed_from_engine(recorder, FakeEngine()) == 1

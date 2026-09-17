@@ -189,6 +189,7 @@ class CaptureStats:
     frames_dropped: int = 0
     segments_written: int = 0
     frames_coalesced: int = 0
+    seeded_snapshots: int = 0
     write_failures: int = 0
     raw_bytes: int = 0
     stored_bytes: int = 0
@@ -208,6 +209,7 @@ class CaptureStats:
             "frames_dropped": self.frames_dropped,
             "segments_written": self.segments_written,
             "frames_coalesced": self.frames_coalesced,
+            "seeded_snapshots": self.seeded_snapshots,
             "write_failures": self.write_failures,
             "raw_mb": round(self.raw_bytes / 1e6, 3),
             "stored_mb": round(self.stored_bytes / 1e6, 3),
@@ -257,6 +259,8 @@ class CaptureRecorder:
         self._pending_delta: Dict[str, Dict[str, Any]] = {}
         self._last_ticker_ms: Dict[str, int] = {}
         self._last_frames: List[Dict[str, Any]] = []
+        self._seed_hook: Optional[Callable[["CaptureRecorder"], bool]] = None
+        self._seeded = False
         budget = DEFAULT_BUDGET_MB if budget_mb is None else budget_mb
         self.stats = CaptureStats(budget_bytes=int(budget * 1e6))
 
@@ -388,6 +392,52 @@ class CaptureRecorder:
         self._thread.start()
         return True
 
+    def set_seed_hook(self,
+                      hook: Optional[Callable[["CaptureRecorder"], bool]]) -> None:
+        """Install the callback that opens a session with a book."""
+        self._seed_hook = hook
+        self._seeded = False
+
+    def seed_snapshot(self, symbol: str, bids: Dict[float, float],
+                      asks: Dict[float, float], at_ms: Optional[int] = None) -> bool:
+        """Write the CURRENT book as a synthetic snapshot frame.
+
+        WITHOUT THIS A CAPTURE CANNOT BE REPLAYED AT ALL, and the failure
+        is silent. Bybit sends a snapshot only when you SUBSCRIBE. The
+        engine subscribes once at startup; the recorder is installed
+        after that, so it never sees one - it joins a stream of deltas
+        with nothing to apply them to. A reconstructor then refuses every
+        delta, and the symptom is what was measured: 658 usable book
+        states beside 5,687 trades, and an adverse-selection figure built
+        on a mid series so sparse it was meaningless.
+
+        So the recorder opens every session by writing the book the
+        engine already holds. It is marked `synthetic` and carries no
+        update id, because it is not something Bybit sent and the
+        manifest should not be able to mistake it for one.
+        """
+        symbol = symbol.upper()
+        if symbol not in self.symbols or not bids or not asks:
+            return False
+        stamp = int(at_ms if at_ms is not None else self._clock() * 1000)
+        frame = {
+            "topic": f"orderbook.50.{symbol}",
+            "ts": stamp, "r": stamp, "type": "snapshot",
+            "data": {
+                "u": 0,
+                "b": [[f"{price:.10g}", f"{size:.10g}"]
+                      for price, size in sorted(bids.items(), reverse=True)],
+                "a": [[f"{price:.10g}", f"{size:.10g}"]
+                      for price, size in sorted(asks.items())],
+            },
+            "synthetic": True,
+        }
+        with self._lock:
+            self._append(frame)
+            self.stats.seeded_snapshots += 1
+            self.stats.frames_buffered = len(self._buffer)
+        return True
+
     def stop(self, flush: bool = True) -> None:
         self._stop.set()
         thread = self._thread
@@ -403,6 +453,17 @@ class CaptureRecorder:
             self._stop.wait(1.0)
             if self._stop.is_set():
                 break
+            # Seed BEFORE the first flush, and keep trying until it takes.
+            # The engine's books are not synced the instant the process
+            # starts - Bybit's snapshot is on its way - so a seed attempted
+            # once at startup would usually find nothing and the session
+            # would be unreplayable for good.
+            if self._seed_hook is not None and not self._seeded:
+                try:
+                    if self._seed_hook(self):
+                        self._seeded = True
+                except Exception:               # never kill the thread
+                    logger.debug("capture seed failed", exc_info=True)
             try:
                 self.flush()
             except Exception as exc:                      # never kill the thread
@@ -569,6 +630,23 @@ def start_recorder(symbols: Sequence[str]) -> Optional[CaptureRecorder]:
             logger.info("research capture recording %s, budget %.0fMB",
                         ",".join(chosen), configured_budget_mb())
         return _recorder
+
+
+def seed_from_engine(recorder: "CaptureRecorder", engine) -> int:
+    """Open the session with whatever books the engine already holds.
+
+    Called once at startup and again after a resync, because both are
+    moments when the recorder's own view of the stream begins. A symbol
+    whose book is not synced is skipped rather than written half-formed."""
+    seeded = 0
+    for symbol in list(recorder.symbols):
+        state = engine.states.get(symbol)
+        book = getattr(state, "book", None) if state is not None else None
+        if book is None or not getattr(book, "synced", False):
+            continue
+        if recorder.seed_snapshot(symbol, dict(book.bids), dict(book.asks)):
+            seeded += 1
+    return seeded
 
 
 def reset_recorder() -> None:

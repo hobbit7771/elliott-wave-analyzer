@@ -345,6 +345,9 @@ def handle_microstructure(spec: Dict[str, Any]) -> Dict[str, Any]:
     ids = [r["segment_id"] for r in index]
     cap = int(spec.get("max_frames") or jobs.MAX_FRAMES_PER_JOB)
 
+    book = None
+    snapshots = 0
+    deltas_before_first_snapshot = 0
     spreads: List[float] = []
     depth_bid: List[float] = []
     depth_ask: List[float] = []
@@ -392,10 +395,16 @@ def handle_microstructure(spec: Dict[str, Any]) -> Dict[str, Any]:
 
     fee_floor = 2 * 2.0          # two maker legs at the published 2bps
     below_floor = sum(1 for s in spreads if s < fee_floor)
+    # HOW MANY BOOK STATES WERE USABLE AT ALL. A capture whose segments
+    # contain no snapshot can never be reconstructed - every delta is
+    # applied to nothing - and the symptom is a handful of book states
+    # beside thousands of trades. Reporting the ratio makes that visible
+    # instead of leaving it to be inferred from a strange statistic.
     out: Dict[str, Any] = {
         "symbol": symbol,
         "segments": len(index),
         "book_states": book_states,
+        "book_states_per_trade": round(book_states / trades, 4) if trades else None,
         "trades": trades,
         "spread_bps": _describe(spreads),
         "spread_below_maker_fee_floor_pct": round(
