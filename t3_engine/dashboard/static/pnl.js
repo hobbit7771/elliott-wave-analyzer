@@ -351,6 +351,121 @@
 
   /* ---- render --------------------------------------------------------- */
 
+  // ---- the research PAPER terminal ------------------------------------
+  //
+  // A THIRD book. It is drawn separately from the other two and never
+  // added to them: these are the pre-registered microstructure
+  // hypotheses trading through the execution simulator on FROZEN
+  // parameters, and a combined number would hide which of the three is
+  // doing anything.
+
+  var STATE_RU = {
+    RUNNING: 'работает',
+    RECOVERING: 'восстанавливается',
+    FEED_STALE: 'поток устарел',
+    STORAGE_DEGRADED: 'база недоступна',
+    STOPPED: 'остановлен'
+  };
+
+  var STATE_TONE = {
+    RUNNING: '#4ade80',
+    RECOVERING: '#fbbf24',
+    FEED_STALE: '#f87171',
+    STORAGE_DEGRADED: '#f87171',
+    STOPPED: '#94a3b8'
+  };
+
+  function declineRows(declines) {
+    var keys = Object.keys(declines || {});
+    if (!keys.length) return '';
+    keys.sort(function (a, b) { return declines[b] - declines[a]; });
+    var items = keys.slice(0, 6).map(function (k) {
+      return '<div class="le-kv"><span>' + esc(k) + '</span><b>' +
+        declines[k] + '</b></div>';
+    }).join('');
+    return '<div class="le-sub">Почему не входил</div>' + items;
+  }
+
+  function traderCard(key, report) {
+    if (!report || report.error) {
+      return card(esc(key), '<div class="le-note">Состояние нечитаемо.</div>');
+    }
+    var st = report.status || {};
+    var state = st.state || 'STOPPED';
+    var badge = '<span style="color:' + (STATE_TONE[state] || '#94a3b8') + '">' +
+      esc(STATE_RU[state] || state) + '</span>';
+
+    var inner = '';
+    // The heartbeat first: an old frame must never look alive.
+    inner += row('Возраст кадра',
+      st.feed_age_ms == null ? '—' : num(st.feed_age_ms / 1000, 1) + ' с',
+      st.feed_age_ms != null && st.feed_age_ms > 10000 ? 'neg' : '');
+    inner += row('Пульс',
+      st.heartbeat_age_seconds == null ? '—'
+        : num(st.heartbeat_age_seconds, 1) + ' с назад');
+    if (st.reason) {
+      inner += '<div class="le-note">' + esc(st.reason) + '</div>';
+    }
+    if (st.warmup_remaining_ms) {
+      inner += row('Прогрев', num(st.warmup_remaining_ms / 1000, 0) + ' с');
+    }
+    inner += row('Вход разрешён', report.may_enter ? 'да' : 'нет',
+      report.may_enter ? '' : 'neg');
+
+    inner += '<div class="le-sub">Результат</div>';
+    inner += row('Сделок', report.trades || 0);
+    inner += row('из них до перезапуска', st.recovered_trades || 0);
+    inner += row('Чистый P&L', signed(report.net_pnl, 4), tone(report.net_pnl));
+    inner += row('Комиссии', num(report.fees, 4));
+    inner += row('Фандинг', num(report.funding, 4));
+    inner += row('Ожидание, бп', signed(report.expectancy_bps, 2),
+      tone(report.expectancy_bps));
+    inner += row('Profit factor',
+      report.profit_factor == null
+        ? '—' + (report.profit_factor_undefined_reason
+            ? ' (' + esc(report.profit_factor_undefined_reason) + ')' : '')
+        : num(report.profit_factor, 2));
+    inner += row('Сигналов', report.signals || 0);
+    inner += row('Эпизодов', report.episodes_seen || 0);
+    inner += row('Пропусков данных', report.data_gaps || 0,
+      report.data_gaps ? 'neg' : '');
+
+    var ex = report.execution || {};
+    inner += '<div class="le-sub">Исполнение</div>';
+    inner += row('Заявок', ex.orders || 0);
+    inner += row('Исполнено', (ex.fill_rate != null
+      ? num(ex.fill_rate * 100, 1) + ' %' : '—'));
+    inner += row('Мейкером', (ex.maker_share != null
+      ? num(ex.maker_share * 100, 1) + ' %' : '—'));
+    inner += row('Отклонено post-only', ex.rejected_post_only || 0);
+    inner += row('Исполнено при отмене', ex.filled_while_cancelling || 0);
+
+    var open = report.open_position;
+    if (open) {
+      inner += '<div class="le-sub">Открытая позиция</div>';
+      inner += row('Направление', esc(open.direction));
+      inner += row('Вход', price(open.entry_price));
+      inner += row('Нереализовано', signed(open.unrealised, 4),
+        tone(open.unrealised));
+    }
+
+    inner += declineRows(report.strategy_declines);
+    return card(esc(key), inner, badge);
+  }
+
+  function researchCard(research) {
+    if (!research || !research.available) {
+      return card('Исследовательский PAPER',
+        '<div class="le-note">' +
+        esc((research && research.note) ||
+            'Не запущен на этом деплое.') + '</div>');
+    }
+    var keys = Object.keys(research.traders || {});
+    return keys.map(function (k) {
+      return traderCard(k, research.traders[k]);
+    }).join('');
+  }
+
   function render(data) {
     var body = document.getElementById('pnlBody');
     if (!body) return;
@@ -374,12 +489,20 @@
     html += '<div class="le-grid">';
     names.forEach(function (name) { html += paperCard(paper[name]); });
     if (leadNames.length) html += leadCard(lead);
+    html += researchCard(data.research);
     html += '</div>';
 
     html += '<div class="le-note">Два журнала считаются отдельно и никогда ' +
       'не складываются: это разные стратегии на разных горизонтах — ' +
       'Эллиотт на закрытых свечах против микроструктуры на стакане. ' +
       'Общая цифра скрыла бы, какая из двух работает.</div>';
+
+    html += '<div class="le-note"><b>Три книги, не одна.</b> Эллиотт на ' +
+      'закрытых свечах, виртуальный журнал Lead Engine на стакане, и ' +
+      'исследовательский PAPER — предварительно зарегистрированные ' +
+      'микроструктурные гипотезы через симулятор исполнения с ' +
+      'замороженными параметрами. Они никогда не складываются: общая ' +
+      'цифра скрыла бы, какая из них что-то делает.</div>';
 
     html += '<div class="le-note">Журнал Lead Engine сохраняется в базу и ' +
       'переживает перезапуск: строка «из них до перезапуска» говорит, ' +

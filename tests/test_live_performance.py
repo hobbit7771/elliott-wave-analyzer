@@ -229,3 +229,73 @@ def test_the_tab_exists_and_is_wired():
     script = client.get("/static/pnl.js")
     assert script.status_code == 200
     assert "/api/live/performance" in script.text
+
+
+# ---- the research PAPER terminal on the dashboard ------------------------
+
+def test_the_performance_endpoint_carries_a_third_book_kept_separate():
+    """Three strategies on three horizons. A combined number would hide
+    which of them is doing anything, so they are never added."""
+    from fastapi.testclient import TestClient
+
+    import t3_engine.dashboard.server as server_module
+
+    client = TestClient(server_module.app)
+    payload = client.get("/api/live/performance").json()
+
+    assert "research" in payload
+    assert "paper" in payload and "lead" in payload
+    # No total anywhere: the three are reported side by side or not at all.
+    assert "total_pnl" not in payload and "combined" not in payload
+
+
+def test_the_research_block_says_so_when_paper_is_not_enabled():
+    from fastapi.testclient import TestClient
+
+    import t3_engine.dashboard.server as server_module
+    from t3_engine.research import paper as research_paper
+
+    research_paper.reset_traders()
+    client = TestClient(server_module.app)
+    block = client.get("/api/live/performance").json()["research"]
+    assert block["available"] is False
+    assert "RESEARCH_PAPER_ENABLED" in block.get("note", "")
+
+
+def test_a_running_trader_is_reported_with_its_state_and_heartbeat():
+    from fastapi.testclient import TestClient
+
+    import t3_engine.dashboard.server as server_module
+    from t3_engine.research import paper as research_paper
+
+    research_paper.reset_traders()
+    trader = research_paper.start_trader("INJUSDT", "order_flow_impulse",
+                                         persist=False)
+    try:
+        client = TestClient(server_module.app)
+        block = client.get("/api/live/performance").json()["research"]
+        assert block["available"] is True
+        key = "INJUSDT:order_flow_impulse"
+        assert key in block["traders"]
+        report = block["traders"][key]
+        assert report["status"]["state"] in ("RECOVERING", "STOPPED",
+                                             "FEED_STALE", "RUNNING")
+        assert "may_enter" in report
+        assert report["profit_factor"] is None or report["profit_factor"] >= 0
+    finally:
+        research_paper.reset_traders()
+
+
+def test_the_pnl_tab_renders_the_research_card_and_names_the_three_books():
+    """A stale frame must not be able to look alive, so the card leads
+    with the frame age and the heartbeat."""
+    import pathlib
+
+    source = pathlib.Path(
+        "t3_engine/dashboard/static/pnl.js").read_text(encoding="utf-8")
+    assert "researchCard" in source
+    assert "html += researchCard(data.research);" in source
+    assert "Возраст кадра" in source and "Пульс" in source
+    assert "Три книги, не одна." in source
+    for state in ("RUNNING", "RECOVERING", "FEED_STALE", "STORAGE_DEGRADED"):
+        assert state in source
