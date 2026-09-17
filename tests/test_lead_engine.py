@@ -843,3 +843,76 @@ def test_the_recorder_reports_the_feed_rate_between_sweeps(caplog):
                   "data_failure=", "queue=", "dropped=", "net_latency=",
                   "queue_wait="):
         assert field in lines[1], f"{field} missing from {lines[1]}"
+
+
+# ---- what the 30-minute stability test needs to be able to read ---------
+
+def test_the_heartbeat_reports_memory_p99_and_uptime():
+    """A run of heartbeats is only a leak test if it carries memory and
+    uptime. A short replay proves nothing about either, and a backend
+    pass proves nothing about the phone."""
+    import logging
+
+    from t3_engine.lead_engine.config import LeadEngineConfig
+    from t3_engine.lead_engine.engine import LeadEngine
+    from t3_engine.lead_engine.storage import Recorder, Storage
+
+    engine = LeadEngine(LeadEngineConfig(symbols=["INJUSDT"], enabled=False))
+    recorder = Recorder(engine, Storage())
+
+    class FakeStats:
+        messages = 100
+        def as_dict(self):
+            return {"connected": True, "network_latency_ms": 80.0,
+                    "queue_latency_ms": 0.2, "queue_depth": 0,
+                    "queue_limit": 12_000, "dropped": 0, "connects": 1,
+                    "reconnects": 0, "subscribed_topics": 5}
+
+    engine.stream = type("S", (), {"stats": FakeStats()})()
+    recorder._book_ages.extend((time.time(), value)
+                               for value in (50.0, 90.0, 200.0, 900.0))
+
+    records = []
+
+    class Catcher(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    logger = logging.getLogger("t3_engine.lead_engine.storage")
+    handler = Catcher()
+    logger.addHandler(handler)
+    previous = logger.level
+    logger.setLevel(logging.INFO)
+    try:
+        recorder._heartbeat()
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
+
+    assert records, "the heartbeat did not log"
+    line = records[-1]
+    for field in ("recent_p99=", "recent_max=", "rss_mb=", "uptime_s=",
+                  "recent_median=", "recent_p95=", "gaps=", "resyncs=",
+                  "dropped=", "reconnects="):
+        assert field in line, f"{field} missing from: {line}"
+
+
+def test_reading_memory_never_breaks_the_heartbeat():
+    """A heartbeat that cannot read memory should still report the rest
+    of the line."""
+    import builtins
+
+    from t3_engine.lead_engine import storage as storage_module
+
+    original = builtins.open
+
+    def refuse(path, *args, **kwargs):
+        if str(path).startswith("/proc/self"):
+            raise OSError("no /proc here")
+        return original(path, *args, **kwargs)
+
+    builtins.open = refuse
+    try:
+        assert storage_module._rss_mb() == "?"
+    finally:
+        builtins.open = original

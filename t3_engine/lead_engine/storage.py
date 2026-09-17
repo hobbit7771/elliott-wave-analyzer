@@ -362,6 +362,21 @@ alter table lead_engine_virtual_trades enable row level security;
 """
 
 
+def _rss_mb() -> str:
+    """Resident memory, from whatever this box will tell us.
+
+    /proc/self/statm on Linux and nothing else needed - psutil is not a
+    dependency this project has, and a memory reading is not worth
+    acquiring one for. Returns "?" rather than raising: a heartbeat that
+    cannot read memory should still report the rest of the line."""
+    try:
+        with open("/proc/self/statm", "r", encoding="ascii") as handle:
+            pages = int(handle.read().split()[1])
+        return f"{pages * 4096 / 1e6:.1f}"
+    except Exception:                            # noqa: BLE001
+        return "?"
+
+
 class Recorder:
     """Files what the engine sees, whether or not anyone is looking.
 
@@ -422,6 +437,9 @@ class Recorder:
         # nothing of the sort. So the heartbeat reports BOTH: the whole
         # run, and the last few minutes.
         self._book_ages: Deque[Tuple[float, float]] = deque(maxlen=4_000)
+        # Memory over time, and uptime, are what turn a run of heartbeats
+        # into a leak test. A short replay proves nothing about either.
+        self._started_at = time.time()
 
     # How far back "recent" looks. Long enough that a quiet instrument
     # still contributes samples, short enough that a spike ages out of it
@@ -624,9 +642,10 @@ class Recorder:
             "lead_engine feed: connected=%s messages=%d rate=%s/s "
             "net_latency=%.1fms queue_wait=%.1fms queue=%d/%d dropped=%d "
             "book_age_median=%.0fms book_age_p95=%.0fms samples=%d "
-            "recent_median=%.0fms recent_p95=%.0fms recent_samples=%d "
+            "recent_median=%.0fms recent_p95=%.0fms recent_p99=%.0fms "
+            "recent_max=%.0fms recent_samples=%d "
             "gaps=%d resyncs=%d data_failure=%d%s connects=%d reconnects=%d "
-            "topics=%d symbols=%d",
+            "topics=%d symbols=%d rss_mb=%s uptime_s=%.0f",
             bool(snapshot.get("connected")), messages,
             "?" if rate is None else f"{rate:.1f}",
             float(snapshot.get("network_latency_ms") or 0.0),
@@ -635,13 +654,16 @@ class Recorder:
             int(snapshot.get("queue_limit") or 0),
             int(snapshot.get("dropped") or 0),
             self._percentile(ages, 0.5), self._percentile(ages, 0.95), len(ages),
-            self._percentile(recent, 0.5), self._percentile(recent, 0.95), len(recent),
+            self._percentile(recent, 0.5), self._percentile(recent, 0.95),
+            self._percentile(recent, 0.99),
+            max(recent) if recent else 0.0, len(recent),
             gaps, resyncs, failures,
             (" [" + "; ".join(failing) + "]") if failing else "",
             int(snapshot.get("connects") or 0),
             int(snapshot.get("reconnects") or 0),
             int(snapshot.get("subscribed_topics") or 0),
-            len(self.engine.states))
+            len(self.engine.states),
+            _rss_mb(), now - self._started_at)
 
     def _record_transition(self, symbol: str, state) -> int:
         """Only when the state actually CHANGED.
