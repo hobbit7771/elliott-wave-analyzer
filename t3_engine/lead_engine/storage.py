@@ -36,6 +36,8 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 # The single permitted shared-infrastructure import. See the docstring.
 from t3_engine.database import supabase_rest
 
+from t3_engine.lead_engine import calibration
+
 logger = logging.getLogger(__name__)
 
 TABLE_FEATURES = "lead_engine_features"
@@ -44,13 +46,16 @@ TABLE_LIQUIDATIONS = "lead_engine_liquidations"
 TABLE_SESSIONS = "lead_engine_sessions"
 TABLE_BACKTESTS = "lead_engine_backtests"
 TABLE_VIRTUAL_TRADES = "lead_engine_virtual_trades"
+TABLE_CALIBRATION = "lead_engine_calibration"
 
 ALL_TABLES = (TABLE_FEATURES, TABLE_SIGNALS, TABLE_LIQUIDATIONS,
-              TABLE_SESSIONS, TABLE_BACKTESTS, TABLE_VIRTUAL_TRADES)
+              TABLE_SESSIONS, TABLE_BACKTESTS, TABLE_VIRTUAL_TRADES,
+              TABLE_CALIBRATION)
 
 # Tables with a natural key, and the column that carries it. An insert
 # into one of these upserts instead of failing on a duplicate.
-CONFLICT_KEYS = {TABLE_VIRTUAL_TRADES: "trade_id"}
+CONFLICT_KEYS = {TABLE_VIRTUAL_TRADES: "trade_id",
+                 TABLE_CALIBRATION: "observation_id"}
 
 # Rows are pushed in batches this size. A realtime engine that made one
 # HTTP call per feature frame would spend more time in the network stack
@@ -129,6 +134,20 @@ class Storage:
 
     def record_liquidation(self, symbol: str, event: Dict[str, Any]) -> None:
         self.record(TABLE_LIQUIDATIONS, {"symbol": symbol, **event})
+
+    def load_calibration(self, symbol: str,
+                         limit: int = 2_000) -> List[Dict[str, Any]]:
+        """Settled calibration observations for one symbol."""
+        if not self.enabled:
+            return []
+        try:
+            return supabase_rest.select(
+                TABLE_CALIBRATION, {"symbol": symbol.upper()},
+                order="opened_ms.asc", limit=limit)
+        except Exception:                        # noqa: BLE001
+            logger.debug("lead_engine: calibration for %s not readable",
+                         symbol, exc_info=True)
+            return []
 
     def record_virtual_trade(self, row: Dict[str, Any]) -> None:
         """One terminal paper trade.
@@ -382,6 +401,7 @@ class Recorder:
         # Symbols whose paper ledger has already been seeded from
         # storage. Once each, on this thread - the engine itself holds no
         # database handle, and this is the seam that bridges them.
+        self._calibration_restored: set = set()
         self._ledgers_restored: set = set()
         self.sweeps = 0
         self.rows = 0
@@ -438,12 +458,14 @@ class Recorder:
                 continue                         # that cannot be read is skipped
             try:
                 self._restore_ledger(symbol, state)
+                self._restore_calibration(symbol, state)
                 self._note_freshness(symbol, frame)
                 self.storage.record_features(symbol, frame)
                 written += 1
                 written += self._record_transition(symbol, state)
                 written += self._record_liquidations(symbol, state)
                 written += self._record_virtual_trades(symbol, state)
+                written += self._record_calibration(symbol, state)
             except Exception:                    # noqa: BLE001 - storage
                 logger.debug("lead_engine recorder: %s not filed", symbol, exc_info=True)
         self.rows += written
@@ -476,6 +498,49 @@ class Recorder:
         except Exception:                        # noqa: BLE001 - a ledger
             logger.debug("lead_engine: %s ledger not restored",   # that cannot be
                          symbol, exc_info=True)                   # seeded starts empty
+
+    def _restore_calibration(self, symbol: str, state) -> None:
+        """Seed the calibrator from storage, once per symbol.
+
+        The calibrator needs thirty settled observations in a bucket
+        before it will report a probability and it collects a handful an
+        hour, so on a plan that stops the process every quarter of an
+        hour it could never finish - which is why it has reported "not
+        calibrated" since the day it was written. SETTLED observations
+        only: a pending one belongs to a process that no longer exists,
+        and its outcome would have to be measured against prices nobody
+        was watching."""
+        if symbol in self._calibration_restored:
+            return
+        self._calibration_restored.add(symbol)
+        calibrator = getattr(state, "calibrator", None)
+        if calibrator is None:
+            return
+        try:
+            rows = self.storage.load_calibration(symbol)
+            taken = calibrator.restore(
+                o for o in (calibration.observation_from_row(r) for r in rows)
+                if o is not None)
+            if taken:
+                logger.info("lead_engine: %s calibrator restored %d settled "
+                            "observations", symbol, taken)
+        except Exception:                        # noqa: BLE001 - a calibrator
+            logger.debug("lead_engine: %s calibration not restored",   # that cannot
+                         symbol, exc_info=True)                        # be seeded
+                                                                       # starts empty
+
+    def _record_calibration(self, symbol: str, state) -> int:
+        calibrator = getattr(state, "calibrator", None)
+        if calibrator is None:
+            return 0
+        rows = [calibration.observation_to_row(o)
+                for o in calibrator.drain_persist()]
+        for row in rows:
+            self.record_calibration_row(row)
+        return len(rows)
+
+    def record_calibration_row(self, row: Dict[str, Any]) -> None:
+        self.storage.record(TABLE_CALIBRATION, row)
 
     def _record_virtual_trades(self, symbol: str, state) -> int:
         """Drain the ledger's terminal trades onto the write buffer.

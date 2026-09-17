@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, Iterable, List, Optional
 
 # Score buckets, ten points wide. Wide enough to fill in reasonable time,
 # narrow enough that the answer means something.
@@ -105,6 +105,8 @@ class Calibrator:
     resolved: Deque[Observation] = field(default_factory=lambda: deque(maxlen=MAX_OBSERVATIONS))
     opened = 0
     abandoned = 0
+    restored = 0
+    _persisted: set = field(default_factory=set)
 
     # ---- recording ----
 
@@ -128,6 +130,34 @@ class Calibrator:
         self.pending.append(observation)
         self.opened += 1
         return observation
+
+    def drain_persist(self) -> List["Observation"]:
+        """Settled observations that have not been written yet."""
+        out = [o for o in self.resolved if id(o) not in self._persisted]
+        for observation in out:
+            self._persisted.add(id(observation))
+        return out
+
+    def restore(self, observations: Iterable["Observation"]) -> int:
+        """Reload settled observations from a previous process.
+
+        SETTLED ONLY, and deduplicated on the identity a row carries, so
+        a restart that re-reads the same rows does not double every
+        bucket's count and halve its apparent noise."""
+        seen = {(o.symbol, o.direction, o.opened_ms) for o in self.resolved}
+        added = 0
+        for observation in observations:
+            if not observation.settled:
+                continue
+            key = (observation.symbol, observation.direction, observation.opened_ms)
+            if key in seen:
+                continue
+            seen.add(key)
+            self.resolved.append(observation)
+            self._persisted.add(id(observation))
+            added += 1
+        self.restored = added
+        return added
 
     def resolve(self, price: float, timestamp_ms: int) -> int:
         """Settle pending observations against a price that arrived LATER.
@@ -228,6 +258,62 @@ class Calibrator:
             "rates": ready,
             "table": self.table(),
         }
+
+
+# ---- persistence ---------------------------------------------------------
+#
+# WITHOUT THIS THE CALIBRATOR CAN NEVER FINISH. It needs thirty settled
+# observations in a bucket before it will report a probability, and it
+# collects a handful an hour. Render's free plan stops a web service about
+# fifteen minutes after the last inbound request, so every restart used to
+# throw the whole record away - which is why `summary()` has said "not
+# calibrated" since the day it was written, and would have gone on saying
+# it forever however long the engine ran.
+#
+# Only SETTLED observations are stored. A pending one belongs to a process
+# that no longer exists; its outcome would have to be measured against
+# prices nobody was watching, and inventing them is exactly the kind of
+# fill this project refuses to invent elsewhere.
+
+TABLE_CALIBRATION = "lead_engine_calibration"
+
+
+def observation_to_row(observation: "Observation") -> Dict[str, Any]:
+    return {
+        # Idempotent: the same observation re-saved after a write timeout
+        # replaces itself instead of being counted twice.
+        "observation_id": f"{observation.symbol}:{observation.direction}:"
+                          f"{observation.opened_ms}",
+        "symbol": observation.symbol,
+        "direction": observation.direction,
+        "score": observation.score,
+        "level": observation.level,
+        "price": observation.price,
+        "opened_ms": observation.opened_ms,
+        "outcomes": {str(h): v for h, v in observation.outcomes.items()},
+        "resolved_ms": {str(h): v for h, v in observation.resolved_ms.items()},
+    }
+
+
+def observation_from_row(row: Dict[str, Any]) -> Optional["Observation"]:
+    try:
+        observation = Observation(
+            symbol=str(row["symbol"]), direction=str(row["direction"]),
+            score=float(row["score"]), level=float(row["level"]),
+            price=float(row["price"]), opened_ms=int(row["opened_ms"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+    for horizon, value in (row.get("outcomes") or {}).items():
+        try:
+            observation.outcomes[int(horizon)] = value
+        except (TypeError, ValueError):
+            continue
+    for horizon, value in (row.get("resolved_ms") or {}).items():
+        try:
+            observation.resolved_ms[int(horizon)] = int(value)
+        except (TypeError, ValueError):
+            continue
+    return observation
 
 
 def label_for(score: float, probability: Optional[float]) -> Dict[str, Any]:
