@@ -27,7 +27,10 @@ from t3_engine.research.portfolio import RiskLimits
 from t3_engine.research.runner import RunnerConfig, StrategyRunner
 from t3_engine.research.strategies import ALL_STRATEGIES
 
-SEGMENT_PAGE = 25
+# Smaller pages: each one is a decompress and a parse of everything in
+# it, held under the GIL, and a page of 25 segments was long enough to
+# starve the ingest thread between backpressure checks.
+SEGMENT_PAGE = 5
 
 
 def _rest():
@@ -68,6 +71,12 @@ def stream_frames(segment_ids: Sequence[str], *, verify: bool = True,
     real gaps in the data being recorded."""
     seen = 0
     for start in range(0, len(segment_ids), SEGMENT_PAGE):
+        # BACKPRESSURE, before the expensive part of each page. Yielding
+        # alone was measured and it was not enough: the cost is holding
+        # the GIL through a decompress and a parse, not the sleep. So the
+        # worker waits for the live feed to be caught up before it takes
+        # the next page at all.
+        jobs.wait_for_a_quiet_feed()
         chunk = list(segment_ids[start:start + SEGMENT_PAGE])
         rows = _rest()._request(
             "GET", TABLE_CAPTURES,
