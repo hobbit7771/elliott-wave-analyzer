@@ -1494,6 +1494,26 @@ def stale_timeframes(symbol: str, now: Optional[float] = None) -> List[str]:
     return [t for t in CLAUDE_TIMEFRAMES if t not in fresh]
 
 
+def research_paper_enabled() -> bool:
+    return os.getenv("RESEARCH_PAPER_ENABLED", "").strip().lower() in {
+        "1", "true", "yes", "on"}
+
+
+def research_paper_symbols(available: List[str]) -> List[str]:
+    raw = os.getenv("RESEARCH_PAPER_SYMBOLS", "").strip()
+    wanted = [s.strip().upper() for s in raw.split(",") if s.strip()]
+    have = {s.upper() for s in available}
+    return [s for s in wanted if s in have]
+
+
+def research_paper_strategies() -> List[str]:
+    from t3_engine.research.strategies import ALL_STRATEGIES
+
+    raw = os.getenv("RESEARCH_PAPER_STRATEGIES", "").strip()
+    wanted = [s.strip() for s in raw.split(",") if s.strip()]
+    return [s for s in wanted if s in ALL_STRATEGIES] or sorted(ALL_STRATEGIES)
+
+
 @app.on_event("startup")
 def start_lead_engine() -> None:
     """Bring the Market Lead Engine up, if it is switched on.
@@ -1519,12 +1539,37 @@ def start_lead_engine() -> None:
     try:
         from t3_engine.research import capture as research_capture
 
+        from t3_engine.research import TapFan
+
+        fan = TapFan()
         recorder = research_capture.start_recorder(engine.symbols())
         if recorder is not None:
-            engine.set_capture_tap(recorder.observe)
+            fan.add(recorder.observe)
             logger.info("research capture: %s", recorder.stats.as_dict())
+        if len(fan):
+            engine.set_capture_tap(fan)
+        app.state.research_tap = fan
     except Exception:                       # noqa: BLE001
         logger.exception("research capture failed to start; the engine is unaffected")
+        app.state.research_tap = None
+    # PAPER trading on the live feed. Started with parameters FROZEN at
+    # their pre-registered defaults before any data was fitted, so the
+    # forward record is out of sample with respect to anything the
+    # backtest later chooses.
+    try:
+        from t3_engine.research import paper as research_paper
+
+        fan = getattr(app.state, "research_tap", None)
+        if fan is not None and research_paper_enabled():
+            for symbol in research_paper_symbols(engine.symbols()):
+                for strategy in research_paper_strategies():
+                    trader = research_paper.start_trader(symbol, strategy)
+                    fan.add(trader.observe)
+                    logger.info("paper trader: %s %s -> %s", symbol, strategy,
+                                trader.status.state)
+            engine.set_capture_tap(fan)
+    except Exception:                       # noqa: BLE001
+        logger.exception("paper trading failed to start; the engine is unaffected")
     # The research worker. Experiments are queued as Supabase rows and run
     # HERE, because this process can reach both Bybit and Supabase and the
     # sandbox this is developed from can reach neither. It takes one job
