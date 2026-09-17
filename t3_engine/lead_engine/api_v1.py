@@ -83,6 +83,45 @@ def _envelope(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+@router.get("/research/paper")
+def research_paper(request: Request):
+    """The PAPER terminal's live state and its honest P&L.
+
+    Read-only like every other route here: it reports what the paper
+    traders did, and there is no code path from this package to an
+    exchange - `test_lead_engine_isolation.py` asserts the imports that
+    would be needed do not exist."""
+    blocked = _guard(request)
+    if blocked is not None:
+        return blocked
+    from t3_engine.research import paper as research_paper
+
+    traders = research_paper.get_traders()
+    return _envelope({
+        "read_only": True,
+        "traders": {key: trader.report() for key, trader in traders.items()},
+        "count": len(traders),
+    })
+
+
+@router.get("/research/capture")
+def research_capture_status(request: Request):
+    """How much real data has been recorded, and what it cost."""
+    blocked = _guard(request)
+    if blocked is not None:
+        return blocked
+    from t3_engine.research import capture as research_capture
+    from t3_engine.research import jobs as research_jobs
+
+    recorder = research_capture.get_recorder()
+    worker = research_jobs.get_worker()
+    return _envelope({
+        "read_only": True,
+        "capture": recorder.stats.as_dict() if recorder else {"state": "IDLE"},
+        "worker": worker.stats() if worker else {"alive": False},
+    })
+
+
 @router.get("/health")
 def health(request: Request):
     """Feed freshness for every symbol. The cheapest call, and the one an
