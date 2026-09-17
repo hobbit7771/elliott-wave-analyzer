@@ -103,6 +103,50 @@ would have answered. Sizes are capped against observed liquidity and the
 same resting size is never handed to two of our own orders, but a large
 order's real impact is outside what any recording can support.
 
+### Measured on the first capture, and what it already decides
+
+| measure | INJUSDT |
+|---|---|
+| spread, median | **1.78 bps** |
+| spread, p05 / p25 / p75 / p95 | 1.75 / 1.77 / 3.50 / 3.57 bps |
+| spread, max | 5.35 bps |
+| **share of books below the 4 bps maker fee floor** | **98.94%** |
+
+This is the prediction in `COST_MODEL.md` meeting the data. Two maker
+fills cost 4 bps on this venue at this tier, so the spread must exceed
+4 bps before a single adverse fill. On INJUSDT it does so in **one book
+in a hundred**.
+
+Hypothesis B — passive spread capture — is therefore **not viable on this
+instrument at this fee tier**, and that is arithmetic rather than a
+backtest result. No parameterisation changes it. A wider instrument would
+have to be found, and the wide ones are where adverse selection is worst,
+which is the next thing to measure rather than assume.
+
+### A defect this measurement exposed
+
+The same job reported **658 usable book states beside 5,687 trades**.
+That ratio is the tell: Bybit sends an order book snapshot only on
+SUBSCRIBE, the engine subscribes once at startup, and the research tap is
+installed after that — so the recorder joined a stream of deltas with
+nothing to apply them to, and a reconstructor silently refuses every
+delta in that state.
+
+The adverse-selection figures built on that mid series were meaningless
+and looked it: a median of 58.8 bps at sixty seconds against 5.2 bps at
+thirty, with the median larger than the mean. That shape does not come
+from a market.
+
+Fixed: every session now opens with the book the engine already holds,
+written as a snapshot frame and marked `synthetic` with no update id.
+Captures from 14:40 UTC onward carry one. **Earlier segments remain
+partially unreplayable and must not be used for execution results** — the
+spread measurement above survives because it needs only the books that
+were valid, not a continuous series.
+
+`book_states_per_trade` is now reported on every measurement, so a
+capture that cannot be reconstructed says so directly.
+
 ### Integrity
 
 Each segment stores a sha256 **over the raw decompressed frames**, so the

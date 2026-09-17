@@ -115,6 +115,13 @@ COALESCE_BOOK_MS = 100
 COALESCE_TICKER_MS = 5_000
 NEVER_COALESCED = ("publicTrade", "allLiquidation")
 
+# How often a fresh book snapshot is written into the stream. One at the
+# front makes a session replayable from the front; one every few minutes
+# makes ANY WINDOW of it replayable on its own, which is what a
+# walk-forward over slices needs. A full book is about a hundred levels,
+# so this costs almost nothing against the budget.
+RESEED_SECONDS = 300.0
+
 
 def _env(name: str, prefixed: str, default: str = "") -> str:
     for candidate in (name, prefixed):
@@ -261,6 +268,9 @@ class CaptureRecorder:
         self._last_frames: List[Dict[str, Any]] = []
         self._seed_hook: Optional[Callable[["CaptureRecorder"], bool]] = None
         self._seeded = False
+        self._last_seed_at = 0.0
+        self._started_waiting = clock()
+        self.reseed_seconds = RESEED_SECONDS
         budget = DEFAULT_BUDGET_MB if budget_mb is None else budget_mb
         self.stats = CaptureStats(budget_bytes=int(budget * 1e6))
 
@@ -392,11 +402,40 @@ class CaptureRecorder:
         self._thread.start()
         return True
 
+    def _maybe_seed(self) -> None:
+        """Write a fresh book snapshot when one is due."""
+        if self._seed_hook is None:
+            return
+        now = self._clock()
+        if self._seeded and (now - self._last_seed_at) < self.reseed_seconds:
+            return
+        try:
+            seeded = bool(self._seed_hook(self))
+        except Exception:                       # never kill the thread
+            logger.debug("capture seed failed", exc_info=True)
+            return
+        if seeded:
+            if not self._seeded:
+                logger.info("research capture: first snapshot seeded; the "
+                            "recording is replayable from here")
+            self._seeded = True
+            self._last_seed_at = now
+        elif not self._seeded and (now - self._started_waiting) > 60.0:
+            # Loud, because an unseeded capture is an unreplayable one and
+            # the symptom downstream is a strange statistic rather than an
+            # error.
+            logger.warning("research capture: no book has been seedable for "
+                           "%.0fs - the recording so far cannot be replayed",
+                           now - self._started_waiting)
+            self._started_waiting = now
+
     def set_seed_hook(self,
                       hook: Optional[Callable[["CaptureRecorder"], bool]]) -> None:
         """Install the callback that opens a session with a book."""
         self._seed_hook = hook
         self._seeded = False
+        self._last_seed_at = 0.0
+        self._started_waiting = self._clock()
 
     def seed_snapshot(self, symbol: str, bids: Dict[float, float],
                       asks: Dict[float, float], at_ms: Optional[int] = None) -> bool:
@@ -453,17 +492,22 @@ class CaptureRecorder:
             self._stop.wait(1.0)
             if self._stop.is_set():
                 break
-            # Seed BEFORE the first flush, and keep trying until it takes.
-            # The engine's books are not synced the instant the process
-            # starts - Bybit's snapshot is on its way - so a seed attempted
-            # once at startup would usually find nothing and the session
-            # would be unreplayable for good.
-            if self._seed_hook is not None and not self._seeded:
-                try:
-                    if self._seed_hook(self):
-                        self._seeded = True
-                except Exception:               # never kill the thread
-                    logger.debug("capture seed failed", exc_info=True)
+            # Seed BEFORE the first flush, and then KEEP RE-SEEDING.
+            #
+            # Once was the first design and it was both fragile and worse
+            # than it needed to be. Fragile, because the engine's books
+            # are not synced the instant the process starts and a single
+            # attempt finds nothing - and if it silently fails, the whole
+            # session is unreplayable and nothing says so.
+            #
+            # Worse than it needed to be, because a capture with one
+            # snapshot at the front can only be replayed FROM THE FRONT. A
+            # snapshot every few minutes means any window of the recording
+            # can be replayed on its own, which is what a walk-forward
+            # over slices actually needs. A full book costs about a
+            # hundred levels; at one every five minutes that is nothing
+            # against the byte budget.
+            self._maybe_seed()
             try:
                 self.flush()
             except Exception as exc:                      # never kill the thread

@@ -433,3 +433,64 @@ def test_seed_from_engine_skips_a_symbol_whose_book_is_not_synced():
 
     FakeEngine.states["INJUSDT"].book.synced = True
     assert cap.seed_from_engine(recorder, FakeEngine()) == 1
+
+
+def test_the_book_is_reseeded_periodically_not_only_once():
+    """One snapshot at the front makes a session replayable FROM THE
+    FRONT. A walk-forward over slices needs any window replayable on its
+    own, which needs a snapshot inside each of them."""
+    now = [1_000.0]
+    recorder = _recorder(clock=lambda: now[0])
+    recorder.set_seed_hook(
+        lambda r: r.seed_snapshot("INJUSDT", {5.75: 10.0}, {5.76: 10.0},
+                                  at_ms=int(now[0] * 1000)))
+
+    recorder._maybe_seed()
+    assert recorder.stats.seeded_snapshots == 1
+    now[0] += 60.0
+    recorder._maybe_seed()
+    assert recorder.stats.seeded_snapshots == 1        # not yet due
+    now[0] += recorder.reseed_seconds
+    recorder._maybe_seed()
+    assert recorder.stats.seeded_snapshots == 2
+
+
+def test_a_seed_that_cannot_find_a_book_keeps_trying():
+    """The engine's books are not synced the instant the process starts,
+    so a single attempt would usually find nothing - and a silent failure
+    leaves the whole session unreplayable with nothing saying so."""
+    now = [1_000.0]
+    recorder = _recorder(clock=lambda: now[0])
+    ready = [False]
+    recorder.set_seed_hook(
+        lambda r: ready[0] and r.seed_snapshot("INJUSDT", {5.75: 1.0},
+                                               {5.76: 1.0}, at_ms=1))
+
+    for _ in range(5):
+        recorder._maybe_seed()
+        now[0] += 1.0
+    assert recorder.stats.seeded_snapshots == 0
+    assert recorder._seeded is False
+
+    ready[0] = True
+    recorder._maybe_seed()
+    assert recorder.stats.seeded_snapshots == 1
+    assert recorder._seeded is True
+
+
+def test_a_long_unseedable_stretch_is_logged_loudly(caplog):
+    """An unseeded capture is an unreplayable one, and the symptom
+    downstream is a strange statistic rather than an error."""
+    import logging
+
+    now = [1_000.0]
+    recorder = _recorder(clock=lambda: now[0])
+    recorder.set_seed_hook(lambda r: False)
+
+    with caplog.at_level(logging.WARNING,
+                         logger="t3_engine.research.capture"):
+        recorder._maybe_seed()
+        now[0] += 61.0
+        recorder._maybe_seed()
+
+    assert any("cannot be replayed" in record.message for record in caplog.records)
