@@ -7,6 +7,7 @@ tested here, and nothing in this file is evidence about a market.
 """
 
 import random
+import time
 
 import pytest
 
@@ -449,3 +450,47 @@ def test_the_verdict_calls_spread_capture_unviable_below_the_fee_floor():
         "maker_fee_floor_bps": 4.0,
         "adverse_selection_bps": {}})
     assert wide["spread_capture_viable"] is True
+
+
+def test_a_job_claimed_by_a_dead_process_is_put_back_in_the_queue():
+    """On a plan that stops the service without warning, a worker dying
+    mid-job is the ORDINARY way a job ends. One restart must not leave a
+    row marked RUNNING forever with the whole queue stuck behind it."""
+    from t3_engine.research import jobs
+
+    written = []
+    fresh = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    stale = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                          time.gmtime(time.time() - 4 * 3600))
+
+    class FakeRest:
+        def select(self, table, filters=None, order=None, limit=None):
+            if (filters or {}).get("status") == "running":
+                return [{"job_id": "old", "attempts": 1, "claimed_at": stale},
+                        {"job_id": "new", "attempts": 1, "claimed_at": fresh}]
+            return []
+
+        def insert(self, table, rows, on_conflict=None):
+            written.extend(rows)
+
+    original = jobs._rest
+    jobs._rest = lambda: FakeRest()
+    try:
+        assert jobs.claim_next() is None        # nothing pending afterwards
+    finally:
+        jobs._rest = original
+
+    reclaimed = [r for r in written if r["status"] == "pending"]
+    assert [r["job_id"] for r in reclaimed] == ["old"]
+    # The attempt count travels with it, so a job that really kills the
+    # worker still runs out of attempts instead of looping forever.
+    assert reclaimed[0]["attempts"] == 1
+    assert "process that claimed this job is gone" in reclaimed[0]["error"]
+
+
+def test_an_unparseable_claim_stamp_does_not_reclaim_a_live_job():
+    from t3_engine.research import jobs
+
+    assert jobs._parse_stamp(None) is None
+    assert jobs._parse_stamp("not a date") is None
+    assert jobs._parse_stamp("2026-09-17T14:00:00Z") > 0
