@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Deque, Dict, Iterable, List, Optional
+from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 
 # Score buckets, ten points wide. Wide enough to fill in reasonable time,
 # narrow enough that the answer means something.
@@ -58,6 +58,15 @@ MAX_OBSERVATIONS = 5_000
 
 # How long an unresolved observation waits before being abandoned.
 MAX_PENDING_MS = 120_000
+
+
+def _key(observation: "Observation") -> Tuple[str, str, int]:
+    """An observation's STABLE identity.
+
+    The same triple `observation_id` is built from and `restore()`
+    deduplicates on, so what is written, what is reloaded and what is
+    considered already-written all agree."""
+    return (observation.symbol, observation.direction, observation.opened_ms)
 
 
 def bucket_of(score: float) -> int:
@@ -132,10 +141,26 @@ class Calibrator:
         return observation
 
     def drain_persist(self) -> List["Observation"]:
-        """Settled observations that have not been written yet."""
-        out = [o for o in self.resolved if id(o) not in self._persisted]
+        """Settled observations that have not been written yet.
+
+        KEYED ON IDENTITY, NOT ON ADDRESS. The first version used
+        `id(observation)`, and that was wrong twice over. `resolved` is a
+        bounded deque, so an old observation is evicted and collected -
+        and CPython then hands its address to the next object that fits.
+        A new observation landing on a recycled address would be treated
+        as already written and SILENTLY NEVER PERSISTED, which is data
+        loss in the one record this engine took weeks to start
+        accumulating.
+
+        The set also grew for ever, one entry per observation, which a
+        45-minute uptime measurement made visible as part of a 0.3MB/min
+        climb. Pruning to what is still in `resolved` bounds it: an
+        evicted observation can never be drained again anyway."""
+        out = [o for o in self.resolved if _key(o) not in self._persisted]
         for observation in out:
-            self._persisted.add(id(observation))
+            self._persisted.add(_key(observation))
+        live = {_key(o) for o in self.resolved}
+        self._persisted &= live
         return out
 
     def restore(self, observations: Iterable["Observation"]) -> int:
@@ -154,7 +179,7 @@ class Calibrator:
                 continue
             seen.add(key)
             self.resolved.append(observation)
-            self._persisted.add(id(observation))
+            self._persisted.add(_key(observation))
             added += 1
         self.restored = added
         return added
