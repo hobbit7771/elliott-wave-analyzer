@@ -37,13 +37,81 @@ TABLE_EXPERIMENTS = "research_experiments"
 PENDING, RUNNING, DONE, FAILED = "pending", "running", "done", "failed"
 
 # A free box has a tenth of a CPU and a live ingest thread that must keep
-# up. These are the limits that stop a backtest from being the reason the
-# data it studies has gaps.
+# up. The first version of this yielded 20ms every 5,000 frames and that
+# was nowhere near enough: with a job running, the measured ingest queue
+# wait went from 0.1ms to 7,203ms, every one of seven symbols went stale
+# at once, and the p99 book age went from 1.5s to 6.9s. The research
+# worker became the reason the data it was studying had gaps.
+#
+# Yielding more often is not the fix on its own, because the cost is not
+# the sleep, it is holding the GIL through a decompress and a JSON parse.
+# The fix is BACKPRESSURE: before each chunk the worker looks at the live
+# feed, and if the queue is deep or the books are stale it waits until
+# they are not. A job that takes twice as long and leaves the recording
+# intact is the trade this project wants; the opposite is worthless,
+# because the data is the whole asset.
 MAX_FRAMES_PER_JOB = 400_000
-YIELD_EVERY_FRAMES = 5_000
-YIELD_SECONDS = 0.02
+YIELD_EVERY_FRAMES = 500
+YIELD_SECONDS = 0.05
 POLL_SECONDS = 20.0
 MAX_ATTEMPTS = 3
+
+# The feed is "busy" past these, and a job waits rather than competing.
+BACKPRESSURE_QUEUE = 200
+BACKPRESSURE_BOOK_AGE_MS = 1_500
+BACKPRESSURE_WAIT_SECONDS = 0.5
+BACKPRESSURE_MAX_WAIT_SECONDS = 30.0
+
+
+def feed_pressure() -> Dict[str, Any]:
+    """What the live ingest path is currently coping with.
+
+    Imported lazily and wrapped. No stream means there is no live feed to
+    protect, so a job may proceed - that is the case in a test and in a
+    process with the engine switched off. An ERROR is different: it means
+    the pressure is unknown, and unknown is treated as busy rather than as
+    permission."""
+    try:
+        from t3_engine.lead_engine.engine import get_engine
+
+        engine = get_engine()
+        stream = getattr(engine, "stream", None)
+        if stream is None:
+            return {"queue": 0, "book_age_ms": 0.0, "known": False}
+        stats = stream.stats.as_dict()
+        # book_age_ms is a METHOD on health, not an attribute. Reading it
+        # with getattr and a 0.0 default silently returned "perfectly
+        # fresh" for every symbol, which would have disabled half of this
+        # check without failing anything.
+        ages = []
+        for state in list(engine.states.values()):
+            age = state.health.book_age_ms_now()
+            if age is not None:
+                ages.append(float(age))
+        return {"queue": int(stats.get("queue_depth") or 0),
+                "book_age_ms": max(ages) if ages else 0.0,
+                "known": True}
+    except Exception:                            # pragma: no cover - defensive
+        return {"queue": BACKPRESSURE_QUEUE + 1, "book_age_ms": 0.0,
+                "known": False}
+
+
+def wait_for_a_quiet_feed(stop: Optional[threading.Event] = None) -> float:
+    """Block until the ingest path has caught up, or a bounded while.
+
+    Bounded, because a permanently busy feed must not wedge the queue
+    forever - it slows research down, it does not stop it."""
+    waited = 0.0
+    while waited < BACKPRESSURE_MAX_WAIT_SECONDS:
+        pressure = feed_pressure()
+        if (pressure["queue"] <= BACKPRESSURE_QUEUE
+                and pressure["book_age_ms"] <= BACKPRESSURE_BOOK_AGE_MS):
+            return waited
+        if stop is not None and stop.is_set():
+            return waited
+        time.sleep(BACKPRESSURE_WAIT_SECONDS)
+        waited += BACKPRESSURE_WAIT_SECONDS
+    return waited
 
 
 def _rest():

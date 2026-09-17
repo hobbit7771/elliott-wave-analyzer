@@ -494,3 +494,107 @@ def test_an_unparseable_claim_stamp_does_not_reclaim_a_live_job():
     assert jobs._parse_stamp(None) is None
     assert jobs._parse_stamp("not a date") is None
     assert jobs._parse_stamp("2026-09-17T14:00:00Z") > 0
+
+
+# ---- backpressure: research must not corrupt the data it studies ---------
+
+def test_a_deep_ingest_queue_makes_a_job_wait():
+    """Measured, not hypothetical: with a job running and only a 20ms
+    yield every 5,000 frames, the ingest queue wait went from 0.1ms to
+    7,203ms and all seven symbols went stale at once. The research worker
+    became the reason the data it was studying had gaps."""
+    from t3_engine.research import jobs
+
+    pressures = [
+        {"queue": 5_000, "book_age_ms": 40.0, "known": True},
+        {"queue": 5_000, "book_age_ms": 40.0, "known": True},
+        {"queue": 3, "book_age_ms": 40.0, "known": True},
+    ]
+    original_pressure = jobs.feed_pressure
+    original_sleep = jobs.time.sleep
+    slept = []
+    jobs.feed_pressure = lambda: pressures.pop(0) if pressures else {
+        "queue": 0, "book_age_ms": 0.0, "known": True}
+    jobs.time.sleep = lambda s: slept.append(s)
+    try:
+        waited = jobs.wait_for_a_quiet_feed()
+    finally:
+        jobs.feed_pressure = original_pressure
+        jobs.time.sleep = original_sleep
+
+    assert waited > 0 and len(slept) == 2
+
+
+def test_a_stale_book_also_makes_a_job_wait_even_with_an_empty_queue():
+    """An empty queue with old books is a starved ingest thread, not a
+    quiet market."""
+    from t3_engine.research import jobs
+
+    pressures = [{"queue": 0, "book_age_ms": 6_000.0, "known": True},
+                 {"queue": 0, "book_age_ms": 50.0, "known": True}]
+    original_pressure, original_sleep = jobs.feed_pressure, jobs.time.sleep
+    jobs.feed_pressure = lambda: pressures.pop(0) if pressures else {
+        "queue": 0, "book_age_ms": 0.0, "known": True}
+    jobs.time.sleep = lambda s: None
+    try:
+        assert jobs.wait_for_a_quiet_feed() > 0
+    finally:
+        jobs.feed_pressure, jobs.time.sleep = original_pressure, original_sleep
+
+
+def test_the_wait_is_bounded_so_a_busy_feed_slows_research_without_wedging_it():
+    from t3_engine.research import jobs
+
+    original_pressure, original_sleep = jobs.feed_pressure, jobs.time.sleep
+    jobs.feed_pressure = lambda: {"queue": 99_999, "book_age_ms": 99_999.0,
+                                  "known": True}
+    jobs.time.sleep = lambda s: None
+    try:
+        waited = jobs.wait_for_a_quiet_feed()
+    finally:
+        jobs.feed_pressure, jobs.time.sleep = original_pressure, original_sleep
+    assert waited <= jobs.BACKPRESSURE_MAX_WAIT_SECONDS
+
+
+def test_an_unreadable_feed_counts_as_busy_rather_than_as_permission():
+    from t3_engine.research import jobs
+
+    import t3_engine.lead_engine.engine as engine_module
+
+    original = engine_module.get_engine
+    engine_module.get_engine = lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("engine unreadable"))
+    try:
+        pressure = jobs.feed_pressure()
+    finally:
+        engine_module.get_engine = original
+    assert pressure["known"] is False
+    assert pressure["queue"] > jobs.BACKPRESSURE_QUEUE
+
+
+def test_feed_pressure_reads_the_real_book_age_not_a_missing_attribute():
+    """`book_age_ms` is a METHOD on health. Reading it with getattr and a
+    0.0 default returned "perfectly fresh" for every symbol and would
+    have disabled half the backpressure check without failing anything."""
+    from t3_engine.lead_engine.config import LeadEngineConfig
+    from t3_engine.lead_engine.engine import LeadEngine
+    from t3_engine.research import jobs
+
+    import t3_engine.lead_engine.engine as engine_module
+
+    engine = LeadEngine(LeadEngineConfig(symbols=["INJUSDT"], enabled=False))
+    engine.stream = type("S", (), {
+        "stats": type("T", (), {"as_dict": lambda self: {"queue_depth": 7}})()})()
+    state = engine.states["INJUSDT"]
+    state.health.last_book_receive_ms = int(time.time() * 1000) - 9_000
+
+    original = engine_module.get_engine
+    engine_module.get_engine = lambda *a, **k: engine
+    try:
+        pressure = jobs.feed_pressure()
+    finally:
+        engine_module.get_engine = original
+
+    assert pressure["known"] is True
+    assert pressure["queue"] == 7
+    assert pressure["book_age_ms"] > 8_000, pressure
