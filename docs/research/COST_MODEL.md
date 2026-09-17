@@ -44,32 +44,50 @@ nothing from the spread, leaving the fees as the whole cost. It is an
 ASSUMPTION, it is varied in the stress scenarios, and it is replaced
 the moment real fills can measure it.
 
-## Break-even gross move, in bps
+## Adverse selection, measured
+
+The module began by ASSUMING each maker leg gives back half the spread,
+and said it would be replaced the moment real fills could measure it.
+They now can, from the tape alone: where the mid goes after an aggressive
+trade is what a resting order on that side paid.
+
+| instrument | spread median | adverse selection @1s | @5s | @30s |
+|---|---|---|---|---|
+| INJUSDT | 1.81 bps | **3.61** | **5.40** | **4.52** |
+| ATOMUSDT | 6.53 bps | **6.53** | **6.53** | **6.53** |
+
+INJUSDT gives back two to three times its spread. ATOMUSDT gives back
+almost exactly its spread. The assumption of one half was optimistic by a
+factor of two to six, so the default is now **1.0** — still below what
+INJUSDT measured, and the remaining error is in the safe direction: it
+understates the cost of resting, so a strategy failing this gate would
+fail a stricter one too.
+
+*Limit of the estimator, stated plainly:* it measures the mid move from
+just before the trade, so the bid-ask bounce is inside it and part of
+that move is mechanical rather than informational. The qualitative
+finding — adverse selection is of the order of the spread or larger —
+does not depend on separating the two, and that finding is what decides
+hypothesis B. Sample: one window per instrument, 928 and 82 trades.
+
+## Break-even gross move, in bps — with MEASURED adverse selection
 
 | spread (bps) | taker/taker | maker/taker | maker/maker |
 |---|---|---|---|
-| 0.5 | 11.50 | 8.00 | 4.00 |
-| 1 | 12.00 | 8.50 | 4.00 |
-| 2 | 13.00 | 9.50 | 4.00 |
-| 5 | 16.00 | 12.50 | 4.00 |
-| 10 | 21.00 | 17.50 | 4.00 |
-| 20 | 31.00 | 27.50 | 4.00 |
-| 50 | 61.00 | 57.50 | 4.00 |
+| 1.81 — INJUSDT median | 12.81 | 10.21 | 5.81 |
+| 4.00 — the fee floor | 15.00 | 13.50 | 8.00 |
+| 6.53 — ATOMUSDT median | 17.53 | 17.30 | 10.53 |
+| 10.00 | 21.00 | 22.50 | 14.00 |
+| 20.00 | 31.00 | 37.50 | 24.00 |
 
-Two things fall out of this table and both are decisive.
+**The sign of the maker/maker column has flipped, and that is the**
+**finding.** Under the assumed half-a-spread it was FLAT at 4bps at
+every spread. Under the measured figure it RISES: 5.81bps at
+INJUSDT's spread, 10.53 at ATOMUSDT's, 24.00 at twenty.
 
-**Crossing scales with the spread; resting does not.** A taker pays the
-spread, so a wide market punishes it directly. A maker earns the spread
-and gives it back to adverse selection, so its break-even is FLAT.
-
-**maker/maker break-even is 4 bps at every spread.**
-That is the falsifiable prediction this model makes before any data:
-passive spread capture on this venue at this fee tier needs a gross
-edge of 4 bps per round trip that does NOT come from the spread - and
-the spread is the only thing the strategy was supposed to earn. On an
-instrument whose spread sits near one tick, it cannot work however it
-is parameterised. `SpreadCapture.min_spread_bps()` is derived from the
-fee schedule for exactly this reason and is not a tunable.
+A wider spread earns more and gives back MORE than it earns. That is
+the opposite of the reason one would go looking for a wide
+instrument, and it is measured rather than argued.
 
 ## Worked waterfalls
 

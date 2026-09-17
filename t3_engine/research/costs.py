@@ -65,13 +65,32 @@ BYBIT_LINEAR_MAKER_BPS = 2.0
 # Funding is charged every eight hours, at 00:00, 08:00 and 16:00 UTC.
 FUNDING_INTERVAL_MS = 8 * 60 * 60 * 1000
 
-# How much of the spread a resting order gives back, per maker leg, when
-# nobody has measured it. One half is the uninformed-maker result: a
-# quote is lifted exactly when someone wanted to trade against it, and on
-# average that costs the provider the edge the spread was meant to earn.
-# An assumption, varied in the stress scenarios and replaced the moment
-# real fills can measure it.
-DEFAULT_ADVERSE_SELECTION_SHARE = 0.5
+# How much of the spread a resting order gives back, per maker leg.
+#
+# This began as an assumption of one half - the uninformed-maker result -
+# and said it would be replaced the moment real fills could measure it.
+# They now can, from the tape: where the mid goes after an aggressive
+# trade IS what a resting order on that side paid. Measured on the first
+# reconstructable capture:
+#
+#   INJUSDT  spread median 1.81bps; adverse selection 3.61bps at 1s,
+#            5.40 at 5s, 4.52 at 30s  -> TWO TO THREE TIMES the spread
+#   ATOMUSDT spread median 6.53bps; adverse selection 6.53bps at 1s, 5s
+#            and 30s                  -> of the order of the spread
+#
+# So one half was optimistic by a factor of two to six, and the default
+# moves to 1.0. That is still BELOW what INJUSDT measured, and the
+# direction of the remaining error is the safe one: it understates the
+# cost of resting, so a strategy that fails this gate would fail a
+# stricter one too.
+#
+# The estimator's limit, stated plainly: it measures the mid move from
+# just before the trade, so the bid-ask bounce is inside it. Some of that
+# move is mechanical rather than informational. The qualitative finding -
+# adverse selection is of the ORDER OF the spread or larger - does not
+# depend on separating the two, and that finding is what decides
+# hypothesis B.
+DEFAULT_ADVERSE_SELECTION_SHARE = 1.0
 
 
 @dataclass(frozen=True)
