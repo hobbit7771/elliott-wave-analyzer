@@ -415,7 +415,7 @@ def _supabase_writer(rows: List[Dict[str, Any]]) -> None:
 
     if not supabase_rest.configured():
         raise RuntimeError("Supabase is not configured; refusing to discard frames")
-    supabase_rest.insert(TABLE_CAPTURES, rows, upsert=True, on_conflict="segment_id")
+    supabase_rest.insert(TABLE_CAPTURES, rows, on_conflict="segment_id")
 
 
 _recorder: Optional[CaptureRecorder] = None

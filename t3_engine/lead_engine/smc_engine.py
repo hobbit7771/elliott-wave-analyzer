@@ -204,6 +204,18 @@ def find_order_block(candles: List[Candle], direction: str) -> Optional[Dict[str
     return None
 
 
+def _supersedes(incoming: Candle, existing: Candle) -> bool:
+    """May `incoming` replace `existing` for the same bar?
+
+    Only one case is forbidden, and it is the one that actually happened:
+    a bar that is CLOSED is final, so a still-forming update for the same
+    minute is stale news and is discarded. Everything else replaces - a
+    close arriving over a forming bar, a forming update over an older
+    forming one, a re-delivered closed bar over the identical closed bar
+    (a no-op that keeps a repeated backfill idempotent)."""
+    return not (existing.closed and not incoming.closed)
+
+
 class SmcEngine:
     """Structure for one symbol at one interval."""
 
@@ -241,9 +253,19 @@ class SmcEngine:
         `subscribe()` path, where the stream never stopped - the live bars
         arrive first and the history lands behind them. Measured on a
         240-bar series with twelve warm minutes: the same bars gave
-        nearest support 98.27 in order and 98.13 out of order."""
+        nearest support 98.27 in order and 98.13 out of order.
+
+        AND A CLOSED BAR IS FINAL. Replacing was unconditional, so a
+        forming update for a minute the backfill had already delivered
+        CLOSED overwrote the finished bar with a partial one - the true
+        high and low of that minute replaced by whatever had printed in
+        the fraction of it the live socket had seen. `_supersedes` is the
+        rule that stops it, and it is what makes a warm start, a
+        live-before-history start and a repeated backfill all converge on
+        the same series instead of three different ones."""
         if self.candles and self.candles[-1].start_ms == candle.start_ms:
-            self.candles[-1] = candle
+            if _supersedes(candle, self.candles[-1]):
+                self.candles[-1] = candle
         elif not self.candles or candle.start_ms > self.candles[-1].start_ms:
             self.candles.append(candle)
         else:
@@ -253,7 +275,8 @@ class SmcEngine:
                                 candle.start_ms)
             if index < len(self.candles) and \
                     self.candles[index].start_ms == candle.start_ms:
-                self.candles[index] = candle
+                if _supersedes(candle, self.candles[index]):
+                    self.candles[index] = candle
             else:
                 self.candles.insert(index, candle)
         if len(self.candles) > MAX_CANDLES:
