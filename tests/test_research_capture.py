@@ -35,7 +35,8 @@ def test_only_the_recorded_topics_and_symbols_are_kept():
     recorder.observe("kline.1.INJUSDT", _frame(), 3)        # not recorded: derivable
     recorder.observe("orderbook.50.BTCUSDT", _frame(), 4)   # not our symbol
     assert recorder.stats.frames_seen == 2
-    assert [f["topic"] for f in recorder._buffer] == [
+    recorder.flush(force=True)                 # closes the merge window
+    assert sorted(f["topic"] for f in recorder._last_frames) == [
         "orderbook.50.INJUSDT", "publicTrade.INJUSDT"]
 
 
@@ -118,7 +119,7 @@ def test_the_budget_is_checked_before_the_write_not_after():
     written = []
     recorder = _recorder(budget_mb=0.0005, writer=written.append)   # ~500 bytes
     for i in range(400):
-        recorder.observe("orderbook.50.INJUSDT", _frame(ts=i), i)
+        recorder.observe("publicTrade.INJUSDT", _frame(ts=i), i)
 
     assert recorder.flush(force=True) is None
     assert written == []
@@ -130,7 +131,7 @@ def test_a_segment_that_fits_is_written_and_counted():
     written = []
     recorder = _recorder(budget_mb=10.0, writer=written.append)
     for i in range(50):
-        recorder.observe("orderbook.50.INJUSDT", _frame(ts=i), i)
+        recorder.observe("publicTrade.INJUSDT", _frame(ts=i), i)
     segment = recorder.flush(force=True)
 
     assert len(written) == 1
@@ -260,3 +261,106 @@ def test_an_unconfigured_supabase_refuses_rather_than_discarding_frames():
             cap._supabase_writer([{"segment_id": "s:1"}])
     finally:
         supabase_rest.configured = original
+
+
+# ---- coalescing ---------------------------------------------------------
+
+def _delta(recv_ms, bids=(), asks=(), u=1, ts=None):
+    return ("orderbook.50.INJUSDT",
+            {"ts": ts if ts is not None else recv_ms, "type": "delta",
+             "data": {"u": u, "b": [list(x) for x in bids],
+                      "a": [list(x) for x in asks]}},
+            recv_ms)
+
+
+def test_merging_deltas_reconstructs_the_book_exactly_at_each_boundary():
+    """The claim coalescing rests on. A delta states the size a price NOW
+    holds, so the last word inside a window is the whole truth about that
+    window's end - and replaying merged windows must give byte-identical
+    books to replaying every frame."""
+    from t3_engine.research.book import BookReconstructor
+
+    raw = [
+        ("orderbook.50.INJUSDT",
+         {"ts": 1000, "type": "snapshot",
+          "data": {"u": 1, "b": [["5.75", "100"], ["5.74", "200"]],
+                   "a": [["5.76", "80"], ["5.77", "150"]]}}, 1000),
+        _delta(1010, bids=[("5.75", "90")], u=2),
+        _delta(1050, bids=[("5.75", "70")], asks=[("5.76", "60")], u=3),
+        _delta(1099, bids=[("5.74", "0")], u=4),          # last of window 10
+        _delta(1105, asks=[("5.76", "10")], u=5),         # window 11
+        _delta(1190, bids=[("5.73", "300")], u=6),
+    ]
+
+    recorder2 = _recorder()
+    for topic, message, recv in raw:
+        recorder2.observe(topic, message, recv)
+    segment = recorder2.flush(force=True)
+    merged = cap.decode_segment(segment.payload)
+
+    full = BookReconstructor()
+    coalesced = BookReconstructor()
+    for topic, message, recv in raw:
+        full.apply({"type": message["type"], "ts": message["ts"], "r": recv,
+                    "data": message["data"]})
+    for frame in merged:
+        coalesced.apply(frame)
+
+    a, b = full.state(), coalesced.state()
+    assert a.bids == b.bids and a.asks == b.asks
+    assert b.bids == [(5.75, 70.0), (5.73, 300.0)]
+    assert b.asks == [(5.76, 10.0), (5.77, 150.0)]
+    # And it really did compress: six frames in, fewer out.
+    assert len(merged) < len(raw)
+    assert recorder2.stats.frames_coalesced > 0
+
+
+def test_a_snapshot_is_never_merged_into_a_delta():
+    """A snapshot is a new starting point. Folding it into a delta would
+    turn "the book is exactly this" into "these levels changed"."""
+    recorder = _recorder()
+    recorder.observe(*_delta(1010, bids=[("5.75", "90")]))
+    recorder.observe("orderbook.50.INJUSDT",
+                     {"ts": 1020, "type": "snapshot",
+                      "data": {"u": 9, "b": [["5.70", "1"]], "a": [["5.71", "1"]]}},
+                     1020)
+    segment = recorder.flush(force=True)
+    frames = cap.decode_segment(segment.payload)
+    assert [f["type"] for f in frames] == ["delta", "snapshot"]
+    assert frames[1]["data"]["b"] == [["5.70", "1"]]
+
+
+def test_trades_and_liquidations_are_never_coalesced():
+    """They are the information-bearing events: the tape is what fills a
+    maker and what shows aggression."""
+    recorder = _recorder()
+    for i in range(10):
+        recorder.observe("publicTrade.INJUSDT",
+                         {"ts": 1000 + i, "type": "snapshot",
+                          "data": [{"p": "5.75", "v": "1", "S": "Buy"}]}, 1000 + i)
+    segment = recorder.flush(force=True)
+    assert segment.frames == 10
+    assert recorder.stats.frames_coalesced == 0
+
+
+def test_tickers_are_thinned_to_one_every_few_seconds():
+    """31% of frames and over half the bytes, for a 1Hz republication of
+    a funding rate that changes every eight hours."""
+    recorder = _recorder()
+    for i in range(20):
+        recorder.observe("tickers.INJUSDT",
+                         {"ts": 1000 + i * 1000, "type": "snapshot",
+                          "data": {"fundingRate": "0.0001"}}, 1000 + i * 1000)
+    segment = recorder.flush(force=True)
+    assert segment.frames == 4                 # 20 seconds at one per five
+    assert recorder.stats.frames_coalesced == 16
+
+
+def test_a_flush_never_ends_in_the_middle_of_a_merge_window():
+    """An unflushed pending delta at the end of a segment would be lost
+    at shutdown - a silent hole at every restart."""
+    recorder = _recorder()
+    recorder.observe(*_delta(1010, bids=[("5.75", "90")]))
+    segment = recorder.flush(force=True)
+    assert segment is not None and segment.frames == 1
+    assert cap.decode_segment(segment.payload)[0]["data"]["b"] == [["5.75", "90"]]

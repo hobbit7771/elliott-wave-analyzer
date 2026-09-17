@@ -88,6 +88,33 @@ BUFFER_LIMIT = 20_000
 # the bill.
 RECORDED_PREFIXES = ("orderbook", "publicTrade", "tickers", "allLiquidation")
 
+# COALESCING, AND WHY IT IS NOT A LOSS OF INFORMATION.
+#
+# Measured on the first two minutes of real recording: tickers were 31%
+# of frames and, being fat objects, over half the bytes - for a 1Hz
+# republication of the mark price and a funding rate that changes every
+# eight hours. Order book deltas were another 37%.
+#
+# Book deltas are MERGED rather than sampled. Merging is exact: a delta
+# says "this price now holds this size", so the last word within a window
+# is the whole truth about that window's end, and replaying the merged
+# stream reconstructs the book EXACTLY as it stood at each boundary. What
+# is lost is time resolution between boundaries, not accuracy at them.
+#
+# 100ms is chosen against what this deployment can act on. A decision
+# here reaches the exchange in something like 150-250ms; book detail
+# finer than that cannot inform a tradeable decision, so recording it
+# would spend the quota on resolution no strategy could use. Anything
+# claiming an edge inside 100ms is out of scope for this hosting and the
+# data says so rather than implying otherwise.
+#
+# Trades and liquidations are NEVER coalesced. They are 3% of the frames
+# and they are the information-bearing events - the tape is what fills a
+# maker and what shows aggression - so they are kept one for one.
+COALESCE_BOOK_MS = 100
+COALESCE_TICKER_MS = 5_000
+NEVER_COALESCED = ("publicTrade", "allLiquidation")
+
 
 def _env(name: str, prefixed: str, default: str = "") -> str:
     for candidate in (name, prefixed):
@@ -161,6 +188,7 @@ class CaptureStats:
     frames_written: int = 0
     frames_dropped: int = 0
     segments_written: int = 0
+    frames_coalesced: int = 0
     write_failures: int = 0
     raw_bytes: int = 0
     stored_bytes: int = 0
@@ -179,6 +207,7 @@ class CaptureStats:
             "frames_written": self.frames_written,
             "frames_dropped": self.frames_dropped,
             "segments_written": self.segments_written,
+            "frames_coalesced": self.frames_coalesced,
             "write_failures": self.write_failures,
             "raw_mb": round(self.raw_bytes / 1e6, 3),
             "stored_mb": round(self.stored_bytes / 1e6, 3),
@@ -222,6 +251,12 @@ class CaptureRecorder:
         self._segment_opened_at = clock()
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        self.coalesce_book_ms = COALESCE_BOOK_MS
+        self.coalesce_ticker_ms = COALESCE_TICKER_MS
+        # symbol -> the delta being merged for the current window
+        self._pending_delta: Dict[str, Dict[str, Any]] = {}
+        self._last_ticker_ms: Dict[str, int] = {}
+        self._last_frames: List[Dict[str, Any]] = []
         budget = DEFAULT_BUDGET_MB if budget_mb is None else budget_mb
         self.stats = CaptureStats(budget_bytes=int(budget * 1e6))
 
@@ -244,21 +279,93 @@ class CaptureRecorder:
             return
         with self._lock:
             self.stats.frames_seen += 1
-            if len(self._buffer) >= self.buffer_limit:
-                # Drop the OLDEST, same rule as the ingest queue: a
-                # recorder that blocks the ingest thread to stay complete
-                # has broken the thing it was recording.
-                self._buffer.popleft()
-                self._dropped_since_flush += 1
-                self.stats.frames_dropped += 1
-            self._buffer.append({
+            frame = {
                 "topic": topic,
                 "ts": int(message.get("ts") or 0),
                 "r": received_at_ms,
                 "type": message.get("type") or "",
                 "data": message.get("data"),
-            })
+            }
+            for ready in self._coalesce(head, symbol, frame):
+                self._append(ready)
             self.stats.frames_buffered = len(self._buffer)
+
+    def _append(self, frame: Dict[str, Any]) -> None:
+        """Buffer one frame, dropping the oldest if the buffer is full.
+
+        Same rule as the ingest queue: a recorder that blocks the ingest
+        thread to stay complete has broken the thing it was recording."""
+        if len(self._buffer) >= self.buffer_limit:
+            self._buffer.popleft()
+            self._dropped_since_flush += 1
+            self.stats.frames_dropped += 1
+        self._buffer.append(frame)
+
+    def _coalesce(self, head: str, symbol: str,
+                  frame: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Return the frames that are now ready to buffer.
+
+        Called with the lock held. Trades and liquidations pass straight
+        through; a book delta is MERGED into the window it belongs to and
+        emitted when the window rolls; a snapshot flushes whatever was
+        pending and goes out on its own, because a snapshot is a new
+        starting point and merging it into a delta would lose that."""
+        if head in NEVER_COALESCED:
+            return [frame]
+
+        if head == "tickers":
+            if not self.coalesce_ticker_ms:
+                return [frame]
+            last = self._last_ticker_ms.get(symbol, 0)
+            if frame["r"] - last < self.coalesce_ticker_ms:
+                self.stats.frames_coalesced += 1
+                return []
+            self._last_ticker_ms[symbol] = frame["r"]
+            return [frame]
+
+        if head != "orderbook" or not self.coalesce_book_ms:
+            return [frame]
+
+        pending = self._pending_delta.get(symbol)
+        if (frame["type"] or "").lower() == "snapshot":
+            out = []
+            if pending is not None:
+                out.append(_pending_to_frame(pending))
+                self._pending_delta.pop(symbol, None)
+            out.append(frame)
+            return out
+
+        bucket = frame["r"] // self.coalesce_book_ms
+        out = []
+        if pending is not None and pending["bucket"] != bucket:
+            out.append(_pending_to_frame(pending))
+            pending = None
+        if pending is None:
+            pending = {"bucket": bucket, "topic": frame["topic"], "b": {},
+                       "a": {}, "ts": frame["ts"], "r": frame["r"], "u": 0,
+                       "merged": 0}
+            self._pending_delta[symbol] = pending
+        else:
+            self.stats.frames_coalesced += 1
+
+        data = frame.get("data") or {}
+        # A delta states the size a price now holds, so the LAST word in
+        # the window is the whole truth about the window's end.
+        for price, size in (data.get("b") or []):
+            pending["b"][price] = size
+        for price, size in (data.get("a") or []):
+            pending["a"][price] = size
+        pending["ts"] = frame["ts"] or pending["ts"]
+        pending["r"] = frame["r"]
+        pending["u"] = int(data.get("u") or pending["u"])
+        pending["merged"] += 1
+        return out
+
+    def _drain_pending(self) -> None:
+        """Called with the lock held, before a flush, so a segment never
+        ends in the middle of a merge window."""
+        for symbol in list(self._pending_delta):
+            self._append(_pending_to_frame(self._pending_delta.pop(symbol)))
 
     # ---- lifecycle ----------------------------------------------------
 
@@ -315,6 +422,7 @@ class CaptureRecorder:
     def flush(self, force: bool = False) -> Optional[Segment]:
         now = self._clock()
         with self._lock:
+            self._drain_pending()
             if not force and not self._should_flush(now):
                 return None
             if not self._buffer:
@@ -328,6 +436,7 @@ class CaptureRecorder:
             self._seq += 1
             seq = self._seq
 
+        self._last_frames = frames          # for tests and for a post-mortem
         segment = self._build(frames, seq, dropped)
 
         # The budget is checked against what this row WOULD cost, before
@@ -385,6 +494,21 @@ class CaptureRecorder:
             sha256=hashlib.sha256(raw).hexdigest(),
             payload=payload,
         )
+
+
+def _pending_to_frame(pending: Dict[str, Any]) -> Dict[str, Any]:
+    """The merged window, back in Bybit's own delta shape so a reader
+    needs no special case for it. `m` records how many frames went in, so
+    the manifest can report the real update rate rather than the
+    recorded one."""
+    return {
+        "topic": pending["topic"], "ts": pending["ts"], "r": pending["r"],
+        "type": "delta",
+        "data": {"u": pending["u"],
+                 "b": [[p, q] for p, q in pending["b"].items()],
+                 "a": [[p, q] for p, q in pending["a"].items()]},
+        "m": pending["merged"],
+    }
 
 
 def decode_segment(payload: str) -> List[Dict[str, Any]]:
