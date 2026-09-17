@@ -625,3 +625,161 @@ another's budget. A single HTTP test remains for the part only HTTP can
 prove: that the limiter's refusal reaches the caller as a 429. All four
 were checked against a deliberately broken limiter first; three fail when
 the per-second rule is disabled, so they bite.
+
+
+---
+
+# Round 10 — what the data can and cannot pay for
+
+Asked for a positive expectation and a positive net P&L after all modelled
+costs, on previously unused verification history, confirmed afterwards in
+a PAPER forward test. The honest state of that at the end of this round is
+in `docs/research/` and summarised at the bottom of this entry.
+
+## The finding that reframed everything else
+
+`tests/fixtures/bybit_capture_injusdt.jsonl.gz` is described in this
+repository as "twenty minutes of six Bybit topics ... saved rather than
+generated", and the previous round's report cited a "replay of 10,288
+recorded Bybit frames" as evidence.
+
+It is not a recording. Every timestamp sits on an exact 500ms grid
+starting at 1700000000000, the span is exactly 1199.5 seconds, and every
+BTCUSDT level holds exactly size 8. It reports 2.0 book updates a second
+at a median of 80 levels per update; the real recording made this round
+reports 14.4 a second at 6 levels.
+
+The replay was real and the engine did run clean through it. The word
+"recorded" was not, and no execution result may cite that file.
+
+`lead_engine_features` is not a substitute either: one row every fifteen
+seconds of already-computed scores cannot reconstruct a spread, a queue or
+the path between two rows, so it cannot price a fill.
+
+## So the first thing built was a recorder
+
+`t3_engine/research/capture.py`. Book snapshots and deltas, every trade
+and liquidation with the aggressor side, and BOTH clocks - the exchange's
+and this process's - because that is what makes causality checkable.
+
+Inside the free tier, and the constraints are in the code rather than in a
+comment: the byte budget is checked BEFORE each write, not after, because
+discovering a quota by filling it destroys the thing it was feeding;
+drops are counted and travel with the next segment, so a gap is visible in
+the data rather than inferred from its absence; and `segment_id` is the
+idempotency key, so a retry after a write timeout upserts instead of
+double-billing.
+
+Book deltas are MERGED into exact 100ms windows. Merging is lossless at
+the boundary - a delta states the size a price now holds, so the last word
+in a window is the whole truth about that window's end - and a test
+reconstructs the book from the merged stream and from every frame and
+asserts the two are identical. 100ms is chosen against what this
+deployment can act on: a decision here reaches the exchange in roughly
+150-250ms, so finer detail could not inform a tradeable decision.
+
+The first two minutes of real recording then corrected an assumption:
+tickers were 31% of frames and over half the bytes, for a 1Hz
+republication of a funding rate that changes every eight hours. Thinned
+to one per five seconds.
+
+## Costs, per regime, because 13bps was one execution choice
+
+The previous round priced every trade at 2 x 5.5bps taker + 2 x 1bp
+slippage and concluded that no signal could pay it. That is right for
+taker in and taker out and for nothing else.
+
+`docs/research/COST_MODEL.md` is generated from the code the simulator
+charges with. Round-trip fees are 11.0bps taker/taker, 7.5 maker/taker,
+4.0 maker/maker. No rebate is assumed anywhere.
+
+A real defect came out of writing it. The maker break-even was computable
+as ZERO: at a spread of exactly two maker fees, maker/maker cost came out
+0.00bps and any positive expectation "paid for itself". A resting order is
+filled precisely when someone wanted to trade against it, so each maker
+leg is now charged half the spread unless a measured figure is supplied.
+
+The consequence is the round's sharpest prediction, and it is falsifiable:
+**maker/maker break-even is FLAT at 4bps at every spread.** A wider spread
+earns more and gives back exactly as much. Passive spread capture on this
+venue at this fee tier therefore needs a 4bps edge that does NOT come from
+the spread - and the spread was the only thing the strategy was meant to
+earn.
+
+## A simulator that can say no
+
+`t3_engine/research/execution.py`. Four separate latencies, because
+information, send, ack and cancel are four different things. A cancel
+takes time and can lose to a fill in flight - assuming it is instant is
+how a simulated strategy avoids every loss it would really have taken.
+Takers walk real depth and partial when it runs out. Post-only is rejected
+when marketable AT ARRIVAL rather than quietly filled as a maker.
+
+Maker fills are estimates and never pretend otherwise: Bybit's public book
+is aggregated per price level, so queue position is unknowable, and the
+model carries a conservative and an optimistic reading rather than one
+number. A result that exists only under the optimistic one has not been
+shown to work.
+
+## Three hypotheses, each naming who loses
+
+Mechanism before code, in `strategies.py`: order-flow impulse (depth
+drains and does NOT replenish, so price must move to find liquidity),
+passive spread capture (immediacy is sold), and sweep reversion (a forced
+seller is not choosing the price). All three share the gate the previous
+calibration lacked - an entry is refused unless the expected move clears
+the round trip IN THE REGIME IT WILL ACTUALLY USE - and every refusal is
+recorded with its reason, so NO_TRADE is a result rather than a silence.
+
+## Defects, including one that had been invisible for weeks
+
+`docs/research/DEFECT_MAP.md` has all eight. Two are worth repeating here.
+
+**A closed bar was replaceable by a forming one.** The backfill delivers a
+minute CLOSED; a live update for the same minute then overwrote it, so the
+minute's true high and low were replaced by whatever had printed in the
+fraction the socket had seen. Cold start, live-before-history and a
+repeated backfill now provably converge on the same series.
+
+**The calibrator could never finish.** `calibration.py` had no persistence
+at all. It needs thirty settled observations in a bucket, opens a handful
+an hour, and the free plan stops the process every fifteen idle minutes -
+so `summary()` would have reported "not calibrated" forever, however long
+the engine ran, which is exactly what it had been reporting. Settled
+observations are now stored and restored; pending ones deliberately are
+not, because one belongs to a process that no longer exists.
+
+## And two the new tests caught in the new code
+
+**One infinity destroyed a completed result.** The first real backtest ran
+end to end against the live recording and was then recorded as a FAILURE,
+because writing its result raised "Out of range float values are not JSON
+compliant" - a profit factor of infinity from a sample with no losing
+trade. That number should never have existed: "no losing trade yet" is not
+"infinitely profitable". It is None now, acceptance treats undefined as a
+fail, and a json_safe pass means one bad number can never cost a whole row
+again.
+
+**A job's attempt counter reset on failure**, so a job that had failed
+three times still read as having been tried none and would have retried
+forever.
+
+## Where this leaves the actual question
+
+The machinery is complete, tested and deployed. The data is not yet
+enough, and no amount of analysis fixes that:
+
+* the only real microstructure recording began this round,
+* the free plan stopped the process nine times in the first forty
+  minutes, the longest unbroken session being 8.9 minutes,
+* a walk-forward needs a train, a validation and one untouched final test
+  across several days and regimes.
+
+So the verdict at the end of this round is **no candidate confirmed, and
+none rejected on evidence either** - with one exception, which is the
+maker arithmetic above, and which needed no backtest at all.
+
+What is running now: the recorder, the three strategies in PAPER on FROZEN
+pre-registered parameters (so the forward record is out of sample with
+respect to anything fitted later), and a job worker that executes
+experiments where the data is.
