@@ -58,12 +58,21 @@ def enqueue(kind: str, spec: Dict[str, Any], job_id: Optional[str] = None) -> st
     return job_id
 
 
+# A job claimed longer ago than this was claimed by a process that no
+# longer exists. On a plan that stops the service without warning that is
+# the ordinary way a job ends, so it has to self-heal - otherwise one
+# restart leaves a row marked RUNNING forever and the queue behind it
+# never moves.
+STALE_CLAIM_SECONDS = 1_800
+
+
 def claim_next() -> Optional[Dict[str, Any]]:
-    """Take the oldest pending job.
+    """Take the oldest pending job, reclaiming abandoned ones first.
 
     Single worker per process and one service, so a compare-and-set is
     not needed; the attempt counter is what stops a job that kills the
     process from being retried forever."""
+    _reclaim_stale()
     rows = _rest().select(TABLE_JOBS, filters={"status": PENDING},
                           order="created_at.asc", limit=1)
     if not rows:
@@ -78,6 +87,43 @@ def claim_next() -> Optional[Dict[str, Any]]:
                                  "attempts": int(job.get("attempts") or 0) + 1,
                                  "claimed_at": _now()}], on_conflict="job_id")
     return job
+
+
+def _reclaim_stale() -> None:
+    """Put RUNNING jobs from a dead process back in the queue.
+
+    The attempt counter came with them, so a job that genuinely kills the
+    worker still runs out of attempts rather than looping forever."""
+    try:
+        rows = _rest().select(TABLE_JOBS, filters={"status": RUNNING},
+                              order="claimed_at.asc", limit=20)
+    except Exception:                            # storage down: not our turn
+        return
+    cutoff = time.time() - STALE_CLAIM_SECONDS
+    for row in rows or []:
+        claimed = _parse_stamp(row.get("claimed_at"))
+        if claimed is not None and claimed > cutoff:
+            continue
+        try:
+            _rest().insert(TABLE_JOBS, [{**row, "status": PENDING,
+                                         "error": "reclaimed: the process that "
+                                                  "claimed this job is gone"}],
+                           on_conflict="job_id")
+            logger.info("research: reclaimed stale job %s", row.get("job_id"))
+        except Exception:                        # pragma: no cover - defensive
+            continue
+
+
+def _parse_stamp(value: Any) -> Optional[float]:
+    if not value:
+        return None
+    text = str(value).replace("Z", "+00:00")
+    try:
+        from datetime import datetime
+
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
 
 
 def finish(job: Dict[str, Any], result: Dict[str, Any]) -> None:
