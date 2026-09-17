@@ -5,6 +5,8 @@ inbound request, so a restart is the NORMAL case here, not an edge case.
 These tests are about what survives one and what must not.
 """
 
+import time
+
 import pytest
 
 from t3_engine.research import paper as pp
@@ -239,3 +241,58 @@ def test_the_research_package_cannot_reach_an_exchange_credential():
         text = path.read_text()
         for needle in banned:
             assert needle not in text, f"{path.name} mentions {needle}"
+
+
+# ---- the optional keep-alive ---------------------------------------------
+
+def test_the_keepalive_is_off_unless_explicitly_asked_for(monkeypatch):
+    """Free instance hours are a shared monthly allowance across the
+    workspace. A service that never sleeps spends them continuously and
+    can take every other free service down with it, so this is the
+    account owner's decision and not a default."""
+    from t3_engine.research import keepalive
+
+    monkeypatch.delenv(keepalive.ENABLED_ENV, raising=False)
+    keepalive.reset_keepalive()
+    assert keepalive.enabled() is False
+    assert keepalive.start_keepalive() is None
+
+
+def test_it_refuses_to_start_without_a_url_rather_than_pinging_nothing(monkeypatch):
+    from t3_engine.research import keepalive
+
+    monkeypatch.setenv(keepalive.ENABLED_ENV, "true")
+    monkeypatch.delenv(keepalive.URL_ENV, raising=False)
+    keepalive.reset_keepalive()
+    assert keepalive.start_keepalive() is None
+    keepalive.reset_keepalive()
+
+
+def test_the_interval_has_a_floor_so_it_cannot_become_a_load(monkeypatch):
+    from t3_engine.research import keepalive
+
+    monkeypatch.setenv(keepalive.INTERVAL_ENV, "1")
+    assert keepalive.interval_seconds() == keepalive.MIN_INTERVAL_SECONDS
+    monkeypatch.setenv(keepalive.INTERVAL_ENV, "nonsense")
+    assert keepalive.interval_seconds() == keepalive.DEFAULT_INTERVAL_SECONDS
+
+
+def test_a_failed_ping_is_counted_and_never_kills_the_thread():
+    from t3_engine.research.keepalive import KeepAlive
+
+    calls = []
+
+    def boom(url):
+        calls.append(url)
+        raise OSError("network down")
+
+    alive = KeepAlive("http://example/api/live/status", interval=0.01, fetch=boom)
+    alive.start()
+    for _ in range(200):
+        if alive.failures >= 2:
+            break
+        time.sleep(0.01)
+    alive.stop()
+    assert alive.failures >= 1
+    assert "network down" in alive.last_error
+    assert alive.pings == 0

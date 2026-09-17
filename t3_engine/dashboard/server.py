@@ -1595,6 +1595,15 @@ def start_lead_engine() -> None:
             engine.set_capture_tap(fan)
     except Exception:                       # noqa: BLE001
         logger.exception("paper trading failed to start; the engine is unaffected")
+    # The optional self-ping. OFF unless asked for: free instance hours
+    # are a shared monthly allowance across the workspace, and a service
+    # that never sleeps spends them continuously.
+    try:
+        from t3_engine.research import keepalive as research_keepalive
+
+        research_keepalive.start_keepalive()
+    except Exception:                       # noqa: BLE001
+        logger.exception("keepalive failed to start; the engine is unaffected")
     # The research worker. Experiments are queued as Supabase rows and run
     # HERE, because this process can reach both Bybit and Supabase and the
     # sandbox this is developed from can reach neither. It takes one job
