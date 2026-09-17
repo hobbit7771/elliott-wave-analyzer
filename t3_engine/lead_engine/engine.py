@@ -98,6 +98,9 @@ class LeadEngine:
         self.oi_poller: Optional[OpenInterestPoller] = None
         self.storage: Storage = storage or Storage()
         self.recorder: Optional[Recorder] = None
+        # The research capture tap. None unless something explicitly
+        # installs one - the engine never starts a recorder for itself.
+        self._capture_tap: Optional[Callable[[str, Dict[str, Any], int], None]] = None
         for symbol in self.config.symbols:
             self._ensure(symbol)
 
@@ -269,6 +272,17 @@ class LeadEngine:
         symbol = parsed["symbol"]
         if not symbol:
             return
+        # The research tap, BEFORE any engine state changes and outside
+        # the try-nothing path: the recorder must see the frame exactly
+        # as it arrived, and it must never be able to stop the engine
+        # from processing one.
+        tap = self._capture_tap
+        if tap is not None:
+            try:
+                tap(topic, message, int(message.get("_received_at_ms")
+                                        or time.time() * 1000))
+            except Exception:                    # pragma: no cover - defensive
+                logger.exception("research capture tap raised; continuing")
         state = self._ensure(symbol)
         state.health.ws_connected = True
         state.health.messages += 1
@@ -308,6 +322,15 @@ class LeadEngine:
 
         state.health.processing_latency_ms = (time.perf_counter() - began) * 1000.0
         state.health.last_process_ms = int(time.time() * 1000)
+
+    def set_capture_tap(self, tap: Optional[Callable[[str, Dict[str, Any], int], None]]) -> None:
+        """Install (or remove) the research recorder's frame tap.
+
+        Explicit rather than a constructor argument, because the recorder
+        starts and stops on its own budget while the engine runs
+        continuously. Passing None removes it, which is what `stop()`
+        does when the budget is spent."""
+        self._capture_tap = tap
 
     def _reset_books(self, symbols: List[str]) -> None:
         """Called by the stream when a book must be rebuilt from scratch."""
