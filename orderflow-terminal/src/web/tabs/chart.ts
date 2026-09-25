@@ -21,13 +21,14 @@ import {
 } from 'lightweight-charts';
 import type { Tab } from '../main.js';
 import { store } from '../store.js';
-import { api, el, fmtQ, fmtP, fmtDateTime, loadPref, savePref, loadPrefRaw, KIND_COLOR, isBullish } from '../util.js';
+import { api, el, fmtQ, fmtP, fmtDateTime, loadPref, savePref, loadPrefRaw, KIND_COLOR, isBullish, ownerToken } from '../util.js';
+import { DrawingsPrimitive, loadDrawings, saveDrawings, type Drawing, type DrawingType } from '../drawings.js';
 import { CandleBuilder, TF_MS, candleDelta, type Timeframe } from '../../core/candles.js';
 import { atr, cvd, ema, macd, rsi, vwap } from '../../core/indicators.js';
 import type { Candle, EventKind, MarketEvent } from '../../core/types.js';
 
 const LAYERS = {
-  volume: 'Volume',
+  volume: 'Объём',
   ema9: 'EMA 9',
   ema18: 'EMA 18',
   ema50: 'EMA 50',
@@ -36,18 +37,18 @@ const LAYERS = {
   atr: 'ATR (14)',
   rsi: 'RSI (14)',
   macd: 'MACD (12,26,9)',
-  cvd: 'CVD',
-  delta: 'Delta',
-  large: 'Large limit orders',
-  iceberg: 'Probable icebergs',
-  absorption: 'Absorption zones',
-  clusters: 'Liquidity clusters',
-  sweep: 'Sweeps & stop runs',
-  imbalance: 'Imbalance',
-  other: 'Other events (divergence, burst, pulled, spoof, vacuum)',
-  liq: 'Liquidations',
-  levels: 'Trading levels',
-  conf: 'Show confidence labels',
+  cvd: 'CVD (с начала загруженной истории)',
+  delta: 'Delta бара',
+  large: 'Крупные уровни видимой ликвидности',
+  iceberg: 'Предполагаемые айсберги и признаки пополнения',
+  absorption: 'Зоны поглощения',
+  clusters: 'Кластеры ликвидности',
+  sweep: 'Sweep и stop-run',
+  imbalance: 'Дисбаланс',
+  other: 'Прочее (дивергенция, всплеск, снятие, спуфинг?, вакуум)',
+  liq: 'Опубликованные ликвидации (не все ликвидации рынка)',
+  levels: 'Рисунки и paper SL/TP',
+  conf: 'Показывать score',
 };
 type LayerKey = keyof typeof LAYERS;
 const DEFAULT_LAYERS: Record<LayerKey, boolean> = {
@@ -154,14 +155,16 @@ export function createChartTab(): Tab {
   const root = el('section', { id: 'tab-chart', role: 'tabpanel' });
   const layers = loadPref<Record<LayerKey, boolean>>('chartLayers', DEFAULT_LAYERS);
   let minConf = loadPrefRaw<number>('chartMinConf', 45);
-  const layersBtn = el('button', { text: 'Layers' });
+  const layersBtn = el('button', { text: 'Слои' });
   const confInput = el('input', { type: 'number', min: '0', max: '100', step: '5', value: String(minConf), title: 'Minimum confidence for markers' });
-  const levelBtn = el('button', { text: '+ Level', title: 'Tap the chart to add a horizontal trading level' });
-  const clearLevels = el('button', { text: 'Clear levels' });
-  const fitBtn = el('button', { text: 'Fit' });
-  const liveBtn = el('button', { text: 'Live', class: 'on', title: 'Scroll to real time' });
+  const toolSel = el('select', { 'aria-label': 'Инструмент рисования' });
+  for (const [v, l] of [['', 'Рисование: нет'], ['hline', 'Горизонтальный уровень'], ['trend', 'Трендовая линия'], ['fib', 'Фибоначчи: коррекция'], ['fibext', 'Фибоначчи: расширение']]) toolSel.append(el('option', { value: v, text: l }));
+  const clearDraw = el('button', { text: 'Удалить рисунки' });
+  const fitBtn = el('button', { text: 'Вписать' });
+  const liveBtn = el('button', { text: 'LIVE', class: 'on', title: 'К текущему времени' });
+  const barState = el('span', { class: 'badge' });
   const originNote = el('span', { class: 'muted' });
-  root.append(el('div', { class: 'toolbar' }, layersBtn, el('label', {}, 'Min conf', confInput), levelBtn, clearLevels, fitBtn, liveBtn, originNote));
+  root.append(el('div', { class: 'toolbar' }, layersBtn, el('label', {}, 'Мин. score', confInput), toolSel, clearDraw, fitBtn, liveBtn, barState, originNote));
   const fill = el('div', { class: 'fill' });
   const host = el('div', { class: 'chart-host' });
   const legend = el('div', { class: 'legend' });
@@ -199,9 +202,14 @@ export function createChartTab(): Tab {
   let loadedKey = '';
   let exhausted = false;
   let visible = false;
-  let placingLevel = false;
+  let drawings: Drawing[] = [];
+  let drawWhere = '';
+  let drawPrim: DrawingsPrimitive | null = null;
+  let paperOpen: { key: string; side: number; entry: number; sl?: number; tp?: number }[] = [];
   // tick bars use sequential synthetic times; map back to real time for labels
   let tickTimes: number[] = [];
+  /** open time of the forming (LIVE) bar reported by the server; bars before it are CLOSED */
+  let liveFrom = 0;
 
   const dec = () => store.meta?.pricePrecision ?? 2;
   const isTick = () => store.tf === 'tick';
@@ -227,9 +235,6 @@ export function createChartTab(): Tab {
     return Math.floor(Math.min(bt, cs[cs.length - 1].t) / 1000);
   };
 
-  function levelsKey(): string {
-    return 'levels:' + store.key;
-  }
 
   function rebuild(): void {
     chart?.remove();
@@ -262,6 +267,9 @@ export function createChartTab(): Tab {
     markers = createSeriesMarkers(candleS, []);
     zones = new ZonesPrimitive(barTime);
     candleS.attachPrimitive(zones);
+    drawPrim = new DrawingsPrimitive(barTime);
+    candleS.attachPrimitive(drawPrim);
+    drawPrim.update(drawings);
     if (layers.volume) {
       const v = chart.addSeries(HistogramSeries, { priceScaleId: 'vol', priceFormat: { type: 'volume' }, lastValueVisible: false, priceLineVisible: false });
       v.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
@@ -301,15 +309,26 @@ export function createChartTab(): Tab {
       renderLegend(idx);
     });
     chart.subscribeClick((param) => {
-      if (!placingLevel || !param.point || !candleS) return;
+      const tool = toolSel.value as DrawingType | '';
+      if (!tool || !param.point || !candleS || param.time === undefined) return;
       const price = candleS.coordinateToPrice(param.point.y);
       if (price === null) return;
-      const lv = loadPrefRaw<number[]>(levelsKey(), []);
-      lv.push(+(+price).toFixed(dec()));
-      savePref(levelsKey(), lv);
-      placingLevel = false;
-      levelBtn.classList.remove('on');
-      refreshOverlays();
+      const t = param.time as number;
+      const ms = isTick() ? (tickTimes[t - 1] ?? Date.now()) : t * 1000;
+      const pt = { t: ms, p: +(+price).toFixed(dec()) };
+      if (tool === 'hline') {
+        drawings.push({ id: String(Date.now()), type: 'hline', a: pt });
+        void persistDrawings();
+        return;
+      }
+      if (!drawPrim?.pending) {
+        if (drawPrim) drawPrim.pending = pt;
+        refreshOverlays();
+        return;
+      }
+      drawings.push({ id: String(Date.now()), type: tool, a: drawPrim.pending, b: pt });
+      drawPrim.pending = null;
+      void persistDrawings();
     });
     chart.timeScale().subscribeVisibleLogicalRangeChange((r) => {
       if (r && r.from < 10) void loadOlder();
@@ -334,7 +353,7 @@ export function createChartTab(): Tab {
     renderLegend(cs.length - 1);
   }
 
-  let emptyText = 'Loading…';
+  let emptyText = 'Загрузка…';
 
   type Pt = { time: UTCTimestamp; value: number; color?: string };
   function computeIndicators(cs: Candle[]): Record<string, Pt[]> {
@@ -389,6 +408,12 @@ export function createChartTab(): Tab {
       return;
     }
     const d = candleDelta(c);
+    // CLOSED / LIVE: a bar is closed once its interval has ended (tick bars: once the next bar exists)
+    const last = i === builder.candles.length - 1;
+    const closed = isTick() ? !last : c.t + TF_MS[store.tf as Exclude<Timeframe, 'tick'>] <= Math.max(store.now(), liveFrom);
+    barState.textContent = closed ? 'CLOSED' : 'LIVE';
+    barState.className = 'badge ' + (closed ? 'syncing' : 'connected');
+    clearDraw.title = drawWhere === 'server' ? 'Рисунки сохраняются в Supabase' : 'Рисунки сохранены только в этом браузере (нет токена владельца)';
     legend.innerHTML = '';
     legend.append(
       el('span', { text: `${store.symbol} ${store.tf}` }),
@@ -449,8 +474,13 @@ export function createChartTab(): Tab {
       }
     }
     if (layers.levels) {
-      for (const p of loadPrefRaw<number[]>(levelsKey(), [])) priceLines.push(candleS.createPriceLine({ price: p, color: '#ffd54f', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: 'Level' }));
-      for (const p of paperLevels()) priceLines.push(candleS.createPriceLine({ price: p.price, color: p.color, lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: p.title }));
+      for (const d of drawings) if (d.type === 'hline') priceLines.push(candleS.createPriceLine({ price: d.a.p, color: '#ffd54f', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: 'Уровень' }));
+      for (const p of paperOpen.filter((x) => x.key === store.key)) {
+        priceLines.push(candleS.createPriceLine({ price: p.entry, color: '#4ea1ff', lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: `Paper ${p.side === 1 ? 'L' : 'S'}` }));
+        if (p.sl !== undefined) priceLines.push(candleS.createPriceLine({ price: p.sl, color: '#ef5350', lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: 'SL' }));
+        if (p.tp !== undefined) priceLines.push(candleS.createPriceLine({ price: p.tp, color: '#26a69a', lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: 'TP' }));
+      }
+      drawPrim?.update(drawings);
     }
   }
 
@@ -482,23 +512,30 @@ export function createChartTab(): Tab {
     loadedKey = key;
     exhausted = false;
     builder = new CandleBuilder(store.tf, store.ticksPerBar, 20_000);
-    emptyText = 'Loading…';
+    emptyText = 'Загрузка…';
     rebuild();
     const reqT = store.now();
     try {
-      const r = await api<{ candles: Candle[]; origin: string; coverage?: { from: number; to: number; count: number } }>('/api/klines', { source: store.source, symbol: store.symbol, tf: store.tf, limit: 1000, ticks: store.ticksPerBar });
+      const r = await api<{ candles: Candle[]; origin: string; coverage?: { from: number; to: number; count: number }; liveFrom?: number; warning?: string }>('/api/klines', { source: store.source, symbol: store.symbol, tf: store.tf, limit: 1000, ticks: store.ticksPerBar });
       if (loadedKey !== key) return;
       builder.load(r.candles);
       // start consuming live trades that are newer than the loaded history
       // live trades that happened after the history request are applied on top
       seq = store.tradeSeq;
       for (const t of store.trades) if (t.t > reqT) builder.add(t);
-      originNote.textContent = r.origin === 'recorded-trades' ? `Built from recorded trades${r.coverage?.from ? ' since ' + fmtDateTime(r.coverage.from) : ''}` : 'Exchange REST klines + live trades';
-      emptyText = r.origin === 'recorded-trades' ? 'No recorded trades yet for this instrument — bars appear as live trades arrive.' : 'No data returned by the exchange.';
+      originNote.textContent =
+        r.origin === 'recorded-trades'
+          ? `Построено из записанных aggTrade${r.coverage?.from ? ' с ' + fmtDateTime(r.coverage.from) : ''} (покрытие ограничено записью; одно сообщение может объединять несколько исполнений)`
+          : r.origin === 'stored-1m'
+            ? `⚠ ${r.warning ?? 'REST биржи недоступен'} — закрытые 1m-свечи из Supabase`
+            : 'Свечи REST биржи + живые сделки';
+      originNote.className = r.origin === 'stored-1m' ? 'warn' : 'muted';
+      liveFrom = r.liveFrom ?? 0;
+      emptyText = r.origin === 'recorded-trades' ? 'Для инструмента ещё нет записанных сделок — бары появятся по мере поступления живых сделок.' : 'Биржа не вернула данных.';
       setAll();
       chart?.timeScale().scrollToRealTime();
     } catch (e) {
-      emptyText = 'Could not load history: ' + (e as Error).message;
+      emptyText = 'Не удалось загрузить историю: ' + (e as Error).message;
       setAll();
     }
   }
@@ -540,13 +577,33 @@ export function createChartTab(): Tab {
   }
   let dirty = false;
 
-  levelBtn.onclick = () => {
-    placingLevel = !placingLevel;
-    levelBtn.classList.toggle('on', placingLevel);
-  };
-  clearLevels.onclick = () => {
-    savePref(levelsKey(), []);
+  async function persistDrawings(): Promise<void> {
+    drawWhere = await saveDrawings(store.key, drawings);
     refreshOverlays();
+  }
+  async function reloadDrawings(): Promise<void> {
+    const r = await loadDrawings(store.key);
+    drawings = r.list;
+    drawWhere = r.where;
+    refreshOverlays();
+  }
+  async function reloadPaper(): Promise<void> {
+    if (!ownerToken()) return;
+    try {
+      const v = await api<{ open: typeof paperOpen }>('/api/paper');
+      paperOpen = v.open;
+      refreshOverlays();
+    } catch {
+      /* not authorized / not available */
+    }
+  }
+  toolSel.onchange = () => {
+    if (drawPrim) drawPrim.pending = null;
+  };
+  clearDraw.onclick = () => {
+    if (!drawings.length || !confirm('Удалить все рисунки этого инструмента?')) return;
+    drawings = [];
+    void persistDrawings();
   };
   fitBtn.onclick = () => chart?.timeScale().fitContent();
   liveBtn.onclick = () => chart?.timeScale().scrollToRealTime();
@@ -568,11 +625,13 @@ export function createChartTab(): Tab {
   store.on('meta', () => {
     candleS?.applyOptions({ priceFormat: { type: 'price', precision: dec(), minMove: store.meta?.tickSize ?? 0.01 } });
   });
-  window.addEventListener('paper-changed', overlaysSoon);
+  window.addEventListener('paper-changed', () => void reloadPaper());
+  store.on('reset', () => void reloadDrawings());
+  setInterval(() => visible && void reloadPaper(), 15_000);
 
   return {
     id: 'chart',
-    title: 'Chart',
+    title: 'График',
     root,
     show() {
       visible = true;
@@ -599,14 +658,3 @@ function safeLocale(): string {
   }
 }
 
-/** Open paper positions' entry / SL / TP as trading levels. */
-function paperLevels(): { price: number; color: string; title: string }[] {
-  const s = loadPrefRaw<{ open?: { side: number; entry: number; sl?: number; tp?: number }[] }>('paper:' + store.key, {});
-  const out: { price: number; color: string; title: string }[] = [];
-  for (const p of s.open ?? []) {
-    out.push({ price: p.entry, color: '#4ea1ff', title: `Paper ${p.side === 1 ? 'L' : 'S'}` });
-    if (p.sl !== undefined) out.push({ price: p.sl, color: '#ef5350', title: 'SL' });
-    if (p.tp !== undefined) out.push({ price: p.tp, color: '#26a69a', title: 'TP' });
-  }
-  return out;
-}

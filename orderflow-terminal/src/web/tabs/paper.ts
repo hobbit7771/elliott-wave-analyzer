@@ -1,245 +1,257 @@
-// Paper trading (simulated fills on the live book, never sent anywhere) and event backtests on recorded data.
+// Paper/Backtest: заявки исполняются в серверном симуляторе по видимой глубине живого стакана
+// (никогда не отправляются на биржу); SL/TP проверяет сервер, состояние хранится в Supabase.
 import type { Tab } from '../main.js';
 import { store } from '../store.js';
-import { api, el, esc, fmtQ, fmtP, fmtDateTime, loadPref, savePref, loadPrefRaw, KIND_LABEL } from '../util.js';
-import { PaperBook, backtestEvents, computeStats, type PaperStats, type ClosedTrade } from '../../core/paper.js';
+import { api, el, esc, fmtQ, fmtP, fmtDateTime, loadPref, savePref, KIND_LABEL, ownerToken } from '../util.js';
+import { backtestEvents, computeStats, type ClosedTrade, type PaperStats } from '../../core/paper.js';
 import type { EventKind, MarketEvent, Trade } from '../../core/types.js';
 
 interface Prefs {
   qty: number;
   slTicks: number;
   tpTicks: number;
-  fee: number;
-  slip: number;
 }
-const DEF: Prefs = { qty: 0.01, slTicks: 100, tpTicks: 200, fee: 0.05, slip: 1 };
+interface ServerPos {
+  id: number;
+  key: string;
+  side: 1 | -1;
+  qty: number;
+  entry: number;
+  entryT: number;
+  sl?: number;
+  tp?: number;
+  fees: number;
+  funding: number;
+  note?: string;
+}
+interface ServerClosed extends ServerPos {
+  exit: number;
+  exitT: number;
+  reason: string;
+  gross: number;
+  net: number;
+  delayed?: boolean;
+  fillNote?: string;
+}
+interface PaperView {
+  cfg: { takerFee: number; extraSlippageTicks: number };
+  open: ServerPos[];
+  closed: ServerClosed[];
+  outages: { key: string; t0: number; t1: number | null; reason: string }[];
+  stats: PaperStats;
+  unrealized: Record<number, number>;
+}
+
+const DEF: Prefs = { qty: 0.01, slTicks: 100, tpTicks: 200 };
 
 export function createPaperTab(): Tab {
   const root = el('section', { id: 'tab-paper', role: 'tabpanel' });
-  const p = loadPref<Prefs>('paperPrefs', DEF);
+  const p = loadPref<Prefs>('paperPrefs2', DEF);
   const num = (v: number, step = 'any', title = '') => el('input', { type: 'number', min: '0', step, value: String(v), title });
   const qtyIn = num(p.qty);
-  const slIn = num(p.slTicks, '1', 'Stop distance in ticks (0 = none)');
-  const tpIn = num(p.tpTicks, '1', 'Target distance in ticks (0 = none)');
-  const feeIn = num(p.fee, '0.001', 'Taker fee %');
-  const slipIn = num(p.slip, '1', 'Slippage ticks on market fills and stops');
+  const slIn = num(p.slTicks, '1', 'Стоп в тиках (0 — без стопа)');
+  const tpIn = num(p.tpTicks, '1', 'Тейк в тиках (0 — без тейка)');
+  const feeIn = num(0.05, '0.001', 'Комиссия taker, %');
+  const slipIn = num(0, '1', 'Доп. проскальзывание в тиках поверх прохода по стакану');
   const buyBtn = el('button', { class: 'buy', text: 'Paper BUY' });
   const sellBtn = el('button', { class: 'sell', text: 'Paper SELL' });
-  const resetBtn = el('button', { text: 'Reset journal' });
-  root.append(
-    el('div', { class: 'toolbar' }, el('label', {}, 'Qty', qtyIn), el('label', {}, 'SL ticks', slIn), el('label', {}, 'TP ticks', tpIn), el('label', {}, 'Fee %', feeIn), el('label', {}, 'Slip ticks', slipIn), buyBtn, sellBtn, resetBtn),
-  );
+  const cfgBtn = el('button', { text: 'Сохранить комиссии' });
+  const resetBtn = el('button', { text: 'Сбросить журнал' });
+  const msg = el('span', { class: 'muted' });
+  root.append(el('div', { class: 'toolbar' }, el('label', {}, 'Кол-во', qtyIn), el('label', {}, 'SL тиков', slIn), el('label', {}, 'TP тиков', tpIn), buyBtn, sellBtn, el('span', { class: 'sep' }), el('label', {}, 'Комиссия %', feeIn), el('label', {}, 'Доп. проск.', slipIn), cfgBtn, resetBtn, msg));
   const body = el('div', { class: 'scroll pad' });
   root.append(body);
-  const banner = el('p', { class: 'muted', text: 'Paper trading only: orders are simulated against the live book (market fills at the opposite touch + slippage, fees, funding for perpetuals). Nothing is ever sent to an exchange.' });
+  const banner = el('p', {
+    class: 'muted',
+    text: 'Только симуляция. Рыночная заявка проходит по видимым уровням живого стакана на сервере (средняя цена исполнения, без заполнения крупного объёма по лучшей цене); если видимой глубины не хватает или данные недостоверны (stale/gap/resync) — заявка отклоняется. SL/TP проверяет сервер, пока Render работает; после сна или разрыва стоп исполняется по стакану на момент восстановления и помечается «с задержкой». Funding начисляется при смене периода funding по mark-цене. Ничего не отправляется на биржу.',
+  });
   const cards = el('div', { class: 'cards' });
   const posBox = el('div');
+  const outBox = el('div');
   const journalBox = el('div');
   const btBox = el('div');
-  body.append(banner, cards, el('h3', { text: 'Open positions' }), posBox, el('h3', { text: 'Journal' }), journalBox, el('h3', { text: 'Backtest detector events on recorded data' }), btBox);
+  body.append(banner, cards, el('h3', { text: 'Открытые позиции' }), posBox, outBox, el('h3', { text: 'Журнал' }), journalBox, el('h3', { text: 'Бэктест событий детекторов на сохранённых данных' }), btBox);
 
-  let book = new PaperBook(costs());
-  let loadedKey = '';
-  let lastFundingT = 0;
-  function costs() {
-    return { takerFee: (+feeIn.value || 0) / 100, slippageTicks: +slipIn.value || 0, tick: store.meta?.tickSize ?? 0.01, assumedSpreadTicks: 1 };
+  let view: PaperView | null = null;
+  let visible = false;
+  const dec = () => store.meta?.pricePrecision ?? 2;
+
+  async function refresh(): Promise<void> {
+    if (!ownerToken()) {
+      msg.textContent = 'Нужен токен владельца (вкладка «Источники и настройки»).';
+      return;
+    }
+    try {
+      view = await api<PaperView>('/api/paper');
+      feeIn.value = String(+(view.cfg.takerFee * 100).toFixed(4));
+      slipIn.value = String(view.cfg.extraSlippageTicks);
+      render();
+      window.dispatchEvent(new Event('paper-changed'));
+    } catch (e) {
+      msg.textContent = (e as Error).message;
+    }
   }
-  const key = () => 'paper:' + store.key;
-  function persist(): void {
-    savePref(key(), book.toJSON());
-    window.dispatchEvent(new Event('paper-changed'));
-  }
-  function load(): void {
-    book = new PaperBook(costs());
-    book.load(loadPrefRaw(key(), { open: [], closed: [], seq: 1 }));
-    loadedKey = store.key;
-  }
-  function touch(): { bid: number; ask: number } | null {
-    const b = store.book;
-    if (!b || !b.bids.length || !b.asks.length || store.status?.state !== 'connected') return null;
-    return { bid: b.bids[0][0], ask: b.asks[0][0] };
-  }
-  function enter(side: 1 | -1): void {
-    const t = touch();
-    if (!t) return alert('No live, synced order book — paper orders need a real bid/ask.');
-    const qty = +qtyIn.value;
-    if (!(qty > 0)) return alert('Quantity must be > 0');
-    const tick = store.meta?.tickSize ?? 0.01;
-    const ref = side === 1 ? t.ask : t.bid;
-    const sl = +slIn.value ? ref - side * +slIn.value * tick : undefined;
-    const tp = +tpIn.value ? ref + side * +tpIn.value * tick : undefined;
-    book.costs = costs();
-    book.enter(side, qty, t.bid, t.ask, store.now(), sl, tp, 'manual');
-    persist();
-    render();
-  }
-  buyBtn.onclick = () => enter(1);
-  sellBtn.onclick = () => enter(-1);
-  resetBtn.onclick = () => {
-    if (!confirm('Clear the paper journal for ' + store.symbol + '?')) return;
-    book = new PaperBook(costs());
-    persist();
-    render();
-  };
-  for (const i of [qtyIn, slIn, tpIn, feeIn, slipIn])
-    i.addEventListener('change', () => {
-      Object.assign(p, { qty: +qtyIn.value, slTicks: +slIn.value, tpTicks: +tpIn.value, fee: +feeIn.value, slip: +slipIn.value });
-      savePref('paperPrefs', p);
-    });
 
   function statCards(s: PaperStats, unreal: number): void {
     const c = (k: string, v: string, cls = '') => el('div', { class: 'card' }, el('div', { class: 'k', text: k }), el('div', { class: 'v ' + cls, text: v }));
     cards.replaceChildren(
-      c('Net P&L', fmtQ(s.net), s.net >= 0 ? 'pos' : 'neg'),
-      c('Unrealized', fmtQ(unreal), unreal >= 0 ? 'pos' : 'neg'),
-      c('Trades', String(s.trades)),
+      c('Итог P&L', fmtQ(s.net), s.net >= 0 ? 'pos' : 'neg'),
+      c('Нереализованный', fmtQ(unreal), unreal >= 0 ? 'pos' : 'neg'),
+      c('Сделок', String(s.trades)),
       c('Win rate', (s.winRate * 100).toFixed(1) + '%'),
-      c('Expectancy / trade', fmtQ(s.expectancy)),
-      c('Profit factor', isFinite(s.profitFactor) ? s.profitFactor.toFixed(2) : s.trades ? '∞' : '–'),
-      c('Max drawdown', fmtQ(s.maxDrawdown)),
-      c('Fees / funding', `${fmtQ(s.fees)} / ${fmtQ(s.funding)}`),
+      c('Expectancy', fmtQ(s.expectancy)),
+      c('Profit factor', Number.isFinite(s.profitFactor) ? s.profitFactor.toFixed(2) : s.trades ? '∞' : '–'),
+      c('Макс. просадка', fmtQ(s.maxDrawdown)),
+      c('Комиссии / funding', `${fmtQ(s.fees)} / ${fmtQ(s.funding)}`),
     );
   }
 
-  function tradeRows(list: ClosedTrade[], d: number): string {
+  function rows(list: (ClosedTrade | ServerClosed)[]): string {
     return (
-      '<table><thead><tr><th class="l">Entry (UTC)</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th class="l">Reason</th><th>Gross</th><th>Fees</th><th>Funding</th><th>Net</th><th class="l">Note</th></tr></thead><tbody>' +
+      '<table><thead><tr><th class="l">Вход (UTC)</th><th class="l">Инструмент</th><th>Сторона</th><th>Кол-во</th><th>Вход</th><th>Выход</th><th class="l">Причина</th><th>Gross</th><th>Комиссии</th><th>Funding</th><th>Net</th><th class="l">Исполнение</th></tr></thead><tbody>' +
       [...list]
         .reverse()
         .slice(0, 300)
-        .map(
-          (c) =>
-            `<tr class="${c.side === 1 ? 'buy' : 'sell'}"><td class="l">${fmtDateTime(c.entryT)}</td><td class="side">${c.side === 1 ? 'long' : 'short'}</td><td>${fmtQ(c.qty)}</td><td>${fmtP(c.entry, d)}</td><td>${fmtP(c.exit, d)}</td><td class="l">${c.reason}</td><td>${fmtQ(c.gross)}</td><td>${fmtQ(c.fees)}</td><td>${fmtQ(c.funding)}</td><td class="${c.net >= 0 ? 'pos' : 'neg'}">${fmtQ(c.net)}</td><td class="l">${esc(c.note ?? '')}</td></tr>`,
-        )
+        .map((c) => {
+          const sc = c as ServerClosed;
+          return `<tr class="${c.side === 1 ? 'buy' : 'sell'}"><td class="l">${fmtDateTime(c.entryT)}</td><td class="l">${esc(sc.key ?? store.symbol)}</td><td class="side">${c.side === 1 ? 'long' : 'short'}</td><td>${fmtQ(c.qty)}</td><td>${fmtP(c.entry, dec())}</td><td>${fmtP(c.exit, dec())}</td><td class="l">${c.reason}${sc.delayed ? ' (с задержкой)' : ''}</td><td>${fmtQ(c.gross)}</td><td>${fmtQ(c.fees)}</td><td>${fmtQ(c.funding)}</td><td class="${c.net >= 0 ? 'pos' : 'neg'}">${fmtQ(c.net)}</td><td class="l">${esc(sc.fillNote ?? c.note ?? '')}</td></tr>`;
+        })
         .join('') +
       '</tbody></table>'
     );
   }
 
   function render(): void {
-    if (loadedKey !== store.key) load();
-    const t = touch();
-    const d = store.meta?.pricePrecision ?? 2;
-    statCards(book.stats(), t ? book.unrealized(t.bid, t.ask) : 0);
-    posBox.innerHTML = book.open.length
-      ? '<table><thead><tr><th>Side</th><th>Qty</th><th>Entry</th><th>SL</th><th>TP</th><th>Unrealized</th><th></th></tr></thead><tbody>' +
-        book.open
+    if (!view) return;
+    const unreal = Object.values(view.unrealized).reduce((s, x) => s + x, 0);
+    statCards(view.stats, unreal);
+    posBox.innerHTML = view.open.length
+      ? '<table><thead><tr><th class="l">Инструмент</th><th>Сторона</th><th>Кол-во</th><th>Вход</th><th>SL</th><th>TP</th><th>Нереал.</th><th></th></tr></thead><tbody>' +
+        view.open
           .map((o) => {
-            const u = t ? ((o.side === 1 ? t.bid : t.ask) - o.entry) * o.side * o.qty - o.fees - o.funding : NaN;
-            return `<tr class="${o.side === 1 ? 'buy' : 'sell'}"><td class="side">${o.side === 1 ? 'long' : 'short'}</td><td>${fmtQ(o.qty)}</td><td>${fmtP(o.entry, d)}</td><td>${o.sl !== undefined ? fmtP(o.sl, d) : '–'}</td><td>${o.tp !== undefined ? fmtP(o.tp, d) : '–'}</td><td class="${u >= 0 ? 'pos' : 'neg'}">${fmtQ(u)}</td><td><button data-close="${o.id}">Close</button></td></tr>`;
+            const u = view!.unrealized[o.id];
+            return `<tr class="${o.side === 1 ? 'buy' : 'sell'}"><td class="l">${esc(o.key)}</td><td class="side">${o.side === 1 ? 'long' : 'short'}</td><td>${fmtQ(o.qty)}</td><td>${fmtP(o.entry, dec())}</td><td>${o.sl !== undefined ? fmtP(o.sl, dec()) : '–'}</td><td>${o.tp !== undefined ? fmtP(o.tp, dec()) : '–'}</td><td class="${(u ?? 0) >= 0 ? 'pos' : 'neg'}">${u === undefined ? 'нет данных' : fmtQ(u)}</td><td><button data-close="${o.id}">Закрыть</button></td></tr>`;
           })
           .join('') +
         '</tbody></table>'
-      : '<p class="muted">No open paper positions.</p>';
+      : '<p class="muted">Открытых позиций нет.</p>';
     for (const b of posBox.querySelectorAll<HTMLButtonElement>('button[data-close]'))
-      b.onclick = () => {
-        const tt = touch();
-        if (!tt) return alert('No live book to close against.');
-        book.exit(+b.dataset.close!, tt.bid, tt.ask, store.now(), 'manual');
-        persist();
-        render();
+      b.onclick = async () => {
+        try {
+          await api('/api/paper/close', {}, { method: 'POST', body: JSON.stringify({ id: +b.dataset.close! }) });
+          msg.textContent = '';
+        } catch (e) {
+          msg.textContent = 'Не закрыто: ' + (e as Error).message;
+        }
+        void refresh();
       };
-    journalBox.innerHTML = book.closed.length ? tradeRows(book.closed, d) : '<p class="muted">No closed paper trades yet.</p>';
+    const outs = view.outages.filter((o) => o.t1 === null || Date.now() - o.t1 < 86_400_000);
+    outBox.innerHTML = outs.length ? '<p class="warn">Периоды, когда сервер не мог проверять SL/TP: ' + outs.map((o) => `${esc(o.key)} ${fmtDateTime(o.t0)} → ${o.t1 ? fmtDateTime(o.t1) : 'сейчас'} (${esc(o.reason)})`).join('; ') + '</p>' : '';
+    journalBox.innerHTML = view.closed.length ? rows(view.closed) : '<p class="muted">Закрытых сделок пока нет.</p>';
   }
 
-  // live marking: stops / targets / funding
-  function onBook(): void {
-    if (loadedKey !== store.key) load();
-    const t = touch();
-    if (!t) return;
-    let changed = book.mark(t.bid, t.ask, store.now()).length > 0;
-    const nf = store.deriv.nextFunding;
-    const rate = store.deriv.funding;
-    const mark = store.deriv.mark;
-    // funding is charged when the exchange's next funding time rolls over
-    if (nf && rate !== undefined && mark && lastFundingT && nf > lastFundingT && book.open.length) {
-      book.applyFunding(rate, mark);
-      changed = true;
+  async function order(side: 1 | -1): Promise<void> {
+    const b = store.book;
+    const tick = store.meta?.tickSize ?? 0.01;
+    if (!b || !b.bids.length || !b.asks.length) {
+      msg.textContent = 'Нет живого стакана.';
+      return;
     }
-    if (nf) lastFundingT = nf;
-    if (changed) persist();
-    if (visible) render();
+    const ref = side === 1 ? b.asks[0][0] : b.bids[0][0];
+    const sl = +slIn.value ? +(ref - side * +slIn.value * tick).toFixed(dec()) : undefined;
+    const tp = +tpIn.value ? +(ref + side * +tpIn.value * tick).toFixed(dec()) : undefined;
+    try {
+      await api('/api/paper/order', {}, { method: 'POST', body: JSON.stringify({ source: store.source, symbol: store.symbol, side, qty: +qtyIn.value, sl, tp }) });
+      msg.textContent = 'Исполнено в симуляторе.';
+    } catch (e) {
+      msg.textContent = 'Отклонено: ' + (e as Error).message;
+    }
+    void refresh();
   }
+  buyBtn.onclick = () => void order(1);
+  sellBtn.onclick = () => void order(-1);
+  cfgBtn.onclick = async () => {
+    await api('/api/paper/config', {}, { method: 'POST', body: JSON.stringify({ takerFee: (+feeIn.value || 0) / 100, extraSlippageTicks: +slipIn.value || 0 }) }).catch((e) => (msg.textContent = (e as Error).message));
+    void refresh();
+  };
+  resetBtn.onclick = async () => {
+    if (!confirm('Очистить весь paper-журнал на сервере?')) return;
+    await api('/api/paper/reset', {}, { method: 'POST', body: '{}' }).catch((e) => (msg.textContent = (e as Error).message));
+    void refresh();
+  };
+  for (const i of [qtyIn, slIn, tpIn]) i.addEventListener('change', () => savePref('paperPrefs2', { qty: +qtyIn.value, slTicks: +slIn.value, tpTicks: +tpIn.value }));
 
-  // ---------- backtest ----------
-  const kinds = el('select', { multiple: 'true', size: '5', 'aria-label': 'Event types' });
+  // ---------- backtest on stored real data ----------
+  const kinds = el('select', { multiple: 'true', size: '5', 'aria-label': 'Типы событий' });
   for (const [k, l] of Object.entries(KIND_LABEL)) if (k !== 'feed') kinds.append(el('option', { value: k, text: l, ...(k === 'iceberg' || k === 'absorption' ? { selected: 'true' } : {}) }));
-  const btConf = num(60, '5');
+  const btScore = num(60, '5');
   const btMode = el('select');
-  btMode.append(el('option', { value: 'follow', text: 'follow (long on bid/buy events)' }), el('option', { value: 'fade', text: 'fade' }));
+  btMode.append(el('option', { value: 'follow', text: 'по направлению (long на bid/buy)' }), el('option', { value: 'fade', text: 'против' }));
   const btStop = num(100, '1');
   const btTarget = num(150, '1');
-  const btHold = num(15, '1', 'max hold minutes');
+  const btHold = num(15, '1', 'макс. удержание, мин');
   const btRange = el('select');
-  for (const [v, l] of [['3600000', 'last 1h'], ['14400000', 'last 4h'], ['21600000', 'last 6h']]) btRange.append(el('option', { value: v, text: l }));
-  const btRun = el('button', { text: 'Run backtest' });
+  for (const [v, l] of [['3600000', 'последний 1 ч'], ['14400000', 'последние 4 ч'], ['21600000', 'последние 6 ч']]) btRange.append(el('option', { value: v, text: l }));
+  const btRun = el('button', { text: 'Запустить бэктест' });
   const btOut = el('div');
   btBox.append(
-    el('div', { class: 'form-grid' }, el('label', {}, 'Events', kinds), el('label', {}, 'Min confidence', btConf), el('label', {}, 'Mode', btMode), el('label', {}, 'Stop ticks', btStop), el('label', {}, 'Target ticks', btTarget), el('label', {}, 'Max hold (min)', btHold), el('label', {}, 'Range', btRange)),
+    el('div', { class: 'form-grid' }, el('label', {}, 'События', kinds), el('label', {}, 'Мин. score', btScore), el('label', {}, 'Режим', btMode), el('label', {}, 'Стоп, тиков', btStop), el('label', {}, 'Цель, тиков', btTarget), el('label', {}, 'Удержание, мин', btHold), el('label', {}, 'Период', btRange)),
     el('p', {}, btRun),
-    el('p', { class: 'muted', text: 'Uses recorded trades and recorded events for this instrument only (server retention). Entries fill at the first trade after the event ± half a tick spread + slippage; stops/targets are checked on trade prices. One position at a time.' }),
+    el('p', {
+      class: 'muted',
+      text: 'Только по сохранённым реальным сделкам и событиям этого инструмента. Сигнал доступен с момента обнаружения (время события), вход — по первой сделке после него ± полтика спреда (исторической глубины стакана для бэктеста нет, поэтому исполнение приближённое); стоп/цель проверяются по ценам сделок. Одна позиция одновременно. Синтетические тесты не доказывают прибыльность.',
+    }),
     btOut,
   );
   btRun.onclick = async () => {
     btRun.disabled = true;
-    btOut.textContent = 'Loading recorded data…';
+    btOut.textContent = 'Загрузка сохранённых данных…';
     try {
       const to = store.now();
       const from = to - +btRange.value;
       const [tr, ev] = await Promise.all([
-        api<{ trades: [number, number, number, 1 | -1, number][] }>('/api/trades', { source: store.source, symbol: store.symbol, from, to, limit: 300_000 }),
+        api<{ trades: [number, number, number, 1 | -1, number][]; sources: string[] }>('/api/trades', { source: store.source, symbol: store.symbol, from, to, limit: 300_000 }),
         api<MarketEvent[]>('/api/events', { source: store.source, symbol: store.symbol, from, to }),
       ]);
       const trades: Trade[] = tr.trades.map(([t, price, qty, side]) => ({ t, price, qty, side }));
       if (!trades.length) {
-        btOut.textContent = 'No recorded trades in that range.';
+        btOut.textContent = 'В этом периоде нет сохранённых сделок.';
         return;
       }
       const sel = [...kinds.selectedOptions].map((o) => o.value as EventKind);
-      const r = backtestEvents(trades, ev, { kinds: sel, minConfidence: +btConf.value, mode: btMode.value as 'follow' | 'fade', stopTicks: +btStop.value, targetTicks: +btTarget.value, maxHoldMs: +btHold.value * 60_000, qty: +qtyIn.value || 1 }, costs());
+      const r = backtestEvents(trades, ev, { kinds: sel, minConfidence: +btScore.value, mode: btMode.value as 'follow' | 'fade', stopTicks: +btStop.value, targetTicks: +btTarget.value, maxHoldMs: +btHold.value * 60_000, qty: +qtyIn.value || 1 }, { takerFee: (+feeIn.value || 0) / 100, slippageTicks: +slipIn.value || 0, tick: store.meta?.tickSize ?? 0.01, assumedSpreadTicks: 1 });
       const s = computeStats(r.closed);
-      btOut.innerHTML = `<p>${trades.length} trades, ${ev.length} events (${fmtDateTime(trades[0].t)} → ${fmtDateTime(trades[trades.length - 1].t)}). Signals skipped while in a position: ${r.skipped}.</p>
-        <div class="cards">${[
-          ['Trades', String(s.trades)],
+      btOut.innerHTML =
+        `<p>${trades.length} сделок, ${ev.length} событий (${fmtDateTime(trades[0].t)} → ${fmtDateTime(trades[trades.length - 1].t)}; источники: ${esc(tr.sources.join(', '))}). Пропущено сигналов при открытой позиции: ${r.skipped}.</p><div class="cards">${[
+          ['Сделок', String(s.trades)],
           ['Win rate', (s.winRate * 100).toFixed(1) + '%'],
           ['Net', fmtQ(s.net)],
           ['Expectancy', fmtQ(s.expectancy)],
-          ['Profit factor', isFinite(s.profitFactor) ? s.profitFactor.toFixed(2) : s.trades ? '∞' : '–'],
-          ['Max DD', fmtQ(s.maxDrawdown)],
-          ['Fees', fmtQ(s.fees)],
+          ['Profit factor', Number.isFinite(s.profitFactor) ? s.profitFactor.toFixed(2) : s.trades ? '∞' : '–'],
+          ['Макс. просадка', fmtQ(s.maxDrawdown)],
         ]
           .map(([k, v]) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`)
-          .join('')}</div>` + (r.closed.length ? tradeRows(r.closed, store.meta?.pricePrecision ?? 2) : '<p class="muted">No qualifying events in that range.</p>');
+          .join('')}</div>` + (r.closed.length ? rows(r.closed) : '<p class="muted">Подходящих событий в этом периоде нет.</p>');
     } catch (e) {
-      btOut.textContent = 'Backtest failed: ' + (e as Error).message;
+      btOut.textContent = 'Ошибка бэктеста: ' + (e as Error).message;
     } finally {
       btRun.disabled = false;
     }
   };
 
-  let visible = false;
-  let bookTimer = 0;
-  store.on('book', () => {
-    if (!bookTimer)
-      bookTimer = window.setTimeout(() => {
-        bookTimer = 0;
-        onBook();
-      }, 250);
-  });
-  store.on('reset', () => {
-    load();
-    if (visible) render();
-  });
+  let timer = 0;
   return {
     id: 'paper',
-    title: 'Paper',
+    title: 'Paper/Backtest',
     root,
     show() {
       visible = true;
-      render();
+      void refresh();
+      timer = window.setInterval(() => visible && void refresh(), 3000);
     },
     hide() {
       visible = false;
+      clearInterval(timer);
     },
   };
 }

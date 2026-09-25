@@ -8,10 +8,10 @@ import type { Candle } from '../../core/types.js';
 
 export function createProfileTab(): Tab {
   const root = el('section', { id: 'tab-profile', role: 'tabpanel' });
-  const rangeSel = el('select', { 'aria-label': 'Volume profile range' });
-  for (const [v, l] of [['session', 'UTC session'], ['3600000', 'Last 1h'], ['14400000', 'Last 4h'], ['all', 'All loaded']]) rangeSel.append(el('option', { value: v, text: l }));
-  const rowSel = el('select', { 'aria-label': 'Row size' });
-  rowSel.append(el('option', { value: '0', text: 'auto rows' }));
+  const rangeSel = el('select', { 'aria-label': 'Диапазон профиля объёма' });
+  for (const [v, l] of [['session', 'Сессия (UTC-день)'], ['3600000', 'Последний 1 ч'], ['14400000', 'Последние 4 ч'], ['all', 'Всё загруженное']]) rangeSel.append(el('option', { value: v, text: l }));
+  const rowSel = el('select', { 'aria-label': 'Размер строки' });
+  rowSel.append(el('option', { value: '0', text: 'авто' }));
   for (const n of [1, 5, 10, 25, 50, 100, 250, 500, 1000]) rowSel.append(el('option', { value: String(n), text: `${n} tick` }));
   const daySel = el('select', { 'aria-label': 'TPO session' });
   const vpInfo = el('span', { class: 'muted' });
@@ -60,7 +60,7 @@ export function createProfileTab(): Tab {
     ctx.fillRect(0, 0, w, h);
     const tr = vpTrades();
     if (!tr.length) {
-      vpEmpty.textContent = 'No recorded trades in this range yet.';
+      vpEmpty.textContent = 'В этом диапазоне ещё нет записанных сделок.';
       vpInfo.textContent = '';
       return;
     }
@@ -74,7 +74,7 @@ export function createProfileTab(): Tab {
     const step = stepFor(hi - lo);
     const vp: VolumeProfile = volumeProfile(tr, step);
     const dec = Math.max(store.meta?.pricePrecision ?? 2, decimalsOf(step));
-    vpInfo.textContent = `VP from ${tr.length} trades ${fmtDateTime(tr[0].t)} → ${fmtDateTime(tr[tr.length - 1].t)} · POC ${fmtP(vp.poc, dec)} VAH ${fmtP(vp.vah, dec)} VAL ${fmtP(vp.val, dec)}`;
+    vpInfo.textContent = `VP из ${tr.length} сообщений aggTrade ${fmtDateTime(tr[0].t)} → ${fmtDateTime(tr[tr.length - 1].t)} · POC ${fmtP(vp.poc, dec)} VAH ${fmtP(vp.vah, dec)} VAL ${fmtP(vp.val, dec)}`;
     const rows = vp.rows;
     const axisW = 70;
     const rh = Math.max(1, Math.min(18, (h - 20) / rows.length));
@@ -202,7 +202,7 @@ export function createProfileTab(): Tab {
   let tpoTimer = 0;
   return {
     id: 'profile',
-    title: 'Profile / TPO',
+    title: 'Profile/TPO',
     root,
     show() {
       painter.show();

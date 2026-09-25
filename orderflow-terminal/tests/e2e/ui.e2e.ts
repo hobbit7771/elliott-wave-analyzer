@@ -1,50 +1,30 @@
 // End-to-end: real server process + real Chromium, fed by the local test venue.
 // Checks that every tab renders live data, markers appear, and layouts fit iPhone and desktop.
-import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { chromium, type Browser, type Page } from 'playwright-core';
-import { freePort, startTestVenue, type TestVenue } from './testVenue.js';
+import { startTestVenue, type TestVenue } from './testVenue.js';
+import { OWNER, ARCHIVE_KEY, startServer, type ServerHandle } from './harness.js';
+import { startPg, startArchiveServer } from '../fixtures/pg.js';
 
-let PORT = 0;
 let BASE = '';
 const OUT = 'test-results';
 let venue: TestVenue;
-let server: ChildProcess;
+let server: ServerHandle;
+let pg: Awaited<ReturnType<typeof startPg>>;
+let arch: Awaited<ReturnType<typeof startArchiveServer>>;
 let browser: Browser;
-const serverLog: string[] = [];
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const T = { source: 'binance-futures', symbol: 'TESTUSDT' };
+const q = (extra: Record<string, string> = {}) => new URLSearchParams({ ...T, ...extra }).toString();
 
 beforeAll(async () => {
   mkdirSync(OUT, { recursive: true });
-  PORT = await freePort();
-  BASE = `http://127.0.0.1:${PORT}`;
-  rmSync(`/tmp/oft-e2e-${PORT}.sqlite`, { force: true });
+  pg = await startPg();
+  arch = await startArchiveServer(ARCHIVE_KEY);
   venue = await startTestVenue();
-  server = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'dist/server/index.js'], {
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      PORT: String(PORT),
-      DB_PATH: `/tmp/oft-e2e-${PORT}.sqlite`,
-      BINANCE_FUTURES_REST: venue.url,
-      BINANCE_FUTURES_WS_BASE: venue.wsUrl,
-      DEFAULT_SYMBOLS: 'binance-futures:TESTUSDT',
-      BACKFILL_MINUTES: '1',
-    },
-  });
-  server.stdout?.on('data', (d) => serverLog.push(String(d)));
-  server.stderr?.on('data', (d) => serverLog.push(String(d)));
-  let up = false;
-  for (let i = 0; i < 100 && !up; i++) {
-    try {
-      up = (await fetch(BASE + '/api/health')).ok;
-    } catch {
-      /* not up yet */
-    }
-    if (!up) await wait(200);
-  }
-  if (!up) throw new Error('server did not start:\n' + serverLog.join(''));
+  server = await startServer({ venueUrl: venue.url, venueWs: venue.wsUrl, pgPort: pg.port, archiveUrl: arch.url });
+  BASE = server.base;
   browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || undefined });
   // let the server record some heatmap columns / trades first
   await wait(8000);
@@ -52,23 +32,25 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await browser?.close();
-  if (server && server.exitCode === null) {
-    const exited = new Promise((r) => server.once('exit', r));
-    server.kill('SIGTERM');
-    await exited;
-  }
+  await server?.stop();
   await venue?.close();
+  await arch?.stop();
+  await pg?.stop();
 });
 
 async function openApp(viewport: { width: number; height: number }, mobile: boolean): Promise<{ page: Page; errors: string[] }> {
   const ctx = await browser.newContext({ viewport, isMobile: mobile, hasTouch: mobile, deviceScaleFactor: mobile ? 3 : 1 });
-  await ctx.addInitScript(() => localStorage.setItem('oft:instrument', JSON.stringify({ source: 'binance-futures', symbol: 'TESTUSDT' })));
+  await ctx.addInitScript((owner) => {
+    localStorage.setItem('oft:instrument', JSON.stringify({ source: 'binance-futures', symbol: 'TESTUSDT' }));
+    localStorage.setItem('oft:owner', owner);
+  }, OWNER);
   const page = await ctx.newPage();
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
   page.on('console', (m) => m.type() === 'error' && errors.push('console: ' + m.text()));
+  page.on('response', (r) => r.status() >= 400 && errors.push(`http ${r.status()} ${r.url()}`));
   await page.goto(BASE + '/#chart');
-  await page.waitForFunction(() => document.querySelector('.badge')?.textContent === 'Connected', null, { timeout: 30_000 });
+  await page.waitForFunction(() => document.querySelector('.badge')?.textContent === 'LIVE', null, { timeout: 30_000 });
   return { page, errors };
 }
 
@@ -116,7 +98,7 @@ for (const [name, viewport, mobile] of [
       await wait(1500);
       expect(await canvasInk(page, '#tab-heatmap canvas')).toBeGreaterThan(500);
       // recorded history (not only columns received since page load) is shown
-      const cols = Number((await page.textContent('#tab-heatmap .toolbar .muted'))?.match(/(\d+) columns/)?.[1] ?? 0);
+      const cols = Number((await page.textContent('#tab-heatmap .toolbar .muted'))?.match(/(\d+) колонок/)?.[1] ?? 0);
       expect(cols).toBeGreaterThanOrEqual(10);
 
       // DOM shows real bid / ask ladder
@@ -154,5 +136,48 @@ describe('Detector events reach the UI', () => {
     await page.screenshot({ path: `${OUT}/desktop-signals-events.png` });
     expect(rows.length).toBeGreaterThan(0);
     await page.context().close();
+  });
+});
+
+describe('History survives a restart (Supabase is the source of truth)', () => {
+  it('restores events, heat tiles, gaps and archived L2 from Postgres with an empty local cache', async () => {
+    // wait until at least one archive block is final and some events were persisted
+    for (let i = 0; i < 60; i++) {
+      const [{ n }] = await pg.sql`select count(*)::int as n from oft.archives where status = 'final'`;
+      const [{ e }] = await pg.sql`select count(*)::int as e from oft.events`;
+      if (n > 0 && e > 0) break;
+      await wait(1000);
+    }
+    const before = (await (await fetch(`${BASE}/api/events?${q()}`)).json()) as { id: string }[];
+    const [{ tiles }] = await pg.sql`select count(*)::int as tiles from oft.heat_tiles`;
+    const [blk] = await pg.sql`select t0, t1 from oft.archives where status = 'final' order by t0 limit 1`;
+    expect(before.length).toBeGreaterThan(0);
+    expect(tiles).toBeGreaterThan(0);
+    expect(blk).toBeTruthy();
+
+    // hard gap in the venue while running -> must be recorded
+    await server.stop();
+    server = await startServer({ venueUrl: venue.url, venueWs: venue.wsUrl, pgPort: pg.port, archiveUrl: arch.url });
+    BASE = server.base;
+    const after = (await (await fetch(`${BASE}/api/events?${q()}`)).json()) as { id: string }[];
+    const ids = new Set(after.map((e) => e.id));
+    expect(before.filter((e) => ids.has(e.id)).length).toBe(before.length);
+
+    const heat = (await (await fetch(`${BASE}/api/heatmap?${q({ from: String(Date.now() - 10 * 60_000) })}`)).json()) as { cols: unknown[]; tiers: string[] };
+    expect(heat.cols.length).toBeGreaterThan(0);
+
+    const gaps = (await (await fetch(`${BASE}/api/gaps?${q()}`)).json()) as { gaps: unknown[]; coverage: unknown[] };
+    expect(Array.isArray(gaps.gaps)).toBe(true);
+    expect(gaps.coverage.length).toBeGreaterThan(0);
+
+    const t = Math.floor((Number(blk.t0) + Number(blk.t1)) / 2);
+    const book = (await (await fetch(`${BASE}/api/archive/book?${q({ t: String(t) })}`)).json()) as { continuous: boolean; bids: unknown[]; asks: unknown[] };
+    expect(book.continuous).toBe(true);
+    expect(book.bids.length).toBeGreaterThan(0);
+    expect(book.asks.length).toBeGreaterThan(0);
+
+    // owner-only endpoints refuse anonymous writes
+    const anon = await fetch(`${BASE}/api/paper/order`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    expect(anon.status).toBe(401);
   });
 });

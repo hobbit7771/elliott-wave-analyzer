@@ -7,7 +7,7 @@ export interface ArchiveConfig {
 export function archiveConfigFromEnv(env = process.env): ArchiveConfig | null {
   const ref = env.SUPABASE_PROJECT_REF;
   const key = env.OFT_ARCHIVE_KEY;
-  if (!ref || !key) return null;
+  if (!key || (!ref && !env.OFT_ARCHIVE_URL)) return null;
   return { url: env.OFT_ARCHIVE_URL ?? `https://${ref}.supabase.co/functions/v1/oft-archive`, key };
 }
 

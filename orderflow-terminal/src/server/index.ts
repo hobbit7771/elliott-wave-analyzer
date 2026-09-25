@@ -42,6 +42,8 @@ if (PROD) {
     BINANCE_SPOT_REST: /(^|\.)binance\.(com|vision)$/,
     BINANCE_SPOT_WS: /(^|\.)binance\.(com|vision)$/,
     DATABENTO_LIVE_GATEWAY: /(^|\.)databento\.com$/,
+    OFT_ARCHIVE_URL: /(^|\.)supabase\.co$/,
+    OFT_DB_URL: /(^|\.)supabase\.(co|com)$/,
     DATABENTO_HIST_URL: /(^|\.)databento\.com$/,
   };
   for (const [k, re] of Object.entries(allowed)) {
@@ -105,7 +107,7 @@ const hub: Hub = new Hub({
       const err = p?.lastError ?? '';
       if (err && err !== lastPersistError.get(key)) {
         const [source, symbol] = key.split(':');
-        alerts.onEvent({ id: `persist-${key}-${Date.now()}`, t: Date.now(), kind: 'feed', title: 'History write error', price: NaN, confidence: 100, explain: err, source: source as SourceId, symbol });
+        alerts.onEvent({ id: `persist-${key}-${Date.now()}`, t: Date.now(), kind: 'feed', title: 'Ошибка записи истории', price: NaN, confidence: 100, explain: err, source: source as SourceId, symbol });
       }
       lastPersistError.set(key, err);
     }

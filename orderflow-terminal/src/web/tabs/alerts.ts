@@ -1,86 +1,53 @@
-// Alerts: user rules over real detector / feed events -> browser notifications and sound.
+// Алерты: правила выполняются на сервере (пока Render работает), журнал хранится в Supabase.
+// Браузер показывает уведомление и проигрывает звук, когда сервер присылает сработавший алерт.
 import type { Tab } from '../main.js';
 import { store } from '../store.js';
-import { el, esc, fmtP, fmtDateTime, KIND_LABEL, loadPrefRaw, savePref } from '../util.js';
-import { TIMEFRAMES, TF_LABEL, TF_MS, type Timeframe } from '../../core/candles.js';
+import { api, el, esc, fmtP, fmtDateTime, KIND_LABEL, ownerToken } from '../util.js';
+import { TIMEFRAMES, TF_LABEL, type Timeframe } from '../../core/candles.js';
 import type { EventKind, MarketEvent } from '../../core/types.js';
 
-export interface AlertRule {
+interface AlertRule {
   id: number;
   enabled: boolean;
-  symbol: string; // '' = any instrument
+  symbol: string;
   kinds: EventKind[];
-  minConfidence: number;
-  minVolume: number; // applies to events that carry a size (size / volume / peak / estimatedHidden / total)
-  tf: Timeframe | ''; // max one notification per bar of this timeframe per rule
+  minScore: number;
+  minVolume: number;
+  tf: Timeframe | '';
+  cooldownMs: number;
+  sound: boolean;
+  notify: boolean;
+}
+interface ServerAlert {
+  t: number;
+  ruleId: number;
+  event: MarketEvent;
   sound: boolean;
   notify: boolean;
 }
 
-const FEED_KINDS: EventKind[] = ['feed', 'spread_expansion'];
-const DEFAULT_RULES: AlertRule[] = [
-  { id: 1, enabled: true, symbol: '', kinds: ['iceberg'], minConfidence: 70, minVolume: 0, tf: '', sound: true, notify: true },
-  { id: 2, enabled: true, symbol: '', kinds: ['feed'], minConfidence: 0, minVolume: 0, tf: '', sound: false, notify: true },
-];
-
-class AlertEngine {
-  rules: AlertRule[] = loadPrefRaw('alertRules', DEFAULT_RULES);
-  log: { t: number; rule: number; ev: MarketEvent }[] = [];
-  private lastBar = new Map<number, number>();
+class AlertClient {
+  recent: ServerAlert[] = [];
   private audio: AudioContext | null = null;
   onChange: () => void = () => {};
 
-  save(): void {
-    savePref('alertRules', this.rules);
-  }
-
-  eventSize(ev: MarketEvent): number {
-    const d = ev.data ?? {};
-    for (const k of ['size', 'volume', 'peak', 'estimatedHidden', 'total', 'traded']) if (typeof d[k] === 'number') return d[k] as number;
-    return NaN;
-  }
-
-  matches(r: AlertRule, ev: MarketEvent): boolean {
-    if (!r.enabled) return false;
-    if (r.symbol && r.symbol !== ev.symbol) return false;
-    if (r.kinds.length && !r.kinds.includes(ev.kind)) return false;
-    if (!FEED_KINDS.includes(ev.kind) && ev.confidence < r.minConfidence) return false;
-    if (r.minVolume > 0) {
-      const s = this.eventSize(ev);
-      if (!(s >= r.minVolume)) return false;
-    }
-    return true;
-  }
-
-  onEvent(ev: MarketEvent, isNew: boolean): void {
-    // updates of an existing event only alert when they newly qualify (e.g. confidence rose)
-    if (!isNew && ev.kind !== 'iceberg') return;
-    for (const r of this.rules) {
-      if (!this.matches(r, ev)) continue;
-      if (!isNew && this.log.some((l) => l.rule === r.id && l.ev.id === ev.id)) continue;
-      if (r.tf && r.tf !== 'tick') {
-        const bar = Math.floor(ev.t / TF_MS[r.tf]);
-        if (this.lastBar.get(r.id) === bar) continue;
-        this.lastBar.set(r.id, bar);
-      }
-      this.fire(r, ev);
-    }
-  }
-
-  fire(r: AlertRule, ev: MarketEvent): void {
-    this.log.unshift({ t: Date.now(), rule: r.id, ev });
-    if (this.log.length > 300) this.log.pop();
-    const title = `${ev.symbol}: ${ev.title}${ev.kind === 'feed' ? '' : ` (${ev.confidence})`}`;
-    const body = `${isFinite(ev.price) ? '@ ' + ev.price + ' — ' : ''}${ev.explain}`.slice(0, 240);
-    if (r.sound) this.beep(ev.kind === 'feed' ? 330 : 880);
-    if (r.notify && 'Notification' in window && Notification.permission === 'granted') {
-      const opts = { body, tag: ev.id, icon: '/icon.svg' };
-      void navigator.serviceWorker?.getRegistration().then((reg) => {
-        if (reg) void reg.showNotification(title, opts);
-        else new Notification(title, opts);
-      });
+  /** A rule fired on the server. Replay never produces these (replay runs only in the browser). */
+  onServerAlert(a: ServerAlert): void {
+    this.recent.unshift(a);
+    if (this.recent.length > 200) this.recent.pop();
+    const ev = a.event;
+    if (a.sound) this.beep(ev.kind === 'feed' ? 330 : 880);
+    if (a.notify && 'Notification' in window && Notification.permission === 'granted') {
+      const title = `${ev.symbol}: ${ev.title}${ev.kind === 'feed' ? '' : ` (score ${ev.confidence})`}`;
+      const opts = { body: `${isFinite(ev.price) ? '@ ' + ev.price + ' — ' : ''}${ev.explain}`.slice(0, 240), tag: ev.id, icon: '/icon.svg' };
+      void navigator.serviceWorker?.getRegistration().then((reg) => (reg ? void reg.showNotification(title, opts) : new Notification(title, opts)));
     }
     this.onChange();
+  }
+
+  /** local browser-connection loss (the server cannot report its own unreachability) */
+  onEvent(ev: MarketEvent, _isNew: boolean): void {
+    this.onServerAlert({ t: Date.now(), ruleId: 0, event: ev, sound: false, notify: true });
   }
 
   beep(freq: number): void {
@@ -100,95 +67,138 @@ class AlertEngine {
   }
 }
 
-export const alerts = new AlertEngine();
+export const alerts = new AlertClient();
 
 export function createAlertsTab(): Tab {
   const root = el('section', { id: 'tab-alerts', role: 'tabpanel' });
-  const permBtn = el('button', { text: 'Enable browser notifications' });
-  const testBtn = el('button', { text: 'Test sound' });
-  const addBtn = el('button', { text: '+ Rule' });
-  const permState = el('span', { class: 'muted' });
-  root.append(el('div', { class: 'toolbar' }, permBtn, testBtn, addBtn, permState));
+  const permBtn = el('button', { text: 'Разрешить уведомления' });
+  const testBtn = el('button', { text: 'Проверить звук' });
+  const addBtn = el('button', { text: '+ Правило' });
+  const saveBtn = el('button', { text: 'Сохранить правила' });
+  const info = el('span', { class: 'muted' });
+  root.append(el('div', { class: 'toolbar' }, permBtn, testBtn, addBtn, saveBtn, info));
   const body = el('div', { class: 'scroll pad' });
   const rulesBox = el('div');
   const logBox = el('div');
   body.append(
-    el('p', { class: 'muted', text: 'Rules fire on real detector events (large limit order, probable iceberg, absorption, cluster formed, liquidity removed, sweep, imbalance, …) and on feed events (order-book disconnect, stale data, resynchronization, data gap, spread expansion). On iPhone, notifications require adding the app to the Home Screen (iOS 16.4+) and allowing them.' }),
+    el('p', {
+      class: 'muted',
+      text: 'Правила проверяет сервер на каждом событии детекторов и потока данных (крупный уровень, кластер, предполагаемый айсберг, поглощение, sweep, дисбаланс, снятие ликвидности, расширение спреда, разрыв/устаревание/ресинхронизация, ошибки записи истории), пока сервис Render работает. Журнал хранится в Supabase. Push при закрытом приложении НЕ реализован: уведомления приходят, пока терминал открыт (на iPhone — после «На экран Домой», iOS 16.4+). Во время сна Render правила не проверяются.',
+    }),
     rulesBox,
-    el('h3', { text: 'Fired alerts' }),
+    el('h3', { text: 'Сработавшие алерты' }),
     logBox,
   );
   root.append(body);
+  let rules: AlertRule[] = [];
+  let log: { t: number; rule_id: number; symbol: string; body: ServerAlert }[] = [];
 
-  function perm(): void {
-    permState.textContent = 'Notification' in window ? `Notifications: ${Notification.permission}` : 'Notifications not supported in this browser (sound alerts still work).';
+  async function load(): Promise<void> {
+    if (!ownerToken()) {
+      info.textContent = 'Нужен токен владельца (вкладка «Источники и настройки»).';
+      rulesBox.textContent = '';
+      renderLog();
+      return;
+    }
+    try {
+      const r = await api<{ rules: AlertRule[]; log: typeof log }>('/api/alerts');
+      rules = r.rules;
+      log = r.log;
+      info.textContent = '';
+      render();
+    } catch (e) {
+      info.textContent = 'Не удалось загрузить: ' + (e as Error).message;
+    }
   }
-  permBtn.onclick = async () => {
-    if ('Notification' in window) await Notification.requestPermission();
-    alerts.beep(660);
-    perm();
-  };
-  testBtn.onclick = () => alerts.beep(880);
-  addBtn.onclick = () => {
-    alerts.rules.push({ id: Math.max(0, ...alerts.rules.map((r) => r.id)) + 1, enabled: true, symbol: store.symbol, kinds: ['absorption'], minConfidence: 60, minVolume: 0, tf: '', sound: true, notify: true });
-    alerts.save();
-    render();
-  };
 
   function render(): void {
-    rulesBox.replaceChildren(...alerts.rules.map(ruleRow));
+    rulesBox.replaceChildren(...rules.map(ruleRow));
     renderLog();
   }
 
   function ruleRow(r: AlertRule): HTMLElement {
-    const upd = () => {
-      alerts.save();
-    };
     const en = el('input', { type: 'checkbox' });
     en.checked = r.enabled;
-    en.onchange = () => ((r.enabled = en.checked), upd());
-    const sym = el('input', { value: r.symbol, placeholder: 'any', style: 'width:110px;text-transform:uppercase' });
-    sym.onchange = () => ((r.symbol = sym.value.trim().toUpperCase()), upd());
-    const kinds = el('select', { multiple: 'true', size: '4' });
+    en.onchange = () => (r.enabled = en.checked);
+    const sym = el('input', { value: r.symbol, placeholder: 'любой', style: 'width:110px;text-transform:uppercase' });
+    sym.onchange = () => (r.symbol = sym.value.trim().toUpperCase());
+    const kinds = el('select', { multiple: 'true', size: '5' });
     for (const [k, l] of Object.entries(KIND_LABEL)) kinds.append(el('option', { value: k, text: l, ...(r.kinds.includes(k as EventKind) ? { selected: 'true' } : {}) }));
-    kinds.onchange = () => ((r.kinds = [...kinds.selectedOptions].map((o) => o.value as EventKind)), upd());
-    const conf = el('input', { type: 'number', min: '0', max: '100', step: '5', value: String(r.minConfidence) });
-    conf.onchange = () => ((r.minConfidence = +conf.value), upd());
+    kinds.onchange = () => (r.kinds = [...kinds.selectedOptions].map((o) => o.value as EventKind));
+    const score = el('input', { type: 'number', min: '0', max: '100', step: '5', value: String(r.minScore) });
+    score.onchange = () => (r.minScore = +score.value);
     const vol = el('input', { type: 'number', min: '0', step: 'any', value: String(r.minVolume) });
-    vol.onchange = () => ((r.minVolume = +vol.value || 0), upd());
+    vol.onchange = () => (r.minVolume = +vol.value || 0);
+    const cd = el('input', { type: 'number', min: '0', step: '5', value: String(Math.round(r.cooldownMs / 1000)) });
+    cd.onchange = () => (r.cooldownMs = Math.max(0, +cd.value) * 1000);
     const tf = el('select');
-    tf.append(el('option', { value: '', text: 'every event' }));
-    for (const t of TIMEFRAMES) if (t !== 'tick') tf.append(el('option', { value: t, text: `≤1 per ${TF_LABEL[t]} bar` }));
+    tf.append(el('option', { value: '', text: 'каждое событие' }));
+    for (const t of TIMEFRAMES) if (t !== 'tick') tf.append(el('option', { value: t, text: `не чаще 1 на бар ${TF_LABEL[t]}` }));
     tf.value = r.tf;
-    tf.onchange = () => ((r.tf = tf.value as Timeframe | ''), upd());
+    tf.onchange = () => (r.tf = tf.value as Timeframe | '');
     const snd = el('input', { type: 'checkbox' });
     snd.checked = r.sound;
-    snd.onchange = () => ((r.sound = snd.checked), upd());
+    snd.onchange = () => (r.sound = snd.checked);
     const ntf = el('input', { type: 'checkbox' });
     ntf.checked = r.notify;
-    ntf.onchange = () => ((r.notify = ntf.checked), upd());
-    const del = el('button', { text: 'Delete' });
+    ntf.onchange = () => (r.notify = ntf.checked);
+    const del = el('button', { text: 'Удалить' });
     del.onclick = () => {
-      alerts.rules = alerts.rules.filter((x) => x !== r);
-      alerts.save();
+      rules = rules.filter((x) => x !== r);
       render();
     };
     return el(
       'div',
       { class: 'card', style: 'margin-bottom:8px' },
-      el('div', { class: 'form-grid' }, el('label', {}, en, `Rule #${r.id} enabled`), el('label', {}, 'Instrument', sym), el('label', {}, 'Event types', kinds), el('label', {}, 'Min confidence', conf), el('label', {}, 'Min volume', vol), el('label', {}, 'Timeframe', tf), el('label', {}, snd, 'Sound'), el('label', {}, ntf, 'Browser / push notification'), del),
+      el(
+        'div',
+        { class: 'form-grid' },
+        el('label', {}, en, `Правило #${r.id} включено`),
+        el('label', {}, 'Инструмент', sym),
+        el('label', {}, 'Типы событий', kinds),
+        el('label', {}, 'Мин. score', score),
+        el('label', {}, 'Мин. объём', vol),
+        el('label', {}, 'Cooldown, с', cd),
+        el('label', {}, 'Частота на бар', tf),
+        el('label', {}, snd, 'Звук'),
+        el('label', {}, ntf, 'Уведомление браузера'),
+        del,
+      ),
     );
   }
 
   function renderLog(): void {
-    logBox.innerHTML = alerts.log.length
-      ? '<table><thead><tr><th class="l">Fired</th><th class="l">Instrument</th><th class="l">Event</th><th>Price</th><th>Conf</th><th class="l">Why</th></tr></thead><tbody>' +
-        alerts.log.map((l) => `<tr><td class="l">${fmtDateTime(l.t)}</td><td class="l">${esc(l.ev.symbol)}</td><td class="l">${esc(l.ev.title)}</td><td>${fmtP(l.ev.price, store.meta?.pricePrecision ?? 2)}</td><td>${l.ev.confidence}</td><td class="wrap">${esc(l.ev.explain)}</td></tr>`).join('') +
+    const rows = alerts.recent.map((a) => ({ t: a.t, rule: a.ruleId, ev: a.event })).concat(log.map((l) => ({ t: l.t, rule: l.rule_id, ev: l.body.event })));
+    const seen = new Set<string>();
+    const uniq = rows.filter((r) => (seen.has(r.rule + r.ev.id) ? false : (seen.add(r.rule + r.ev.id), true)));
+    logBox.innerHTML = uniq.length
+      ? '<table><thead><tr><th class="l">Время (UTC)</th><th class="l">Инструмент</th><th class="l">Событие</th><th>Цена</th><th>Score</th><th class="l">Почему</th></tr></thead><tbody>' +
+        uniq
+          .slice(0, 300)
+          .map((l) => `<tr><td class="l">${fmtDateTime(l.t)}</td><td class="l">${esc(l.ev.symbol)}</td><td class="l">${esc(l.ev.title)}</td><td>${fmtP(l.ev.price, store.meta?.pricePrecision ?? 2)}</td><td>${l.ev.kind === 'feed' ? '—' : l.ev.confidence}</td><td class="wrap">${esc(l.ev.explain)}</td></tr>`)
+          .join('') +
         '</tbody></table>'
-      : '<p class="muted">No alerts fired yet.</p>';
+      : '<p class="muted">Алертов пока нет.</p>';
   }
+
+  permBtn.onclick = async () => {
+    if ('Notification' in window) await Notification.requestPermission();
+    alerts.beep(660);
+    permBtn.textContent = 'Notification' in window ? `Уведомления: ${Notification.permission}` : 'Уведомления не поддерживаются';
+  };
+  testBtn.onclick = () => alerts.beep(880);
+  addBtn.onclick = () => {
+    rules.push({ id: Math.max(0, ...rules.map((r) => r.id)) + 1, enabled: true, symbol: store.symbol, kinds: ['absorption'], minScore: 60, minVolume: 0, tf: '', cooldownMs: 60_000, sound: true, notify: true });
+    render();
+  };
+  saveBtn.onclick = async () => {
+    try {
+      await api('/api/alerts', {}, { method: 'PUT', body: JSON.stringify(rules) });
+      info.textContent = 'Сохранено на сервере.';
+    } catch (e) {
+      info.textContent = 'Ошибка: ' + (e as Error).message;
+    }
+  };
   alerts.onChange = () => renderLog();
-  perm();
-  render();
-  return { id: 'alerts', title: 'Alerts', root, show: () => (perm(), renderLog()), hide: () => {} };
+  return { id: 'alerts', title: 'Алерты', root, show: () => void load(), hide: () => {} };
 }

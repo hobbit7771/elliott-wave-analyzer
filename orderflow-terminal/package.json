@@ -28,7 +28,6 @@
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.8",
-    "@electric-sql/pglite-socket": "^0.2.11",
     "@types/node": "^22.20.4",
     "@types/ws": "^8.18.1",
     "esbuild": "^0.28.2",

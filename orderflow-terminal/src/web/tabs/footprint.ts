@@ -22,19 +22,19 @@ export function createFootprintTab(): Tab {
   const root = el('section', { id: 'tab-footprint', role: 'tabpanel' });
   const p = loadPref<Prefs>('fpPrefs', DEF);
   const save = () => savePref('fpPrefs', p);
-  const stepSel = el('select', { 'aria-label': 'Row size' });
-  stepSel.append(el('option', { value: '0', text: 'auto' }));
+  const stepSel = el('select', { 'aria-label': 'Размер строки' });
+  stepSel.append(el('option', { value: '0', text: 'авто' }));
   for (const n of [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000]) stepSel.append(el('option', { value: String(n), text: `${n} tick` }));
   stepSel.value = String(p.stepTicks);
-  const ratioIn = el('input', { type: 'number', min: '1.5', max: '10', step: '0.5', value: String(p.ratio), title: 'Diagonal imbalance ratio' });
-  const minVolIn = el('input', { type: 'number', min: '0', step: 'any', value: String(p.minVol), title: 'Minimum volume for an imbalance cell' });
-  const stackIn = el('input', { type: 'number', min: '2', max: '10', step: '1', value: String(p.stack), title: 'Consecutive imbalances for a stacked imbalance' });
-  const modeSel = el('select', { 'aria-label': 'Cell content' });
-  for (const [v, l] of [['bidask', 'Bid × Ask'], ['delta', 'Delta'], ['volume', 'Volume']]) modeSel.append(el('option', { value: v, text: l }));
+  const ratioIn = el('input', { type: 'number', min: '1.5', max: '10', step: '0.5', value: String(p.ratio), title: 'Коэффициент диагонального дисбаланса' });
+  const minVolIn = el('input', { type: 'number', min: '0', step: 'any', value: String(p.minVol), title: 'Мин. объём ячейки для дисбаланса' });
+  const stackIn = el('input', { type: 'number', min: '2', max: '10', step: '1', value: String(p.stack), title: 'Подряд идущих дисбалансов для stacked imbalance' });
+  const modeSel = el('select', { 'aria-label': 'Содержимое ячеек' });
+  for (const [v, l] of [['bidask', 'Bid × Ask'], ['delta', 'Delta'], ['volume', 'Объём']]) modeSel.append(el('option', { value: v, text: l }));
   modeSel.value = p.mode;
-  const liveBtn = el('button', { text: 'Live', class: 'on' });
+  const liveBtn = el('button', { text: 'LIVE', class: 'on' });
   const cover = el('span', { class: 'muted' });
-  root.append(el('div', { class: 'toolbar' }, el('label', {}, 'Row', stepSel), el('label', {}, 'Imb ratio', ratioIn), el('label', {}, 'Imb min vol', minVolIn), el('label', {}, 'Stack', stackIn), el('label', {}, 'Cells', modeSel), liveBtn, cover));
+  root.append(el('div', { class: 'toolbar' }, el('label', {}, 'Строка', stepSel), el('label', {}, 'Дисбаланс ×', ratioIn), el('label', {}, 'Мин. объём', minVolIn), el('label', {}, 'Stacked', stackIn), el('label', {}, 'Ячейки', modeSel), liveBtn, cover));
   const fill = el('div', { class: 'fill' });
   const canvas = el('canvas');
   const tip = el('div', { class: 'tooltip' });
@@ -89,7 +89,7 @@ export function createFootprintTab(): Tab {
     for (const t of store.trades) fb.add(t);
     seq = store.tradeSeq;
     builtKey = `${store.key}|${store.tf}|${store.ticksPerBar}|${p.stepTicks}|${store.tradesFrom}`;
-    cover.textContent = store.trades.length ? `Trades loaded since ${fmtDateTime(store.trades[0].t)} · row ${fmtP(step, decimalsOf(step))}` : '';
+    cover.textContent = store.trades.length ? `Неполная история: сделки загружены с ${fmtDateTime(store.trades[0].t)} · row ${fmtP(step, decimalsOf(step))}` : '';
     painter.mark();
   }
 
@@ -121,7 +121,7 @@ export function createFootprintTab(): Tab {
     if (!fb || key !== builtKey) rebuild();
     const bars = fb!.bars;
     if (!bars.length) {
-      empty.textContent = 'No trades recorded yet for this instrument. The footprint is built only from real aggressive trades.';
+      empty.textContent = 'Для инструмента ещё нет записанных сделок. Footprint строится только из реальных агрессивных сделок; OHLCV недостаточно для исторического bid/ask footprint.';
       return;
     }
     empty.textContent = '';

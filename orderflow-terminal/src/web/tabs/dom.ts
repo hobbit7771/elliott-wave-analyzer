@@ -25,23 +25,23 @@ export function createDomTab(): Tab {
   const p = loadPref<Prefs>('domPrefs', DEF);
   const save = () => savePref('domPrefs', p);
 
-  const groupSel = el('select', { 'aria-label': 'Grouping' });
+  const groupSel = el('select', { 'aria-label': 'Группировка' });
   for (const g of [1, 2, 5, 10, 25, 50, 100, 250, 1000]) groupSel.append(el('option', { value: String(g), text: `${g} tick${g > 1 ? 's' : ''}` }));
   groupSel.value = String(p.group);
-  const levelsSel = el('select', { 'aria-label': 'Levels each side' });
+  const levelsSel = el('select', { 'aria-label': 'Уровней с каждой стороны' });
   for (const n of [10, 20, 40, 60, 100, 200]) levelsSel.append(el('option', { value: String(n), text: `±${n}` }));
   levelsSel.value = String(p.levels);
-  const largeIn = el('input', { type: 'number', min: '0', step: 'any', value: String(p.largeMin), title: 'Highlight levels at or above this size (0 = use the detector’s dynamic threshold)' });
-  const refillIn = el('input', { type: 'number', min: '1', max: '50', step: '1', value: '3', title: 'Minimum replenishments for Probable Iceberg (server detector setting)' });
-  const periodSel = el('select', { 'aria-label': 'Analysis period' });
+  const largeIn = el('input', { type: 'number', min: '0', step: 'any', value: String(p.largeMin), title: 'Подсвечивать уровни от этого объёма (0 — динамический порог детектора)' });
+  const refillIn = el('input', { type: 'number', min: '1', max: '50', step: '1', value: '3', title: 'Мин. число пополнений для предполагаемого айсберга (настройка серверного детектора, нужен токен владельца)' });
+  const periodSel = el('select', { 'aria-label': 'Период анализа' });
   for (const [l, ms] of [['1m', 60_000], ['5m', 300_000], ['15m', 900_000], ['1h', 3600_000], ['loaded', 0]] as [string, number][]) periodSel.append(el('option', { value: String(ms), text: l }));
   periodSel.value = String(p.periodMs);
-  const schemeSel = el('select', { 'aria-label': 'Color scheme' });
+  const schemeSel = el('select', { 'aria-label': 'Цветовая схема' });
   for (const s of Object.keys(SCHEMES)) schemeSel.append(el('option', { value: s, text: s }));
   schemeSel.value = p.scheme;
-  const centerBtn = el('button', { text: 'Center', class: p.autoCenter ? 'on' : '' });
+  const centerBtn = el('button', { text: 'Центр', class: p.autoCenter ? 'on' : '' });
   root.append(
-    el('div', { class: 'toolbar' }, el('label', {}, 'Group', groupSel), el('label', {}, 'Levels', levelsSel), el('label', {}, 'Large ≥', largeIn), el('label', {}, 'Min refills', refillIn), el('label', {}, 'Period', periodSel), el('label', {}, 'Colors', schemeSel), centerBtn),
+    el('div', { class: 'toolbar' }, el('label', {}, 'Группировка', groupSel), el('label', {}, 'Уровни', levelsSel), el('label', {}, 'Крупный ≥', largeIn), el('label', {}, 'Мин. пополнений', refillIn), el('label', {}, 'Период', periodSel), el('label', {}, 'Цвета', schemeSel), centerBtn),
   );
   const cards = el('div', { class: 'cards pad' });
   const card = (k: string) => {
@@ -49,14 +49,14 @@ export function createDomTab(): Tab {
     cards.append(el('div', { class: 'card' }, el('div', { class: 'k', text: k }), v));
     return v;
   };
-  const cLast = card('Last trade');
-  const cSpread = card('Spread');
+  const cLast = card('Последнее исполнение');
+  const cSpread = card('Спред');
   const cMicro = card('Microprice / mid');
-  const cObi = card('Book imbalance (top 10)');
-  const cOfi = card('OFI 10s');
-  const cSpeed = card('Speed (10s)');
-  const cCvd = card('Session CVD');
-  const cThr = card('Large threshold bid/ask');
+  const cObi = card('OBI (топ-10 уровней)');
+  const cOfi = card('OFI 10 с');
+  const cSpeed = card('Скорость (10 с, сообщений aggTrade)');
+  const cCvd = card('CVD сессии (с начала записи)');
+  const cThr = card('Порог крупного уровня bid/ask');
   root.append(cards);
   const fill = el('div', { class: 'fill' });
   const canvas = el('canvas');
@@ -101,7 +101,7 @@ export function createDomTab(): Tab {
     const b = store.book;
     renderCards();
     if (!b || !b.bids.length || !b.asks.length) {
-      empty.textContent = store.status?.state === 'connected' ? 'Waiting for book…' : `Order book not available (${store.status?.state ?? 'connecting'}).`;
+      empty.textContent = store.status?.state === 'connected' ? 'Ожидание стакана…' : `Стакан недоступен (${store.status?.state ?? 'подключение'}).`;
       return;
     }
     empty.textContent = '';
@@ -150,23 +150,23 @@ export function createDomTab(): Tab {
     const narrow = w < 560;
     const cols = narrow
       ? [
-          { k: 'sell', w: 0.15, t: 'Sold' },
+          { k: 'sell', w: 0.15, t: 'Продано' },
           { k: 'bid', w: 0.2, t: 'Bid' },
-          { k: 'price', w: 0.23, t: 'Price' },
+          { k: 'price', w: 0.23, t: 'Цена' },
           { k: 'ask', w: 0.2, t: 'Ask' },
-          { k: 'buy', w: 0.15, t: 'Bought' },
+          { k: 'buy', w: 0.15, t: 'Куплено' },
           { k: 'mark', w: 0.07, t: '' },
         ]
       : [
-          { k: 'sell', w: 0.11, t: 'Sold @bid' },
-          { k: 'bid', w: 0.15, t: 'Bid size' },
-          { k: 'price', w: 0.14, t: 'Price' },
-          { k: 'ask', w: 0.15, t: 'Ask size' },
-          { k: 'buy', w: 0.11, t: 'Bought @ask' },
+          { k: 'sell', w: 0.11, t: 'Продано @bid' },
+          { k: 'bid', w: 0.15, t: 'Bid объём' },
+          { k: 'price', w: 0.14, t: 'Цена' },
+          { k: 'ask', w: 0.15, t: 'Ask объём' },
+          { k: 'buy', w: 0.11, t: 'Куплено @ask' },
           { k: 'delta', w: 0.09, t: 'Delta' },
-          { k: 'vol', w: 0.09, t: 'Volume' },
+          { k: 'vol', w: 0.09, t: 'Объём' },
           { k: 'imb', w: 0.06, t: 'Imb' },
-          { k: 'mark', w: 0.1, t: 'Signals' },
+          { k: 'mark', w: 0.1, t: 'Сигналы' },
         ];
     let x = 0;
     const xs = cols.map((c) => {
@@ -310,7 +310,7 @@ export function createDomTab(): Tab {
     cSpeed.textContent = `${(n / 10).toFixed(1)} tr/s · ${fmtQ(v / 10)}/s`;
     cCvd.textContent = store.status?.cvd !== undefined ? fmtQ(store.status.cvd) : '–';
     const t = store.large.thr;
-    cThr.textContent = t?.warm ? `${fmtQ(t.bid)} / ${fmtQ(t.ask)}` : t ? `warming (${t.samples})` : '–';
+    cThr.textContent = t?.warm ? `${fmtQ(t.bid)} / ${fmtQ(t.ask)}` : t ? `прогрев (${t.samples})` : '–';
   }
 
   gestures(canvas, {
@@ -364,7 +364,7 @@ export function createDomTab(): Tab {
     try {
       await api('/api/config', { source: store.source, symbol: store.symbol }, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ iceberg: { minRefills: v } }) });
     } catch (e) {
-      alert('Could not update detector: ' + (e as Error).message);
+      alert('Не удалось изменить детектор: ' + (e as Error).message);
     }
   };
   async function loadCfg(): Promise<void> {

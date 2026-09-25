@@ -12,13 +12,13 @@ describe('Liquidity cluster detector', () => {
     h.idle(6000);
     const c = h.events.filter((e) => e.kind === 'cluster');
     expect(c).toHaveLength(1);
-    expect(c[0]).toMatchObject({ title: 'Bid Liquidity Cluster', side: 'bid', price: 99.3, priceHi: 99.6 });
+    expect(c[0]).toMatchObject({ title: 'Кластер ликвидности bid', side: 'bid', price: 99.3, priceHi: 99.6 });
     expect(c[0].confidence).toBeGreaterThan(0);
     h.step([[99.1, 1, -1, false]]);
     h.idle(1000);
     const upd = h.events.find((e) => e.id === c[0].id)!;
     expect(upd.status).toBe('broken');
-    expect(upd.title).toBe('Broken Liquidity');
+    expect(upd.title).toBe('Пробитая ликвидность');
   });
 
   it('labels a cluster Tested Liquidity after aggressive volume hits it and it survives', () => {
@@ -29,7 +29,7 @@ describe('Liquidity cluster detector', () => {
     h.idle(1000);
     const cl = h.engine.clusters.list().find((x) => x.side === 'bid')!;
     expect(cl.status).toBe('tested');
-    expect(cl.label).toBe('Tested Liquidity');
+    expect(cl.label).toBe('Протестированная ликвидность');
   });
 
   it('ignores ordinary uniform depth', () => {
@@ -49,7 +49,7 @@ describe('Absorption detector', () => {
     expect(a.length).toBeGreaterThanOrEqual(1);
     expect(a[0].side).toBe('bid');
     expect(a[0].price).toBe(100);
-    expect(a[0].title).toMatch(/Absorption Zone/);
+    expect(a[0].title).toMatch(/Поглощение/);
     expect(a[0].explain).toMatch(/absorbed/);
   });
 
@@ -119,6 +119,6 @@ describe('Imbalance / burst / divergence', () => {
     h.engine.flow.onBarClose({ t: 600_000, o: 100, h: 101.5, l: 100, c: 101, v: 10, bv: 4 }, 3);
     const d = h.events.filter((e) => e.kind === 'delta_divergence');
     expect(d).toHaveLength(1);
-    expect(d[0].title).toMatch(/bearish/);
+    expect(d[0].title).toMatch(/медвежья/);
   });
 });

@@ -3,7 +3,22 @@
 import type { BookStats, FeedStatus, HeatColumn, InstrumentMeta, LargeOrder, LiquidityCluster, MarketEvent, SourceId, Trade, BookSide } from '../core/types.js';
 import type { Timeframe } from '../core/candles.js';
 
+export interface PersistStatusView {
+  enabled: boolean;
+  lastOkAt: number;
+  lastError: string;
+  queued: number;
+  oldestUnsavedMs: number;
+  dropped: number;
+  archive: { blocks: number; bytes: number; lastPath: string; lastAt: number; pending: number; failed: number };
+}
 export interface StatusX extends FeedStatus {
+  gate?: boolean;
+  gateReason?: string;
+  persist?: PersistStatusView;
+  streams?: Record<string, { route: string; connected: boolean; lastMsgAt: number; messages: number; reconnects: number; url: string }>;
+  verify?: Record<string, Record<string, number | string>>;
+  rest?: Record<string, { ok: number; fail: number; lastStatus: number; lastError: string; bannedUntil: number }>;
   heatStep?: number;
   cvd?: number;
   atr1m?: number;

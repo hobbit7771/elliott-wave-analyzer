@@ -24,9 +24,9 @@ export interface Tab {
 const app = document.getElementById('app')!;
 
 // ---------- header ----------
-const sourceSel = el('select', { 'aria-label': 'Data source' });
+const sourceSel = el('select', { 'aria-label': 'Источник данных' });
 sourceSel.append(el('option', { value: 'binance-futures', text: 'Binance Futures' }), el('option', { value: 'binance-spot', text: 'Binance Spot' }));
-const symbolInput = el('input', { id: 'symbolInput', list: 'symbols', 'aria-label': 'Instrument', autocomplete: 'off', spellcheck: 'false' });
+const symbolInput = el('input', { id: 'symbolInput', list: 'symbols', 'aria-label': 'Инструмент', autocomplete: 'off', spellcheck: 'false' });
 const symbolList = el('datalist', { id: 'symbols' });
 const tfGroup = el('div', { class: 'tf-group', role: 'group', 'aria-label': 'Timeframe' });
 for (const tf of TIMEFRAMES) {
@@ -37,14 +37,15 @@ for (const tf of TIMEFRAMES) {
 const tfSelect = el('select', { class: 'tf-select', 'aria-label': 'Timeframe' });
 for (const tf of TIMEFRAMES) tfSelect.append(el('option', { value: tf, text: TF_LABEL[tf] }));
 tfSelect.onchange = () => setTf(tfSelect.value as Timeframe);
-const ticksSel = el('select', { 'aria-label': 'Ticks per bar', title: 'Trades per tick bar' });
+const ticksSel = el('select', { 'aria-label': 'Сделок в тиковом баре', title: 'Сообщений aggTrade в тиковом баре (одно сообщение может объединять несколько исполнений)' });
 for (const n of [50, 100, 250, 500, 1000]) ticksSel.append(el('option', { value: String(n), text: `${n}t` }));
-const header = el('header', { class: 'top' }, el('div', { class: 'brand' }, 'OrderFlow', el('small', {}, ' Terminal · analysis only')), sourceSel, symbolInput, symbolList, tfGroup, tfSelect, ticksSel);
+const header = el('header', { class: 'top' }, el('div', { class: 'brand' }, 'OrderFlow', el('small', {}, ' Terminal · только анализ')), sourceSel, symbolInput, symbolList, tfGroup, tfSelect, ticksSel);
 
 // ---------- status bar ----------
 const sb = {
-  badge: el('span', { class: 'badge connecting', text: 'Connecting' }),
-  fresh: el('span', { class: 'fresh', title: 'Data freshness' }),
+  badge: el('span', { class: 'badge connecting', text: 'Подключение' }),
+  fresh: el('span', { class: 'fresh', title: 'Свежесть данных стакана' }),
+  hist: el('span', { class: 'hist' }),
   last: el('b', { text: '–' }),
   lat: el('b', { text: '–' }),
   rtt: el('b', { text: '–' }),
@@ -61,15 +62,16 @@ const statusbar = el(
   { class: 'statusbar', role: 'status' },
   sb.badge,
   sb.fresh,
-  el('span', {}, 'Last ', sb.last),
-  el('span', {}, 'Px ', sb.price),
-  el('span', {}, 'Latency ', sb.lat),
+  el('span', {}, 'Обновл. ', sb.last),
+  el('span', {}, 'Цена ', sb.price),
+  el('span', {}, 'Задержка ', sb.lat),
   el('span', { class: 'hide-m' }, 'RTT ', sb.rtt),
-  el('span', {}, 'Trades ', sb.trades),
-  el('span', {}, 'Depth ', sb.depth),
-  el('span', { class: 'hide-m' }, 'Gaps/resyncs ', sb.gaps),
-  el('span', { class: 'hide-m' }, 'Dropped ', sb.dropped),
-  el('span', { class: 'hide-m' }, 'Source ', sb.src),
+  el('span', {}, 'Сделок ', sb.trades),
+  el('span', {}, 'Уровней ', sb.depth),
+  el('span', { class: 'hide-m' }, 'Разрывы/ресинхр. ', sb.gaps),
+  el('span', { class: 'hide-m' }, 'Отброшено ', sb.dropped),
+  el('span', { class: 'hide-m' }, 'Источник ', sb.src),
+  sb.hist,
   sb.msg,
 );
 const noteBar = el('div', { class: 'note', style: 'display:none' });
@@ -186,6 +188,11 @@ worker.onmessage = (e: MessageEvent) => {
         if (store.liqs.length > 500) store.liqs.shift();
         touched.add('liq');
         break;
+      case 'alert': {
+        const a = m.d as { event: MarketEvent; sound: boolean; notify: boolean; ruleId: number; t: number };
+        alerts.onServerAlert(a);
+        break;
+      }
       case 'gap':
         // server dropped messages for this slow client: reload the missing trades window
         void loadTrades((m.d as { from: number }).from);
@@ -305,25 +312,30 @@ ticksSel.onchange = () => {
 
 // ---------- status bar rendering ----------
 const STATE_LABEL: Record<string, string> = {
-  connected: 'Connected',
-  reconnecting: 'Reconnecting',
-  connecting: 'Connecting',
-  stale: 'Stale',
-  syncing: 'Snapshot syncing',
-  gap: 'Data gap',
-  disconnected: 'Disconnected',
+  connected: 'LIVE',
+  reconnecting: 'Переподключение',
+  connecting: 'Подключение',
+  stale: 'Данные устарели',
+  syncing: 'Синхронизация стакана',
+  gap: 'Разрыв данных',
+  disconnected: 'Отключено',
 };
 function renderStatus(): void {
   const s = store.status;
   const netDown = store.net.state !== 'open';
   const state = netDown ? (store.net.state === 'connecting' ? 'connecting' : 'reconnecting') : (s?.state ?? 'connecting');
   sb.badge.className = 'badge ' + state;
-  sb.badge.textContent = netDown ? 'Server ' + (STATE_LABEL[state] ?? state) : STATE_LABEL[state] ?? state;
+  sb.badge.textContent = netDown ? 'Сервер: ' + (STATE_LABEL[state] ?? state) : STATE_LABEL[state] ?? state;
+  sb.badge.title = s?.gate === false && s.gateReason ? 'Новые сигналы заблокированы: ' + s.gateReason : '';
+  const ps = s?.persist;
+  sb.hist.textContent = !ps ? '' : !ps.enabled ? '⚠ История не записывается' : ps.lastError ? '⚠ Ошибка записи истории' : `История: запись ок · очередь ${ps.queued}`;
+  sb.hist.className = 'hist ' + (!ps || (ps.enabled && !ps.lastError) ? 'muted' : 'warn');
+  sb.hist.title = ps?.lastError || (ps ? `Последняя успешная запись: ${ps.lastOkAt ? new Date(ps.lastOkAt).toISOString() : '—'}; несохранённый хвост ≈ ${Math.round(ps.oldestUnsavedMs / 1000)} с` : '');
   const age = s?.lastUpdate ? Date.now() - s.lastUpdate : NaN;
-  sb.last.textContent = s?.lastUpdate ? ago(age) + ' ago' : '–';
+  sb.last.textContent = s?.lastUpdate ? ago(age) + ' назад' : '–';
   sb.fresh.style.background = !isFinite(age) ? '#8a93a6' : age < 1500 ? '#2ecc71' : age < 5000 ? '#ffb300' : '#ef5350';
-  sb.lat.textContent = s && isFinite(s.latencyMs) ? s.latencyMs + ' ms' : '–';
-  sb.rtt.textContent = isFinite(store.net.rtt) ? store.net.rtt + ' ms' : '–';
+  sb.lat.textContent = s && isFinite(s.latencyMs) ? s.latencyMs + ' мс' : '–';
+  sb.rtt.textContent = isFinite(store.net.rtt) ? store.net.rtt + ' мс' : '–';
   sb.trades.textContent = s ? String(s.trades) : '0';
   sb.depth.textContent = s ? String(s.depthLevels) : '0';
   sb.gaps.textContent = s ? `${s.gaps}/${s.resyncs}` : '0/0';

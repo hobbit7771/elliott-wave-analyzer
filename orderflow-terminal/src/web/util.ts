@@ -1,11 +1,24 @@
 import type { EventKind, MarketEvent } from '../core/types.js';
 
+/** Owner token (from Render env OWNER_TOKEN) kept only in this browser; sent for owner-only actions. */
+export function ownerToken(): string {
+  try {
+    return localStorage.getItem('oft:owner') ?? '';
+  } catch {
+    return '';
+  }
+}
+
 export async function api<T>(path: string, params: Record<string, string | number | undefined> = {}, init?: RequestInit): Promise<T> {
   const q = Object.entries(params)
     .filter(([, v]) => v !== undefined && v !== '')
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
     .join('&');
-  const r = await fetch(path + (q ? '?' + q : ''), init);
+  const headers = new Headers(init?.headers);
+  const tok = ownerToken();
+  if (tok) headers.set('x-oft-owner', tok);
+  if (init?.body && !headers.has('content-type')) headers.set('content-type', 'application/json');
+  const r = await fetch(path + (q ? '?' + q : ''), { ...init, headers, signal: init?.signal });
   const body = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error((body as { error?: string }).error ?? `HTTP ${r.status}`);
   return body as T;
@@ -31,7 +44,7 @@ export function h(html: string): HTMLElement {
 export const esc = (s: string): string => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 
 export function fmtQ(v: number): string {
-  if (!isFinite(v)) return '–';
+  if (!Number.isFinite(v)) return '–';
   const a = Math.abs(v);
   if (a >= 1e9) return (v / 1e9).toFixed(2) + 'B';
   if (a >= 1e6) return (v / 1e6).toFixed(2) + 'M';
@@ -44,7 +57,7 @@ export function fmtQ(v: number): string {
 }
 
 export function fmtP(v: number, dec: number): string {
-  return isFinite(v) ? v.toFixed(dec) : '–';
+  return Number.isFinite(v) ? v.toFixed(dec) : '–';
 }
 
 export function fmtTime(t: number, withMs = false): string {
@@ -70,21 +83,21 @@ export function confColor(c: number): string {
 }
 
 export const KIND_LABEL: Record<EventKind, string> = {
-  large_order: 'Large limit order',
-  iceberg: 'Probable iceberg',
-  absorption: 'Absorption',
-  spoofing: 'Spoofing suspicion',
-  replenishment: 'Replenishment',
-  liquidity_pulled: 'Liquidity removed',
-  cluster: 'Liquidity cluster',
+  large_order: 'Крупный уровень',
+  iceberg: 'Предполагаемый айсберг',
+  absorption: 'Поглощение',
+  spoofing: 'Подозрение на спуфинг',
+  replenishment: 'Признаки пополнения',
+  liquidity_pulled: 'Снятие ликвидности',
+  cluster: 'Кластер ликвидности',
   sweep: 'Sweep',
-  stop_run: 'Stop run',
-  imbalance: 'Imbalance',
-  delta_divergence: 'Delta divergence',
-  volume_burst: 'Volume burst',
-  vacuum: 'Liquidity vacuum',
-  spread_expansion: 'Spread expansion',
-  feed: 'Feed status',
+  stop_run: 'Stop-run',
+  imbalance: 'Дисбаланс',
+  delta_divergence: 'Дивергенция дельты',
+  volume_burst: 'Всплеск объёма',
+  vacuum: 'Вакуум ликвидности',
+  spread_expansion: 'Расширение спреда',
+  feed: 'Состояние данных',
 };
 
 export const KIND_COLOR: Record<EventKind, string> = {

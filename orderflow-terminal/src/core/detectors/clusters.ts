@@ -65,7 +65,7 @@ export class ClusterDetector {
       const step = this.ctx.zoneStep;
       if ((c.side === 'bid' && tr.price < c.lo - step) || (c.side === 'ask' && tr.price > c.hi + step)) {
         c.status = 'broken';
-        c.label = 'Broken Liquidity';
+        c.label = 'Пробитая ликвидность';
         c.lastSeen = tr.t;
       }
     }
@@ -140,7 +140,7 @@ export class ClusterDetector {
           executed: 0,
           tests: 0,
           status: 'formed',
-          label: f.side === 'bid' ? 'Bid Liquidity Cluster' : 'Ask Liquidity Cluster',
+          label: f.side === 'bid' ? 'Кластер ликвидности bid' : 'Кластер ликвидности ask',
           confidence: 0,
           initialTotal: f.total,
           announced: false,
@@ -166,10 +166,10 @@ export class ClusterDetector {
       if (t.executed > 0) t.tests = Math.max(t.tests, 1);
       if (t.executed >= 0.5 * t.initialTotal && t.total >= 0.5 * t.initialTotal) {
         t.status = 'absorption';
-        t.label = 'Absorption Cluster';
+        t.label = 'Кластер поглощения';
       } else if (t.executed > 0) {
         t.status = 'tested';
-        t.label = 'Tested Liquidity';
+        t.label = 'Протестированная ликвидность';
       }
     }
     const age = now - t.firstSeen;
@@ -198,8 +198,8 @@ export class ClusterDetector {
       priceHi: t.hi,
       confidence: t.confidence,
       status: t.status,
-      explain: `${t.label}: ${t.levels} elevated ${fp(this.ctx, this.ctx.zoneStep)} buckets ${fp(this.ctx, t.lo)}–${fp(this.ctx, t.hi)} holding ${fq(t.total)} (≥ ${this.ctx.cfg.cluster.elevationMult}× median bucket), ` +
-        `age ${((now - t.firstSeen) / 1000).toFixed(0)}s, executed into it ${fq(t.executed)}${what === 'broken' ? '; price traded through' : ''}.`,
+      explain: `${t.label}: ${t.levels} повышенных корзин по ${fp(this.ctx, this.ctx.zoneStep)} в диапазоне ${fp(this.ctx, t.lo)}–${fp(this.ctx, t.hi)}, видимый объём ${fq(t.total)} (≥ ${this.ctx.cfg.cluster.elevationMult}× медианы корзины), ` +
+        `существует ${((now - t.firstSeen) / 1000).toFixed(0)} с, исполнено в зоне ${fq(t.executed)}${what === 'broken' ? '; цена прошла сквозь зону' : ''}.`,
       data: { total: t.total, levels: t.levels, executed: t.executed },
     });
   }
@@ -251,12 +251,12 @@ export class ClusterDetector {
       id: `vac-${side}-${now}`,
       t: now,
       kind: 'vacuum',
-      title: side === 'bid' ? 'Liquidity Vacuum below' : 'Liquidity Vacuum above',
+      title: side === 'bid' ? 'Вакуум ликвидности ниже цены' : 'Вакуум ликвидности выше цены',
       side,
       price: lo,
       priceHi: hi,
       confidence: conf,
-      explain: `${widthBuckets} consecutive ${fp(this.ctx, this.ctx.zoneStep)} buckets ${fp(this.ctx, lo)}–${fp(this.ctx, hi)} on the ${side} side hold ≤ ${(vc.factor * 100).toFixed(0)}% of the median bucket (${fq(med)}) — price can travel fast through this zone.`,
+      explain: `${widthBuckets} подряд корзин по ${fp(this.ctx, this.ctx.zoneStep)} (${fp(this.ctx, lo)}–${fp(this.ctx, hi)}) на стороне ${side} содержат ≤ ${(vc.factor * 100).toFixed(0)}% медианы корзины (${fq(med)}) — только в достоверно наблюдаемой зоне стакана; цена может быстро пройти эту зону.`,
       data: { width: widthBuckets },
     });
   }

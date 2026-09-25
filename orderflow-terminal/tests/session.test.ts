@@ -56,8 +56,8 @@ describe('Live session: sync, resync, stale protection, reconnect', () => {
     venue.sim.set('bid', 99.0, 9);
     await until(() => s.getStatus().gaps >= 1);
     await until(() => s.state === 'connected' && venue.snapshots >= 2);
-    expect(feed()).toContain('Data gap');
-    expect(feed()).toContain('Resynchronization');
+    expect(feed()).toContain('Разрыв данных');
+    expect(feed()).toContain('Ресинхронизация');
     expect(s.engine.book.qtyAt('bid', 990)).toBe(9);
     stopPump();
     s.stop();
@@ -72,7 +72,7 @@ describe('Live session: sync, resync, stale protection, reconnect', () => {
     stopPump();
     await until(() => s.state === 'stale', 4000);
     expect(s.engine.gateOpen).toBe(false);
-    expect(feed()).toContain('Stale data');
+    expect(feed()).toContain('Данные устарели');
     startPump();
     await until(() => s.state === 'connected', 4000);
     expect(s.engine.gateOpen).toBe(true);
@@ -90,7 +90,7 @@ describe('Live session: sync, resync, stale protection, reconnect', () => {
     await until(() => s.state === 'reconnecting' || s.state === 'syncing');
     expect(s.engine.gateOpen).toBe(false);
     await until(() => s.state === 'connected' && venue.connections >= 2, 8000);
-    expect(feed()).toContain('Order-book disconnect — reconnecting');
+    expect(feed()).toContain('Разрыв потока стакана — переподключение');
     expect(s.getStatus().reconnects).toBeGreaterThanOrEqual(1);
     stopPump();
     s.stop();

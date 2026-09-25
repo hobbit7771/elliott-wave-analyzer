@@ -65,30 +65,30 @@ export function createHeatmapTab(): Tab {
   const p = loadPref<Prefs>('heatPrefs', DEF);
   const save = () => savePref('heatPrefs', p);
 
-  const spanSel = el('select', { 'aria-label': 'History period' });
+  const spanSel = el('select', { 'aria-label': 'Период истории' });
   for (const [l, ms] of SPANS) spanSel.append(el('option', { value: String(ms), text: l }));
   spanSel.value = String(p.span);
-  const depthSel = el('select', { 'aria-label': 'Book depth shown', title: 'Price range shown (buckets around price)' });
+  const depthSel = el('select', { 'aria-label': 'Глубина', title: 'Ценовой диапазон (корзин вокруг цены)' });
   for (const n of [30, 60, 120, 200, 300, 600]) depthSel.append(el('option', { value: String(n), text: `±${n / 2} bkt` }));
   depthSel.value = String(p.depthBuckets);
-  const minVol = el('input', { type: 'number', min: '0', step: 'any', value: String(p.minVol), title: 'Hide liquidity below this size' });
-  const minConf = el('input', { type: 'number', min: '0', max: '100', step: '5', value: String(p.minConf), title: 'Minimum event confidence' });
-  const contrast = el('input', { type: 'range', min: '0.3', max: '3', step: '0.1', value: String(p.contrast), title: 'Intensity' });
-  const pauseBtn = el('button', { text: 'Pause' });
+  const minVol = el('input', { type: 'number', min: '0', step: 'any', value: String(p.minVol), title: 'Скрыть ликвидность меньше этого объёма' });
+  const minConf = el('input', { type: 'number', min: '0', max: '100', step: '5', value: String(p.minConf), title: 'Минимальный score событий' });
+  const contrast = el('input', { type: 'range', min: '0.3', max: '3', step: '0.1', value: String(p.contrast), title: 'Интенсивность' });
+  const pauseBtn = el('button', { text: 'Пауза' });
   const replayBtn = el('button', { text: 'Replay' });
-  const replaySpeed = el('select', { 'aria-label': 'Replay speed' });
+  const replaySpeed = el('select', { 'aria-label': 'Скорость replay' });
   for (const s of [1, 2, 5, 10, 30, 60]) replaySpeed.append(el('option', { value: String(s), text: `${s}×` }));
   replaySpeed.value = '10';
-  const replayFrom = el('select', { 'aria-label': 'Replay start' });
+  const replayFrom = el('select', { 'aria-label': 'Начало replay' });
   for (const [l, ms] of SPANS.slice(1, 6)) replayFrom.append(el('option', { value: String(ms), text: `last ${l}` }));
-  const clearBtn = el('button', { text: 'Clear view' });
+  const clearBtn = el('button', { text: 'Очистить вид' });
   const csvBtn = el('button', { text: 'CSV' });
   const pngBtn = el('button', { text: 'PNG' });
-  const liveBtn = el('button', { text: 'Live', class: 'on' });
-  const optsBtn = el('button', { text: 'Layers' });
+  const liveBtn = el('button', { text: 'LIVE', class: 'on' });
+  const optsBtn = el('button', { text: 'Слои' });
   const info = el('span', { class: 'muted' });
   root.append(
-    el('div', { class: 'toolbar' }, el('label', {}, 'Period', spanSel), el('label', {}, 'Depth', depthSel), el('label', {}, 'Min vol', minVol), el('label', {}, 'Min conf', minConf), el('label', {}, 'Intensity', contrast), pauseBtn, liveBtn, el('span', { class: 'sep' }), replayFrom, replaySpeed, replayBtn, el('span', { class: 'sep' }), clearBtn, csvBtn, pngBtn, optsBtn, info),
+    el('div', { class: 'toolbar' }, el('label', {}, 'Период', spanSel), el('label', {}, 'Глубина', depthSel), el('label', {}, 'Мин. объём', minVol), el('label', {}, 'Мин. score', minConf), el('label', {}, 'Интенсивность', contrast), pauseBtn, liveBtn, el('span', { class: 'sep' }), replayFrom, replaySpeed, replayBtn, el('span', { class: 'sep' }), clearBtn, csvBtn, pngBtn, optsBtn, info),
   );
   const fill = el('div', { class: 'fill' });
   const canvas = el('canvas');
@@ -99,15 +99,15 @@ export function createHeatmapTab(): Tab {
   root.append(fill);
 
   const toggles: [keyof Prefs, string][] = [
-    ['bids', 'Bid liquidity'],
-    ['asks', 'Ask liquidity'],
-    ['trades', 'Executions (bubbles)'],
-    ['adds', 'Added liquidity'],
-    ['cancels', 'Removed liquidity (cancels)'],
-    ['events', 'Icebergs / sweeps / events'],
-    ['zones', 'Clusters, absorption, vacuum'],
-    ['large', 'Large orders (held / broken)'],
-    ['log', 'Log intensity scale'],
+    ['bids', 'Ликвидность bid'],
+    ['asks', 'Ликвидность ask'],
+    ['trades', 'Исполнения (пузыри, цвет = агрессор)'],
+    ['adds', 'Добавление видимого объёма (измерено)'],
+    ['cancels', 'Снятие без исполнения (оценка по L2)'],
+    ['events', 'Айсберги, sweep, события'],
+    ['zones', 'Кластеры, поглощение, вакуум'],
+    ['large', 'Крупные уровни (держится / снят / пробит)'],
+    ['log', 'Логарифмическая шкала'],
   ];
   for (const [k, l] of toggles) {
     const cb = el('input', { type: 'checkbox' });
@@ -120,7 +120,7 @@ export function createHeatmapTab(): Tab {
     layerPanel.append(el('label', {}, cb, l));
   }
   const priceSel = el('select');
-  for (const v of ['line', 'candles', 'none']) priceSel.append(el('option', { value: v, text: 'Price: ' + v }));
+  for (const v of ['line', 'candles', 'none']) priceSel.append(el('option', { value: v, text: 'Цена: ' + ({ line: 'линия', candles: 'свечи', none: 'нет' } as Record<string, string>)[v] }));
   priceSel.value = p.price;
   priceSel.onchange = () => {
     p.price = priceSel.value as Prefs['price'];
@@ -191,7 +191,7 @@ export function createHeatmapTab(): Tab {
     const pHi = centerPrice + half;
     const pLo = centerPrice - half;
     pxPerBucket = H / p.depthBuckets;
-    empty.textContent = cs.length ? '' : store.status?.synced ? 'Recording order-book snapshots… first column appears within a second.' : 'Waiting for a synced order book (heatmap uses real local-book snapshots only).';
+    empty.textContent = cs.length ? '' : store.status?.synced ? 'Идёт запись снимков стакана… первая колонка появится в течение секунды.' : 'Ожидание синхронизированного стакана (heatmap строится только из реальных снимков локального стакана).';
     if (!cs.length || !isFinite(centerPrice)) return;
     const yOf = (price: number) => ((pHi - price) / (pHi - pLo)) * H;
     const xOf = (t: number) => ((t - t0) / (t1 - t0)) * W;
@@ -400,7 +400,7 @@ export function createHeatmapTab(): Tab {
         ctx.setLineDash([]);
         ctx.lineWidth = 1;
         ctx.fillStyle = ctx.strokeStyle;
-        const label = held ? 'Held' : lo.status === 'broken' ? 'Broken' : lo.status === 'pulled' ? 'Pulled' : 'Filled';
+        const label = held ? 'Держится' : lo.status === 'broken' ? 'Пробит' : lo.status === 'pulled' ? 'Снят' : 'Исполнен';
         ctx.fillText(`${label} ${fmtQ(lo.peak)} c${lo.confidence}`, Math.min(x1 + 3, W - 90), y - 3);
       }
     }
@@ -425,7 +425,7 @@ export function createHeatmapTab(): Tab {
           ctx.lineWidth = 2;
           ctx.stroke();
           ctx.lineWidth = 1;
-          ctx.fillText(`Probable Iceberg ${e.confidence}`, x + 8, y - 6);
+          ctx.fillText(`Предп. айсберг ${e.confidence}`, x + 8, y - 6);
         } else if (e.kind === 'sweep' || e.kind === 'stop_run') {
           const up = e.side === 'buy';
           ctx.beginPath();
@@ -471,7 +471,7 @@ export function createHeatmapTab(): Tab {
       ctx.fillText(fmtP(lp, dec()), W + 4, y + 4);
     }
     const colsVisible = vis.length;
-    info.textContent = `${colsVisible} columns · bucket ${fmtP(step, Math.max(dec(), 0))} · scale ${fmtQ(norm)}${replay ? ` · REPLAY ${fmtDateTime(replay.cursor)}` : ''}${lastCol ? '' : ' · no data in view'}`;
+    info.textContent = `${colsVisible} колонок · корзина ${fmtP(step, Math.max(dec(), 0))} · шкала ${fmtQ(norm)}${replay ? ` · ПОВТОР ${fmtDateTime(replay.cursor)}` : ''}${lastCol ? '' : ' · нет данных в окне'}`;
   }
 
   // ---------- data loading ----------
@@ -572,7 +572,7 @@ export function createHeatmapTab(): Tab {
     frozen = null;
     paused = false;
     pauseBtn.classList.remove('on');
-    pauseBtn.textContent = 'Pause';
+    pauseBtn.textContent = 'Пауза';
     centerPrice = NaN;
     liveBtn.classList.add('on');
     stopReplay();
@@ -609,7 +609,7 @@ export function createHeatmapTab(): Tab {
   pauseBtn.onclick = () => {
     paused = !paused;
     pauseBtn.classList.toggle('on', paused);
-    pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+    pauseBtn.textContent = paused ? 'Продолжить' : 'Пауза';
     if (replay) replay.lastWall = performance.now();
     frozen = paused && !replay ? { end: endT() } : null;
     painter.mark();
@@ -637,14 +637,14 @@ export function createHeatmapTab(): Tab {
   async function startReplay(): Promise<void> {
     const to = store.now();
     const from = to - +replayFrom.value;
-    replayBtn.textContent = 'Loading…';
+    replayBtn.textContent = 'Загрузка…';
     try {
       const [h, ev] = await Promise.all([
         api<{ cols: HeatColumn[] }>('/api/heatmap', { source: store.source, symbol: store.symbol, from: Math.round(from), to: Math.round(to), maxCols: 4000 }),
         api<MarketEvent[]>('/api/events', { source: store.source, symbol: store.symbol, from: Math.round(from), to: Math.round(to) }),
       ]);
       if (!h.cols.length) {
-        info.textContent = 'No recorded heatmap data in that window.';
+        info.textContent = 'В этом окне нет записанных данных heatmap.';
         replayBtn.textContent = 'Replay';
         return;
       }
@@ -652,7 +652,7 @@ export function createHeatmapTab(): Tab {
       live = false;
       liveBtn.classList.remove('on');
       centerPrice = h.cols[0].last;
-      replayBtn.textContent = 'Stop replay';
+      replayBtn.textContent = 'Стоп replay';
       replayBtn.classList.add('on');
       const tick = () => {
         if (!replay) return;

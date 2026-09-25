@@ -168,9 +168,9 @@ export class Session {
             this.status.synced = false;
             this.o.persist?.onGap(Date.now(), `depth socket closed ${code}`);
             this.setState(will ? 'reconnecting' : 'disconnected', `depth socket closed ${code} ${reason}`);
-            this.feedEvent(will ? 'Order-book disconnect — reconnecting' : 'Disconnected', `WebSocket (${r.route}) closed (code ${code}${reason ? ', ' + reason : ''}).`);
+            this.feedEvent(will ? 'Разрыв потока стакана — переподключение' : 'Отключено', `WebSocket (${r.route}) закрыт (код ${code}${reason ? ', ' + reason : ''}).`);
           } else {
-            this.feedEvent('Trades stream disconnect — reconnecting', `WebSocket (${r.route}: trades, mark price, liquidations) closed (code ${code}). Trade-dependent signals are blocked.`);
+            this.feedEvent('Разрыв потока сделок — переподключение', `WebSocket (${r.route}: сделки, mark, ликвидации) закрыт (код ${code}). Сигналы, зависящие от сделок, заблокированы.`);
           }
           this.updateGate();
         },
@@ -277,7 +277,7 @@ export class Session {
       this.o.persist?.onSynced(this.engine.book, this.engine.book.lastT || Date.now());
       this.setState('connected', 'book synced');
       this.updateGate();
-      if (this.status.resyncs > 1) this.feedEvent('Resynchronization', `Local book rebuilt from REST snapshot #${snap.lastUpdateId} after a gap/reconnect.`);
+      if (this.status.resyncs > 1) this.feedEvent('Ресинхронизация', `Локальный стакан восстановлен по REST-снимку #${snap.lastUpdateId} после разрыва/переподключения.`);
       this.bookDirty = true;
     } catch (e) {
       this.resyncAttempt++;
@@ -293,7 +293,7 @@ export class Session {
     this.o.persist?.onGap(Date.now(), reason);
     this.setState('gap', reason);
     this.updateGate();
-    this.feedEvent('Data gap', `Order-book sequence gap (${reason}). New signals blocked until resync.`);
+    this.feedEvent('Разрыв данных', `Нарушена последовательность стакана (${reason}). Новые сигналы заблокированы до ресинхронизации.`);
     this.scheduleResync(50);
   }
 
@@ -573,7 +573,7 @@ export class Session {
         this.staleSince = now;
         this.o.persist?.onGap(now, 'depth stale');
         this.setState('stale', `no depth update for ${((now - this.lastDiffWall) / 1000).toFixed(1)}s`);
-        this.feedEvent('Stale data', `No order-book update for more than ${staleMs / 1000}s. New signals are blocked.`);
+        this.feedEvent('Данные устарели', `Нет обновлений стакана более ${staleMs / 1000} с. Новые сигналы заблокированы.`);
       } else if (now - this.staleSince > 30_000) {
         this.staleSince = now;
         this.log(`[${this.key}] stale for 30s, forcing reconnect`);

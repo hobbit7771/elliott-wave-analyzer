@@ -114,13 +114,13 @@ export class LargeOrderDetector {
               id: `large-${k}-${tr.firstSeen}`,
               t: now,
               kind: 'large_order',
-              title: 'Large Limit Order',
+              title: 'Крупный уровень видимой ликвидности',
               side,
               price: p,
               confidence: tr.confidence,
-              explain: `${fq(qty)} resting on the ${side} at ${fp(this.ctx, p)} for ${((now - tr.firstSeen) / 1000).toFixed(1)}s. ` +
-                `Threshold ${fq(thr)} = max(${(lc.depthPct * 100).toFixed(1)}% of ${side} depth within ±${(cfg.rangePct * 100).toFixed(1)}% [${fq(side === 'bid' ? lc.depthPct * depthB : lc.depthPct * depthA)}], ` +
-                `P${(lc.percentile * 100).toFixed(0)} of level sizes [${fq(pctl)}], min ${fq(lc.minQty)}) × ATR factor ${atrFactor.toFixed(2)}.`,
+              explain: `${fq(qty)} видимого объёма на ${side} ${fp(this.ctx, p)} держится ${((now - tr.firstSeen) / 1000).toFixed(1)} с (суммарный объём уровня L2, а не отдельный ордер). ` +
+                `Порог ${fq(thr)} = max(${(lc.depthPct * 100).toFixed(1)}% глубины ${side} в ±${(cfg.rangePct * 100).toFixed(1)}% [${fq(side === 'bid' ? lc.depthPct * depthB : lc.depthPct * depthA)}], ` +
+                `P${(lc.percentile * 100).toFixed(0)} объёмов уровней [${fq(pctl)}], минимум ${fq(lc.minQty)}) × ATR-множитель ${atrFactor.toFixed(2)}.`,
               data: { size: qty, threshold: thr, distanceTicks: dist },
               status: 'active',
             });
@@ -171,7 +171,7 @@ export class LargeOrderDetector {
       if ((x.side === 'bid' && t < x.tick) || (x.side === 'ask' && t > x.tick)) {
         x.status = 'broken';
         x.endT = tr.t;
-        if (x.confirmed) this.update(x, tr.t, `Price traded through the level (${fp(this.ctx, tr.price)}).`);
+        if (x.confirmed) this.update(x, tr.t, `Цена прошла сквозь уровень (${fp(this.ctx, tr.price)}).`);
       }
     }
   }
@@ -184,7 +184,7 @@ export class LargeOrderDetector {
     const k = this.key(tr.side, tr.tick);
     if (execFrac >= 0.5) {
       tr.status = 'filled';
-      if (tr.confirmed) this.update(tr, now, `Level consumed by aggressive trades (${fq(tr.executed)} executed).`);
+      if (tr.confirmed) this.update(tr, now, `Уровень съеден агрессивными сделками (${fq(tr.executed)} исполнено).`);
       return;
     }
     tr.status = 'pulled';
@@ -192,17 +192,17 @@ export class LargeOrderDetector {
     const p = priceOf(this.ctx, tr.tick);
     const { cfg } = this.ctx;
     if (tr.confirmed) {
-      this.update(tr, now, `Pulled: ${fq(tr.cancelled)} cancelled vs ${fq(tr.executed)} executed.`);
+      this.update(tr, now, `Снят: ${fq(tr.cancelled)} без исполнения против ${fq(tr.executed)} исполнено.`);
       if (this.ctx.gateOpen) {
         this.ctx.emit({
           id: `pulled-${k}-${now}`,
           t: now,
           kind: 'liquidity_pulled',
-          title: 'Major Liquidity Removed',
+          title: 'Снятие крупной ликвидности',
           side: tr.side,
           price: p,
           confidence: Math.round(40 + 60 * clamp01(tr.cancelled / Math.max(tr.peak, 1e-12))),
-          explain: `A ${fq(tr.peak)} ${tr.side} order held ${(life / 1000).toFixed(1)}s at ${fp(this.ctx, p)} was cancelled (${fq(tr.cancelled)} removed without execution, ${fq(tr.executed)} executed).`,
+          explain: `Уровень ${fq(tr.peak)} на ${tr.side} ${fp(this.ctx, p)} (держался ${(life / 1000).toFixed(1)} с) снят: ${fq(tr.cancelled)} ушло без исполнения, ${fq(tr.executed)} исполнено (разделение приблизительное, L2 пакетами по 100 мс).`,
           data: { peak: tr.peak, cancelled: tr.cancelled, executed: tr.executed, lifeMs: life },
         });
       }
@@ -231,14 +231,14 @@ export class LargeOrderDetector {
           id: `spoof-${k}-${now}`,
           t: now,
           kind: 'spoofing',
-          title: 'Possible Spoofing (suspicion)',
+          title: 'Подозрение на спуфинг',
           side: tr.side,
           price: p,
           confidence: conf,
           explain:
-            `Suspicion only — intent cannot be proven from public data. ${fq(tr.peak)} ${tr.side} at ${fp(this.ctx, p)} lived ${(life / 1000).toFixed(1)}s, ` +
-            `${(cancelFrac * 100).toFixed(0)}% cancelled, ${fq(tr.executed)} executed; distance to mid went ${tr.distAtSeen.toFixed(0)}→${distNow.toFixed(0)} ticks; ` +
-            `${fl.length} large appear/cancel cycle(s) at this price in 2 min.`,
+            `Только подозрение — намерение участника по публичным данным доказать нельзя (cannot be proven). ${fq(tr.peak)} на ${tr.side} ${fp(this.ctx, p)} прожил ${(life / 1000).toFixed(1)} с, ` +
+            `${(cancelFrac * 100).toFixed(0)}% снято, ${fq(tr.executed)} исполнено; расстояние до mid ${tr.distAtSeen.toFixed(0)}→${distNow.toFixed(0)} тиков; ` +
+            `${fl.length} цикл(а) появления/снятия крупного объёма на этой цене за 2 мин.`,
           data: { lifeMs: life, cancelFrac, flicker: fl.length },
         });
       }
@@ -253,11 +253,11 @@ export class LargeOrderDetector {
       t: tr.firstSeen + this.ctx.cfg.large.minHoldMs,
       endT: now,
       kind: 'large_order',
-      title: 'Large Limit Order',
+      title: 'Крупный уровень видимой ликвидности',
       side: tr.side,
       price: p,
       confidence: tr.confidence,
-      explain: `${note} Peak ${fq(tr.peak)}, held ${((now - tr.firstSeen) / 1000).toFixed(1)}s, replenished ${tr.replenishments}×, executed ${fq(tr.executed)}, cancelled ${fq(tr.cancelled)}.`,
+      explain: `${note} Пик ${fq(tr.peak)}, держался ${((now - tr.firstSeen) / 1000).toFixed(1)} с, пополнений ${tr.replenishments}, исполнено ${fq(tr.executed)}, снято ${fq(tr.cancelled)} (оценка по L2).`,
       data: { peak: tr.peak, executed: tr.executed, cancelled: tr.cancelled, replenishments: tr.replenishments },
       status: tr.status,
     });

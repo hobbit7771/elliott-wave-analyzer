@@ -23,8 +23,8 @@ describe('Large limit order detector (dynamic threshold)', () => {
     h.idle(2000);
     const ev = h.events.filter((e) => e.kind === 'large_order');
     expect(ev).toHaveLength(1);
-    expect(ev[0]).toMatchObject({ side: 'bid', price: 99.5, title: 'Large Limit Order' });
-    expect(ev[0].explain).toMatch(/Threshold/);
+    expect(ev[0]).toMatchObject({ side: 'bid', price: 99.5, title: 'Крупный уровень видимой ликвидности' });
+    expect(ev[0].explain).toMatch(/Порог/);
     const lo = h.engine.large.list(h.sim.t).find((x) => x.price === 99.5)!;
     expect(lo).toMatchObject({ side: 'bid', size: 30, status: 'active', executed: 0, cancelled: 0, source: 'binance-futures' });
     expect(lo.holdMs).toBeGreaterThanOrEqual(3000);
@@ -55,7 +55,7 @@ describe('Large limit order detector (dynamic threshold)', () => {
     }
     const sp = h.events.filter((e) => e.kind === 'spoofing');
     expect(sp.length).toBeGreaterThanOrEqual(1);
-    expect(sp[0].title).toMatch(/suspicion/i);
+    expect(sp[0].title).toMatch(/Подозрение/);
     expect(sp[0].explain).toMatch(/cannot be proven/);
     expect(h.engine.large.spoofed.has('a1006')).toBe(true);
   });

@@ -95,11 +95,11 @@ export class FlowDetectors {
             id: `burst-${t}`,
             t,
             kind: 'volume_burst',
-            title: 'Volume Burst',
+            title: 'Всплеск объёма',
             side: buy ? 'buy' : 'sell',
             price: last ? last.p : NaN,
             confidence: conf,
-            explain: `${fq(v)} traded in 1s = ${(v / med).toFixed(1)}× the median second and above P${(bc.percentile * 100).toFixed(1)} (${fq(p)}); delta ${fq(this.curSecDelta)}.`,
+            explain: `${fq(v)} за 1 с = ${(v / med).toFixed(1)}× медианной секунды и выше P${(bc.percentile * 100).toFixed(1)} (${fq(p)}); delta ${fq(this.curSecDelta)}.`,
             data: { volume: v, median: med, delta: this.curSecDelta },
           });
       }
@@ -175,15 +175,15 @@ export class FlowDetectors {
       t: a.t,
       endT: a.lastT,
       kind: 'sweep',
-      title: a.side === 1 ? 'Liquidity Sweep (buy)' : 'Liquidity Sweep (sell)',
+      title: a.side === 1 ? 'Sweep ликвидности (покупки)' : 'Sweep ликвидности (продажи)',
       side: a.side === 1 ? 'buy' : 'sell',
       price: a.side === 1 ? a.hi : a.lo,
       priceHi: a.hi,
       confidence: a.conf,
       explain:
-        `Aggressive ${a.side === 1 ? 'buyers lifted' : 'sellers hit'} ${a.levels.size} price levels (${fp(this.ctx, a.lo)}–${fp(this.ctx, a.hi)}, range ${fp(this.ctx, range)}` +
+        `Агрессивные ${a.side === 1 ? 'покупки прошли' : 'продажи прошли'} ${a.levels.size} ценовых уровней (${fp(this.ctx, a.lo)}–${fp(this.ctx, a.hi)}, диапазон ${fp(this.ctx, range)}` +
         (minRange !== undefined ? ` ≥ ${fp(this.ctx, minRange)}` : '') +
-        `) within ${((a.lastT - a.t) / 1000 + sc.windowMs / 1000).toFixed(1)}s, volume ${fq(a.vol)}` +
+        `) за ${((a.lastT - a.t) / 1000 + sc.windowMs / 1000).toFixed(1)} с, объём ${fq(a.vol)}` +
         (pv !== undefined ? ` ≥ P${(sc.volPercentile * 100).toFixed(0)} ${fq(pv)}` : '') +
         '.',
       data: { lo: a.lo, hi: a.hi, volume: a.vol, levels: a.levels.size },
@@ -213,12 +213,12 @@ export class FlowDetectors {
           id: `stoprun-${r.t}-${r.dir}`,
           t: tr.t,
           kind: 'stop_run',
-          title: r.dir === 1 ? 'Stop Run above swing high' : 'Stop Run below swing low',
+          title: r.dir === 1 ? 'Паттерн stop-run над максимумом' : 'Паттерн stop-run под минимумом',
           side: r.dir === 1 ? 'sell' : 'buy',
           price: r.level,
           priceHi: r.extreme,
           confidence: conf,
-          explain: `Sweep ran ${r.dir === 1 ? 'above the' : 'below the'} ${this.ctx.cfg.stopRun.lookbackBars}-bar 1m swing ${r.dir === 1 ? 'high' : 'low'} ${fp(this.ctx, r.level)} to ${fp(this.ctx, r.extreme)} and price reclaimed the level after ${((tr.t - r.t) / 1000).toFixed(1)}s — stops above/below the swing were likely triggered.`,
+          explain: `Sweep ${r.dir === 1 ? 'выше' : 'ниже'} наблюдаемого экстремума ${this.ctx.cfg.stopRun.lookbackBars} 1m-баров ${fp(this.ctx, r.level)} до ${fp(this.ctx, r.extreme)}, затем цена вернулась за уровень через ${((tr.t - r.t) / 1000).toFixed(1)} с. Это паттерн, а не доказательство исполнения конкретных стоп-заявок.`,
           data: { level: r.level, extreme: r.extreme, volume: r.vol },
         });
     }
@@ -297,12 +297,12 @@ export class FlowDetectors {
       id: `abs-${side}-${now}`,
       t: now,
       kind: 'absorption',
-      title: side === 'bid' ? 'Absorption Zone (bid absorbs selling)' : 'Absorption Zone (ask absorbs buying)',
+      title: side === 'bid' ? 'Поглощение: bid принимает продажи' : 'Поглощение: ask принимает покупки',
       side,
       price: zoneLo,
       priceHi: zoneHi,
       confidence: conf,
-      explain: `${fq(vol)} aggressive ${side === 'bid' ? 'selling' : 'buying'} in ${ac.windowMs / 1000}s (≥ P${(ac.volPercentile * 100).toFixed(0)} ${fq(pv)}) moved price only ${fp(this.ctx, move)} (limit ${fp(this.ctx, maxMove)}); flow ${(oneSided * 100).toFixed(0)}% one-sided. Passive ${side} liquidity absorbed it.`,
+      explain: `${fq(vol)} агрессивных ${side === 'bid' ? 'продаж' : 'покупок'} за ${ac.windowMs / 1000} с (≥ P${(ac.volPercentile * 100).toFixed(0)} ${fq(pv)}) сдвинули цену лишь на ${fp(this.ctx, move)} (порог ${fp(this.ctx, maxMove)}); поток на ${(oneSided * 100).toFixed(0)}% односторонний — пассивная ликвидность ${side} поглотила его (absorbed).`,
       data: { volume: vol, move, oneSided },
     });
   }
@@ -328,11 +328,11 @@ export class FlowDetectors {
         id: `obi-${now}`,
         t: now,
         kind: 'imbalance',
-        title: side > 0 ? 'Order-Book Imbalance (bid heavy)' : 'Order-Book Imbalance (ask heavy)',
+        title: side > 0 ? 'Дисбаланс стакана (перевес bid)' : 'Дисбаланс стакана (перевес ask)',
         side: side > 0 ? 'bid' : 'ask',
         price: s.mid,
         confidence: conf,
-        explain: `Top-${ic.levels} depth imbalance ${(s.obi * 100).toFixed(0)}% held ≥ ${(ic.minMs / 1000).toFixed(0)}s; OFI(10s) ${fq(s.ofi)}; microprice ${fp(this.ctx, s.microprice)} vs mid ${fp(this.ctx, s.mid)}.`,
+        explain: `Дисбаланс топ-${ic.levels} уровней ${(s.obi * 100).toFixed(0)}% держится ≥ ${(ic.minMs / 1000).toFixed(0)} с; OFI(10 с) ${fq(s.ofi)}; microprice ${fp(this.ctx, s.microprice)} против mid ${fp(this.ctx, s.mid)}.`,
         data: { obi: s.obi, ofi: s.ofi },
       });
   }
@@ -358,10 +358,10 @@ export class FlowDetectors {
         id: `spread-${now}`,
         t: now,
         kind: 'spread_expansion',
-        title: 'Spread Expansion',
+        title: 'Расширение спреда',
         price: s.mid,
         confidence: Math.round(100 * clamp01(0.5 + 0.1 * (s.spread / med))),
-        explain: `Spread ${fp(this.ctx, s.spread)} = ${(s.spread / med).toFixed(1)}× the median ${fp(this.ctx, med)} for ${((now - this.spreadSince) / 1000).toFixed(1)}s — liquidity withdrawn at the touch.`,
+        explain: `Спред ${fp(this.ctx, s.spread)} = ${(s.spread / med).toFixed(1)}× медианы ${fp(this.ctx, med)} в течение ${((now - this.spreadSince) / 1000).toFixed(1)} с — ликвидность у лучшей цены снята.`,
         data: { spread: s.spread, median: med },
       });
   }
@@ -387,13 +387,13 @@ export class FlowDetectors {
       id: `div-${bar.t}`,
       t: bar.t + 60_000,
       kind: 'delta_divergence',
-      title: bearish ? 'Delta Divergence (bearish)' : 'Delta Divergence (bullish)',
+      title: bearish ? 'Дивергенция дельты (медвежья)' : 'Дивергенция дельты (бычья)',
       side: bearish ? 'sell' : 'buy',
       price: bearish ? bar.h : bar.l,
       confidence: conf,
       explain: bearish
-        ? `New ${n}-bar high ${fp(this.ctx, bar.h)} but CVD ${fq(cvdAtClose)} is below its ${n}-bar high ${fq(maxC)} — aggressive buying did not confirm the high.`
-        : `New ${n}-bar low ${fp(this.ctx, bar.l)} but CVD ${fq(cvdAtClose)} is above its ${n}-bar low ${fq(minC)} — aggressive selling did not confirm the low.`,
+        ? `Новый максимум за ${n} баров ${fp(this.ctx, bar.h)}, но CVD ${fq(cvdAtClose)} ниже своего максимума ${fq(maxC)} — агрессивные покупки не подтвердили максимум.`
+        : `Новый минимум за ${n} баров ${fp(this.ctx, bar.l)}, но CVD ${fq(cvdAtClose)} выше своего минимума ${fq(minC)} — агрессивные продажи не подтвердили минимум.`,
       data: { cvd: cvdAtClose },
     });
   }

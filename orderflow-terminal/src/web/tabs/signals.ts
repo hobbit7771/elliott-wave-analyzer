@@ -7,18 +7,18 @@ import type { EventKind } from '../../core/types.js';
 
 export function createSignalsTab(): Tab {
   const root = el('section', { id: 'tab-signals', role: 'tabpanel' });
-  const kindSel = el('select', { 'aria-label': 'Event type' });
-  kindSel.append(el('option', { value: '', text: 'All types' }));
+  const kindSel = el('select', { 'aria-label': 'Тип события' });
+  kindSel.append(el('option', { value: '', text: 'Все типы' }));
   for (const [k, l] of Object.entries(KIND_LABEL)) kindSel.append(el('option', { value: k, text: l }));
-  const confIn = el('input', { type: 'number', min: '0', max: '100', step: '5', value: '40', title: 'Minimum confidence' });
+  const confIn = el('input', { type: 'number', min: '0', max: '100', step: '5', value: '40', title: 'Минимальный score' });
   const sideSel = el('select', { 'aria-label': 'Side' });
-  for (const [v, l] of [['', 'Both sides'], ['bull', 'Bid / buy'], ['bear', 'Ask / sell']]) sideSel.append(el('option', { value: v, text: l }));
+  for (const [v, l] of [['', 'Обе стороны'], ['bull', 'Bid / покупки'], ['bear', 'Ask / продажи']]) sideSel.append(el('option', { value: v, text: l }));
   const viewSel = el('select', { 'aria-label': 'Table' });
-  for (const [v, l] of [['events', 'Event journal'], ['large', 'Large limit orders'], ['clusters', 'Liquidity clusters'], ['ice', 'Iceberg candidates']]) viewSel.append(el('option', { value: v, text: l }));
-  const exportBtn = el('button', { text: 'Export JSON' });
+  for (const [v, l] of [['events', 'Журнал событий'], ['large', 'Крупные уровни видимой ликвидности'], ['clusters', 'Кластеры ликвидности'], ['ice', 'Кандидаты в айсберги']]) viewSel.append(el('option', { value: v, text: l }));
+  const exportBtn = el('button', { text: 'Экспорт JSON' });
   const count = el('span', { class: 'muted' });
-  root.append(el('div', { class: 'toolbar' }, viewSel, kindSel, el('label', {}, 'Min conf', confIn), sideSel, exportBtn, count));
-  const disclaimer = el('div', { class: 'pad muted', text: 'Probable Iceberg / Estimated Hidden Liquidity / Iceberg Confidence are statistical inferences from public trades and depth. Hidden size is never directly observable; treat every signal as a probability, not a fact.' });
+  root.append(el('div', { class: 'toolbar' }, viewSel, kindSel, el('label', {}, 'Мин. score', confIn), sideSel, exportBtn, count));
+  const disclaimer = el('div', { class: 'pad muted', text: 'Предполагаемый айсберг, признаки пополнения и поглощение — выводы по публичным сделкам и L2-стакану, а не факт. Скрытый остаток заявки не виден; L2 Binance показывает суммарный объём на цене, а не отдельные ордера (нет order ID, владельца и очереди). Score 0–100 — эвристика, не калиброванная вероятность.' });
   const box = el('div', { class: 'scroll' });
   root.append(disclaimer, box);
   const painter = new Painter(render, 500);
@@ -37,9 +37,9 @@ export function createSignalsTab(): Tab {
         .filter((e) => !side || (side === 'bull' ? e.side === 'bid' || e.side === 'buy' : e.side === 'ask' || e.side === 'sell'))
         .reverse()
         .slice(0, 500);
-      count.textContent = `${list.length} shown`;
+      count.textContent = `показано ${list.length}`;
       box.innerHTML =
-        '<table><thead><tr><th class="l">Time (UTC)</th><th class="l">Event</th><th>Side</th><th>Price</th><th>Conf</th><th class="l">Status</th><th class="l">Why</th></tr></thead><tbody>' +
+        '<table><thead><tr><th class="l">Время (UTC)</th><th class="l">Событие</th><th>Сторона</th><th>Цена</th><th>Score</th><th class="l">Статус</th><th class="l">Почему</th></tr></thead><tbody>' +
         list
           .map(
             (e) =>
@@ -50,9 +50,9 @@ export function createSignalsTab(): Tab {
     } else if (v === 'large') {
       const list = store.large.list.filter((x) => x.confidence >= minC);
       const thr = store.large.thr;
-      count.textContent = thr ? (thr.warm ? `threshold bid ${fmtQ(thr.bid)} / ask ${fmtQ(thr.ask)} (ATR factor ${thr.atrFactor.toFixed(2)})` : `warming up: ${thr.samples} level samples`) : '';
+      count.textContent = thr ? (thr.warm ? `порог bid ${fmtQ(thr.bid)} / ask ${fmtQ(thr.ask)} (ATR-множитель ${thr.atrFactor.toFixed(2)})` : `прогрев: ${thr.samples} выборок уровней`) : '';
       box.innerHTML =
-        '<table><thead><tr><th>Price</th><th>Side</th><th>Size</th><th>Peak</th><th class="l">Appeared</th><th>Held</th><th>Refills</th><th>Executed</th><th>Cancelled</th><th class="l">Status</th><th>Conf</th><th class="l">Source</th></tr></thead><tbody>' +
+        '<table><thead><tr><th>Цена</th><th>Сторона</th><th>Объём</th><th>Пик</th><th class="l">Появился</th><th>Держится</th><th>Пополнений</th><th>Исполнено (оценка)</th><th>Снято (оценка)</th><th class="l">Статус</th><th>Score</th><th class="l">Источник</th></tr></thead><tbody>' +
         list
           .map(
             (x) =>
@@ -60,12 +60,12 @@ export function createSignalsTab(): Tab {
           )
           .join('') +
         '</tbody></table>' +
-        (list.length ? '' : '<p class="pad muted">No large resting orders above the dynamic threshold right now.</p>');
+        (list.length ? '' : '<p class="pad muted">Сейчас нет уровней выше динамического порога.</p>');
     } else if (v === 'clusters') {
       const list = store.clusters.list.filter((c) => c.confidence >= minC);
-      count.textContent = `${list.length} clusters, ${store.clusters.vacuums.length} vacuum zones`;
+      count.textContent = `кластеров ${list.length}, зон вакуума ${store.clusters.vacuums.length}`;
       box.innerHTML =
-        '<table><thead><tr><th class="l">Label</th><th>Side</th><th>From</th><th>To</th><th>Total</th><th>Levels</th><th>Density/tick</th><th>Executed</th><th class="l">Since</th><th>Conf</th></tr></thead><tbody>' +
+        '<table><thead><tr><th class="l">Тип</th><th>Сторона</th><th>От</th><th>До</th><th>Всего</th><th>Уровней</th><th>Плотность/тик</th><th>Исполнено</th><th class="l">Since</th><th>Conf</th></tr></thead><tbody>' +
         list
           .map(
             (c) =>
@@ -75,11 +75,11 @@ export function createSignalsTab(): Tab {
         '</tbody></table>';
     } else {
       const list = [...store.ice].sort((a, b) => b.confidence - a.confidence);
-      count.textContent = `${list.length} levels under observation`;
+      count.textContent = `уровней под наблюдением: ${list.length}`;
       box.innerHTML =
-        '<table><thead><tr><th>Price</th><th>Side</th><th>Est. hidden</th><th>Refills</th><th>Iceberg Confidence</th><th class="l">Eligible</th></tr></thead><tbody>' +
+        '<table><thead><tr><th>Цена</th><th>Сторона</th><th>Сверх видимого (предп.)</th><th>Пополнений</th><th>Score</th><th class="l">Достаточно данных</th></tr></thead><tbody>' +
         list
-          .map((c) => `<tr class="${c.side === 'bid' ? 'buy' : 'sell'}"><td>${fmtP(c.price, d)}</td><td class="side">${c.side}</td><td>${fmtQ(c.hidden)}</td><td>${c.refills}</td><td><span class="conf" style="background:${confColor(c.confidence)}">${c.confidence}</span></td><td class="l">${c.eligible ? 'yes' : 'not enough evidence'}</td></tr>`)
+          .map((c) => `<tr class="${c.side === 'bid' ? 'buy' : 'sell'}"><td>${fmtP(c.price, d)}</td><td class="side">${c.side}</td><td>${fmtQ(c.hidden)}</td><td>${c.refills}</td><td><span class="conf" style="background:${confColor(c.confidence)}">${c.confidence}</span></td><td class="l">${c.eligible ? 'да' : 'нет, данных недостаточно'}</td></tr>`)
           .join('') +
         '</tbody></table>';
     }
@@ -90,5 +90,5 @@ export function createSignalsTab(): Tab {
     window.open('/api/export/events.json?' + q.toString(), '_blank');
   };
   for (const t of ['events', 'large', 'clusters', 'ice', 'reset'] as const) store.on(t, () => painter.mark());
-  return { id: 'signals', title: 'Signals', root, show: () => painter.show(), hide: () => painter.hide() };
+  return { id: 'signals', title: 'Сигналы', root, show: () => painter.show(), hide: () => painter.hide() };
 }

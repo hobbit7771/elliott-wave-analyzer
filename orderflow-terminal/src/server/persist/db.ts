@@ -4,6 +4,8 @@ import postgres from 'postgres';
 export type Sql = postgres.Sql;
 
 export interface DbConfig {
+  /** full connection URL (tests / self-hosted Postgres); otherwise the Supabase pooler is used */
+  url?: string;
   projectRef: string;
   password: string;
   user: string;
@@ -13,6 +15,7 @@ export interface DbConfig {
 }
 
 export function dbConfigFromEnv(env = process.env): DbConfig | null {
+  if (env.OFT_DB_URL) return { url: env.OFT_DB_URL, projectRef: '', password: '', user: '', hosts: [], port: 0 };
   const ref = env.SUPABASE_PROJECT_REF;
   const password = env.OFT_DB_PASSWORD;
   if (!ref || !password) return null;
@@ -23,6 +26,13 @@ export function dbConfigFromEnv(env = process.env): DbConfig | null {
 
 /** Connect to the first pooler host that accepts the role. Returns the client and the host used. */
 export async function connectDb(cfg: DbConfig, log: (m: string) => void, max = 2): Promise<{ sql: Sql; host: string }> {
+  if (cfg.url) {
+    const sql = postgres(cfg.url, { max, idle_timeout: 60, connect_timeout: 10, prepare: false, onnotice: () => {} });
+    await sql`select 1`;
+    const host = new URL(cfg.url).host;
+    log(`database: connected via ${host}`);
+    return { sql, host };
+  }
   let last: unknown;
   for (const host of cfg.hosts) {
     const sql = postgres({
