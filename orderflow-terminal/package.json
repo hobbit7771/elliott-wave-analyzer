@@ -1,0 +1,37 @@
+{
+  "name": "orderflow-terminal",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OrderFlow Terminal: real-time order-flow analysis terminal (chart, heatmap, DOM, footprint, detectors) on public exchange WebSocket data. Analysis and paper trading only.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "npm run build:web && npm run build:server",
+    "build:web": "vite build",
+    "build:server": "node scripts/build-server.mjs",
+    "start": "node --disable-warning=ExperimentalWarning dist/server/index.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:e2e": "node scripts/e2e-mobile.mjs",
+    "test:load": "vitest run tests/load.test.ts",
+    "verify:live": "npm run build:server && node --disable-warning=ExperimentalWarning dist/tools/verify-live.js",
+    "record": "npm run build:server && node --disable-warning=ExperimentalWarning dist/tools/record.js",
+    "replay": "npm run build:server && node --disable-warning=ExperimentalWarning dist/tools/replay.js"
+  },
+  "dependencies": {
+    "lightweight-charts": "^5.2.1",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.28.2",
+    "playwright-core": "^1.56.1",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.3",
+    "vitest": "^3.2.7"
+  }
+}
