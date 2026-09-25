@@ -400,6 +400,21 @@ export function createHeatmapTab(): Tab {
         }
       }
     }
+    // static daily levels (blue, solid) when they fall inside the visible price range
+    ctx.font = '9px system-ui, sans-serif';
+    for (const l of store.staticLevels) {
+      const y = Math.round(yOf(l.price)) + 0.5;
+      if (y < 0 || y > H) continue;
+      ctx.strokeStyle = '#2962ff';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(W, y);
+      ctx.stroke();
+      ctx.lineWidth = 1;
+      ctx.fillStyle = '#82a8ff';
+      ctx.fillText('D1', 4, y - 3);
+    }
     // curated levels: thin lines, small labels on the right, important ones purple
     if (p.large && !replay && p.maxLevels > 0) {
       const lv = selectLevels({ large: store.large.list, clusters: p.zones ? store.clusters.list : [], events: events.slice(-300), now: store.now(), minConf: p.minConf }, p.maxLevels, store.meta?.tickSize ?? 0.01);

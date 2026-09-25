@@ -78,6 +78,8 @@ export class Store {
   large: { thr: { bid: number; ask: number; warm: boolean; samples: number; atrFactor: number } | null; list: LargeOrder[] } = { thr: null, list: [] };
   clusters: { list: LiquidityCluster[]; vacuums: { side: BookSide; lo: number; hi: number; t: number }[] } = { list: [], vacuums: [] };
   ice: IceCandidate[] = [];
+  /** static daily S/R levels (loaded by the chart tab, drawn by chart and heatmap) */
+  staticLevels: import('../core/staticLevels.js').StaticLevel[] = [];
   deriv: Deriv = {};
   liqs: Liq[] = [];
   lastTrade: Trade | null = null;

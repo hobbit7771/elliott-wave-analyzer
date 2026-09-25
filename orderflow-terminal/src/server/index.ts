@@ -23,6 +23,7 @@ import { PgRepo, type Repo } from './persist/repo.js';
 import { archiveClient, archiveConfigFromEnv, type ArchiveClient } from './persist/archive.js';
 import { PaperService, type PaperState, type BookView } from './services/paper.js';
 import { AlertService, DEFAULT_RULES, type AlertRule } from './services/alerts.js';
+import { staticLevels } from '../core/staticLevels.js';
 import { RetentionService, policyFromEnv } from './services/retention.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -157,6 +158,10 @@ async function initSupabase(attempt = 0): Promise<void> {
       list = await r.recordList();
     }
     startRecording(list.filter((x) => x.enabled).map((x) => symKey(x.source, x.symbol)));
+    // static daily levels for the recorded instruments are computed up front (and kept in Supabase)
+    setTimeout(() => {
+      for (const x of list.filter((y) => y.enabled)) if (isSource(x.source)) void staticLevelsFor(x.source, x.symbol, symKey(x.source, x.symbol)).catch((e) => log(`static levels ${x.symbol}: ${(e as Error).message.slice(0, 120)}`));
+    }, 20_000);
   } catch (e) {
     supabaseState = { configured: true, connected: false, host: '', error: (e as Error).message };
     const wait = Math.min(300_000, 10_000 * 2 ** attempt);
@@ -314,6 +319,28 @@ async function tradesHistory(source: string, symbol: string, key: string, from: 
   return { trades: [...byId.values()].sort((a, b) => a.t - b.t || (a.id ?? 0) - (b.id ?? 0)).slice(-limit), sources };
 }
 
+/** Static daily S/R levels: recomputed at most every 6 h from 365 daily candles; last result kept in Supabase
+ *  so the levels stay available while the exchange REST is banned. */
+const staticCache = new Map<string, { at: number; data: Record<string, unknown> }>();
+async function staticLevelsFor(source: SourceId, symbol: string, key: string): Promise<Record<string, unknown>> {
+  const hit = staticCache.get(key);
+  if (hit && Date.now() - hit.at < 6 * 3600_000) return hit.data;
+  try {
+    const daily = await getAdapter(source).fetchKlines(symbol, '1d', 365);
+    const closed = daily.filter((d) => d.t + 86_400_000 <= Date.now());
+    const meta = (await getAdapter(source).listInstruments().catch(() => [])).find((m) => m.symbol === symbol);
+    const levels = staticLevels(closed, { max: 4, tick: meta?.tickSize });
+    const data = { at: Date.now(), days: closed.length, levels, method: 'дневные свечи Binance за ~1 год; объём у уровня оценён по OHLCV (равномерно по диапазону дня)' };
+    staticCache.set(key, { at: Date.now(), data });
+    if (repo) void repo.setSetting('static_levels:' + key, data).catch(() => {});
+    return data;
+  } catch (e) {
+    const stored = repo ? await repo.getSetting<Record<string, unknown>>('static_levels:' + key).catch(() => undefined) : undefined;
+    if (stored) return { ...stored, stale: true, note: `REST биржи недоступен (${(e as Error).message.slice(0, 80)}); показан последний сохранённый расчёт` };
+    throw e;
+  }
+}
+
 async function api(req: http.IncomingMessage, res: http.ServerResponse, u: URL): Promise<void> {
   const p = u.pathname;
   const m = req.method ?? 'GET';
@@ -377,6 +404,10 @@ async function api(req: http.IncomingMessage, res: http.ServerResponse, u: URL):
     const trades = reader.trades(key, to - span, to, tf === 'tick' ? limit * ticksPerBar : 400_000);
     const candles = candlesFromTrades(trades, tf, ticksPerBar).slice(-limit);
     return json(res, 200, { candles, origin: 'recorded-trades', tf, coverage: reader.tradeRange(key), note: 'aggTrade messages: one message can aggregate several fills at the same price' });
+  }
+  if (p === '/api/levels/static') {
+    const { source, symbol, key } = params(u);
+    return json(res, 200, await staticLevelsFor(source, symbol, key));
   }
   if (p === '/api/trades') {
     const { source, symbol, key } = params(u);

@@ -195,5 +195,8 @@ describe('History survives a restart (Supabase is the source of truth)', () => {
     const anon = await fetch(`${BASE}/api/paper/order`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     expect(anon.status).toBe(401);
     venue.banned.clear();
+    const st = (await (await fetch(`${BASE}/api/levels/static?${q()}`)).json()) as { levels: unknown[]; days: number };
+    expect(Array.isArray(st.levels)).toBe(true);
+    expect(st.levels.length).toBeLessThanOrEqual(4);
   });
 });

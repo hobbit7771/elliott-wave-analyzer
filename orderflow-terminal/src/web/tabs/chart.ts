@@ -27,6 +27,7 @@ import { DrawingsPrimitive, loadDrawings, saveDrawings, type Drawing, type Drawi
 import { CandleBuilder, TF_MS, candleDelta, type Timeframe } from '../../core/candles.js';
 import { atr, cvd, ema, macd, rsi, vwap } from '../../core/indicators.js';
 import type { Candle, EventKind, MarketEvent } from '../../core/types.js';
+import type { StaticLevel } from '../../core/staticLevels.js';
 
 const LAYERS = {
   volume: 'Объём',
@@ -44,6 +45,7 @@ const LAYERS = {
   iceberg: 'Предполагаемые айсберги и признаки пополнения',
   absorption: 'Зоны поглощения',
   clusters: 'Кластеры ликвидности',
+  static: 'Статические уровни D1 (до 4, синие)',
   sweep: 'Sweep и stop-run',
   imbalance: 'Дисбаланс',
   other: 'Прочее (дивергенция, всплеск, снятие, спуфинг?, вакуум)',
@@ -68,6 +70,7 @@ const DEFAULT_LAYERS: Record<LayerKey, boolean> = {
   iceberg: true,
   absorption: true,
   clusters: true,
+  static: true,
   sweep: true,
   imbalance: false,
   other: false,
@@ -434,6 +437,20 @@ export function createChartTab(): Tab {
 
   /** live: update the last bar and the last point of every indicator */
   function updateLast(opened: boolean): void {
+    try {
+      updateLastUnsafe(opened);
+    } catch (e) {
+      // lightweight-charts rejected an incremental update (series being rebuilt): redraw from the builder
+      console.warn('incremental update failed, full redraw:', (e as Error).message);
+      try {
+        setAll();
+      } catch {
+        /* next tick */
+      }
+    }
+  }
+
+  function updateLastUnsafe(opened: boolean): void {
     if (!chart || !candleS) return;
     const cs = builder.candles;
     const i = cs.length - 1;
@@ -538,6 +555,8 @@ export function createChartTab(): Tab {
     zones.update(zs, lv);
     for (const pl of priceLines) candleS.removePriceLine(pl);
     priceLines = [];
+    // static daily levels: solid blue lines across the whole chart with a price tag
+    if (layers.static) for (const l of staticLv) priceLines.push(candleS.createPriceLine({ price: l.price, color: '#2962ff', lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: '' }));
     // important levels also get a compact tag on the price axis
     for (const l of lv) if (l.important) priceLines.push(candleS.createPriceLine({ price: l.price, color: LEVEL_COLORS.important, lineVisible: false, axisLabelVisible: true, title: '' }));
     if (layers.levels) {
@@ -574,7 +593,28 @@ export function createChartTab(): Tab {
     }
   }
 
+  let staticLv: StaticLevel[] = [];
+  let staticKey = '';
+  async function loadStatic(): Promise<void> {
+    const key = store.key;
+    try {
+      const r = await api<{ levels: StaticLevel[] }>('/api/levels/static', { source: store.source, symbol: store.symbol });
+      if (key !== store.key) return;
+      staticLv = r.levels ?? [];
+      staticKey = key;
+      store.staticLevels = staticLv;
+      refreshOverlays();
+    } catch {
+      /* exchange REST unavailable and nothing stored yet: no static levels */
+    }
+  }
+  setInterval(() => void loadStatic(), 30 * 60_000);
+
   async function load(): Promise<void> {
+    if (staticKey !== store.key) {
+      staticLv = [];
+      void loadStatic();
+    }
     const key = `${store.key}|${store.tf}|${store.ticksPerBar}`;
     loadedKey = key;
     exhausted = false;
