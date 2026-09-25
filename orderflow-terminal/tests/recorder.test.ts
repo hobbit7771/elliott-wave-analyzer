@@ -58,6 +58,20 @@ describe('History recorder', () => {
     expect(recent.cols.at(-1)!.bids[0]).toBe(600);
   });
 
+  it('uses the 1 s tier for a fresh recording even when the requested window starts earlier', () => {
+    const db = openDb(':memory:');
+    const rec = new Recorder(db, 'x:A');
+    const rd = new HistoryReader(db);
+    const base = 1_700_000_040_000;
+    for (let s = 1; s <= 25; s++) {
+      rec.heat(col(base + s * 1000, s));
+      rec.flush(base + s * 1000 + 1);
+    }
+    const r = rd.heat('x:A', base - 900_000, base + 26_000, 1500);
+    expect(r.res).toBe(1);
+    expect(r.cols).toHaveLength(25);
+  });
+
   it('clears one instrument\'s history', () => {
     const db = openDb(':memory:');
     const rec = new Recorder(db, 'x:A');

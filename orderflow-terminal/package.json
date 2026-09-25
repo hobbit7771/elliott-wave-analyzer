@@ -15,7 +15,7 @@
     "start": "node --disable-warning=ExperimentalWarning dist/server/index.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "test:e2e": "node scripts/e2e-mobile.mjs",
+    "test:e2e": "npm run build && vitest run --config vitest.e2e.config.ts",
     "test:load": "vitest run tests/load.test.ts",
     "verify:live": "npm run build:server && node --disable-warning=ExperimentalWarning dist/tools/verify-live.js",
     "record": "npm run build:server && node --disable-warning=ExperimentalWarning dist/tools/record.js",

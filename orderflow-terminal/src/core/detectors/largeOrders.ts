@@ -82,7 +82,7 @@ export class LargeOrderDetector {
     const pctl = this.samples.percentile(lc.percentile);
     let atrFactor = 1;
     if (lc.atrAdjust && isFinite(this.ctx.atr1m) && isFinite(this.ctx.atrAvg) && this.ctx.atrAvg > 0) {
-      atrFactor = clamp(Math.sqrt(this.ctx.atr1m / this.ctx.atrAvg), 0.75, 1.5);
+      atrFactor = clamp(Math.sqrt(this.ctx.atr1m / this.ctx.atrAvg), 1, 1.5); // volatility only raises the bar
     }
     const warm = this.samples.size >= lc.minSamples;
     const thrB = Math.max(lc.minQty, lc.depthPct * depthB, isNaN(pctl) ? 0 : pctl) * atrFactor;

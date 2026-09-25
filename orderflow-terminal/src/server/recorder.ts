@@ -173,15 +173,21 @@ export class HistoryReader {
       const r = this.db.prepare('SELECT MIN(t) m FROM heat WHERE sym=? AND res=?').get(key, res) as { m: number | null };
       return r.m ?? Infinity;
     };
-    // finest tier that covers the start of the range without decoding far more columns than needed
+    // finest tier that (a) is not far finer than needed for the span and (b) reaches back as far as
+    // any coarser tier does (or covers the range start). Fresh recordings therefore use 1 s columns.
+    const tiers = [1, 10, 60];
+    const old = tiers.map(oldest);
     let res = 60;
-    for (const t of [1, 10]) {
-      if (oldest(t) <= from + t * 1000 && span / (t * 1000) <= maxCols * 3) {
+    for (let i = 0; i < tiers.length; i++) {
+      const t = tiers[i];
+      if (old[i] === Infinity) continue;
+      if (span / (t * 1000) > maxCols * 3 && i < tiers.length - 1) continue;
+      const coarserOldest = Math.min(Infinity, ...old.slice(i + 1));
+      if (old[i] <= from + t * 1000 || old[i] <= coarserOldest + t * 1000 || i === tiers.length - 1) {
         res = t;
         break;
       }
     }
-    if (res === 60 && oldest(60) === Infinity) res = oldest(10) !== Infinity && span / 10_000 <= maxCols * 3 ? 10 : 1;
     const load = (r: number, a: number, b: number): HeatColumn[] =>
       (this.db.prepare('SELECT data FROM heat WHERE sym=? AND res=? AND t>? AND t<=? ORDER BY t').all(key, r, a, b) as { data: Uint8Array }[]).map((x) => dec(x.data));
     let cols = load(res, from - 1, to);

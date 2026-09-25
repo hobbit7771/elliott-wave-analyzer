@@ -21,10 +21,23 @@ const DB_PATH = process.env.DB_PATH ?? resolve(process.cwd(), 'data/orderflow.sq
 const WEB_DIR = process.env.WEB_DIR ?? resolve(here, '../web');
 const log = (m: string) => console.log(`${new Date().toISOString()} ${m}`);
 
-if (process.env.NODE_ENV === 'production' && process.env.ALLOW_FIXTURES) {
-  // guard: synthetic fixtures exist only in tests; production must never load them
-  console.error('ALLOW_FIXTURES is not permitted in production');
-  process.exit(1);
+// Guard: in production, market data may only come from the real exchange endpoints.
+// (Endpoint overrides exist for exchange URL changes; tests point them at a local test venue.)
+if (process.env.NODE_ENV === 'production') {
+  for (const k of ['BINANCE_FUTURES_REST', 'BINANCE_FUTURES_WS', 'BINANCE_SPOT_REST', 'BINANCE_SPOT_WS']) {
+    const v = process.env[k];
+    if (!v) continue;
+    let host = '';
+    try {
+      host = new URL(v).hostname;
+    } catch {
+      /* invalid */
+    }
+    if (!/(^|\.)binance\.(com|vision)$/.test(host) || !/^(https|wss):/.test(v)) {
+      console.error(`${k}=${v} rejected: production data must come from official Binance endpoints`);
+      process.exit(1);
+    }
+  }
 }
 
 const db = openDb(DB_PATH);
@@ -41,6 +54,7 @@ const hub = new Hub({
 });
 
 const loop = monitorEventLoopDelay({ resolution: 20 });
+const lag = (ns: number): number => +Math.max(0, ns / 1e6 - 20).toFixed(2);
 loop.enable();
 
 const klineCache = new Map<string, { t: number; data: unknown }>();
@@ -129,8 +143,8 @@ async function api(req: http.IncomingMessage, res: http.ServerResponse, u: URL):
     const from = num(u, 'from', to - 3600_000);
     const limit = Math.min(300_000, num(u, 'limit', 100_000));
     const trades = reader.trades(key, from, to, limit);
-    // compact tuples [t, price, qty, side]
-    return json(res, 200, { trades: trades.map((t) => [t.t, t.price, t.qty, t.side]), coverage: reader.tradeRange(key) });
+    // compact tuples [t, price, qty, side, aggTradeId]
+    return json(res, 200, { trades: trades.map((t) => [t.t, t.price, t.qty, t.side, t.id ?? 0]), coverage: reader.tradeRange(key) });
   }
   if (p === '/api/heatmap') {
     const { key } = params(u);
@@ -188,7 +202,8 @@ async function api(req: http.IncomingMessage, res: http.ServerResponse, u: URL):
     return json(res, 200, {
       uptimeSec: Math.round(process.uptime()),
       memoryMB: { rss: +(m.rss / 1048576).toFixed(1), heapUsed: +(m.heapUsed / 1048576).toFixed(1), external: +(m.external / 1048576).toFixed(1) },
-      eventLoopDelayMs: { p50: +(loop.percentile(50) / 1e6).toFixed(2), p99: +(loop.percentile(99) / 1e6).toFixed(2), max: +(loop.max / 1e6).toFixed(2) },
+      // histogram samples include the 20 ms sampling interval itself; report the lag beyond it
+      eventLoopLagMs: { p50: lag(loop.percentile(50)), p99: lag(loop.percentile(99)), max: lag(loop.max) },
       hub: hub.info(),
       db: reader.sizeInfo(),
     });

@@ -33,7 +33,7 @@ export class Session {
   state: ConnState = 'connecting';
   private status: FeedStatus;
   private latency = new Ewma(0.1);
-  private tradeBatch: [number, number, number, number][] = [];
+  private tradeBatch: [number, number, number, number, number][] = [];
   private timers: NodeJS.Timeout[] = [];
   private resyncTimer: NodeJS.Timeout | null = null;
   private resyncAttempt = 0;
@@ -105,6 +105,8 @@ export class Session {
       onOpen: () => {
         this.setState('syncing', 'WebSocket open, syncing snapshot');
         this.engine.beginSync();
+        // flow state from before the reconnect is not continuous with the new stream
+        this.engine.resetTransient();
         this.scheduleResync(400);
       },
       onMessage: (raw) => this.onRaw(raw),
@@ -271,7 +273,7 @@ export class Session {
   private onTrade(tr: Trade): void {
     this.engine.onTrade(tr);
     this.o.recorder?.trade(tr);
-    this.tradeBatch.push([tr.t, tr.price, tr.qty, tr.side]);
+    this.tradeBatch.push([tr.t, tr.price, tr.qty, tr.side, tr.id ?? 0]);
     if (this.tradeBatch.length > 5000) this.flushTrades();
   }
 

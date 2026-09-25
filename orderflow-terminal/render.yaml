@@ -1,0 +1,29 @@
+# Render Blueprint (free plan). If this project lives in a sub-folder of a larger repository,
+# either set the Blueprint path / Root Directory to that folder in the Render dashboard or create
+# the Web Service manually with the same settings (see README "Deploy on Render Free").
+services:
+  - type: web
+    name: orderflow-terminal
+    runtime: node
+    plan: free
+    # Binance Futures API rejects US IP addresses (HTTP 451) — use an EU/Asia region.
+    region: frankfurt
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "22.12.0"
+      - key: NODE_OPTIONS
+        value: --max-old-space-size=384
+      - key: DB_PATH
+        value: /tmp/orderflow.sqlite
+      - key: MAX_SESSIONS
+        value: "2"
+      - key: DEFAULT_SYMBOLS
+        value: binance-futures:BTCUSDT
+      - key: BACKFILL_MINUTES
+        value: "10"
