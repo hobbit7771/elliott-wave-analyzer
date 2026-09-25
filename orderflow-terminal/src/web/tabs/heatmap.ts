@@ -2,7 +2,7 @@
 // with executions, adds, cancels, price, events, clusters, vacuums, replay and export.
 import type { Tab } from '../main.js';
 import { store } from '../store.js';
-import { api, el, fitCanvas, gestures, Painter, fmtQ, fmtP, fmtTime, fmtDateTime, loadPref, savePref, KIND_COLOR } from '../util.js';
+import { api, el, fitCanvas, gestures, Painter, fmtQ, fmtP, fmtTime, fmtDateTime, loadPref, savePref, KIND_COLOR, ownerToken } from '../util.js';
 import type { HeatColumn, MarketEvent } from '../../core/types.js';
 
 const SPANS: [string, number][] = [
@@ -82,13 +82,17 @@ export function createHeatmapTab(): Tab {
   const replayFrom = el('select', { 'aria-label': 'Начало replay' });
   for (const [l, ms] of SPANS.slice(1, 6)) replayFrom.append(el('option', { value: String(ms), text: `last ${l}` }));
   const clearBtn = el('button', { text: 'Очистить вид' });
+  const delBtn = el('button', { text: 'Удалить историю окна', title: 'Только владелец: удаляет сохранённую историю (Supabase + локальный кэш) в видимом интервале' });
+  // recorded gaps (no reliable book) and the storage tiers the history came from
+  let histGaps: { t0: number; t1: number | null; stream: string; reason: string }[] = [];
+  let histTiers: string[] = [];
   const csvBtn = el('button', { text: 'CSV' });
   const pngBtn = el('button', { text: 'PNG' });
   const liveBtn = el('button', { text: 'LIVE', class: 'on' });
   const optsBtn = el('button', { text: 'Слои' });
   const info = el('span', { class: 'muted' });
   root.append(
-    el('div', { class: 'toolbar' }, el('label', {}, 'Период', spanSel), el('label', {}, 'Глубина', depthSel), el('label', {}, 'Мин. объём', minVol), el('label', {}, 'Мин. score', minConf), el('label', {}, 'Интенсивность', contrast), pauseBtn, liveBtn, el('span', { class: 'sep' }), replayFrom, replaySpeed, replayBtn, el('span', { class: 'sep' }), clearBtn, csvBtn, pngBtn, optsBtn, info),
+    el('div', { class: 'toolbar' }, el('label', {}, 'Период', spanSel), el('label', {}, 'Глубина', depthSel), el('label', {}, 'Мин. объём', minVol), el('label', {}, 'Мин. score', minConf), el('label', {}, 'Интенсивность', contrast), pauseBtn, liveBtn, el('span', { class: 'sep' }), replayFrom, replaySpeed, replayBtn, el('span', { class: 'sep' }), clearBtn, delBtn, csvBtn, pngBtn, optsBtn, info),
   );
   const fill = el('div', { class: 'fill' });
   const canvas = el('canvas');
@@ -442,6 +446,26 @@ export function createHeatmapTab(): Tab {
       }
     }
 
+    // recorded gaps: hatched, never interpolated
+    for (const g of histGaps) {
+      const x0 = Math.max(0, xOf(g.t0));
+      const x1 = Math.min(W, xOf(g.t1 ?? t1));
+      if (x1 <= x0) continue;
+      ctx.fillStyle = 'rgba(120,120,120,0.25)';
+      ctx.fillRect(x0, 0, Math.max(1, x1 - x0), H);
+      ctx.strokeStyle = 'rgba(200,200,200,0.35)';
+      ctx.beginPath();
+      for (let x = x0 - H; x < x1; x += 10) {
+        ctx.moveTo(Math.max(x0, x), x < x0 ? x0 - x : 0);
+        ctx.lineTo(Math.min(x1, x + H), x + H > x1 ? x1 - x : H);
+      }
+      ctx.stroke();
+      if (x1 - x0 > 60) {
+        ctx.fillStyle = '#e0e0e0';
+        ctx.fillText('разрыв данных', x0 + 4, 14);
+      }
+    }
+
     // axes
     ctx.fillStyle = '#121722';
     ctx.fillRect(W, 0, axisW, h);
@@ -471,7 +495,7 @@ export function createHeatmapTab(): Tab {
       ctx.fillText(fmtP(lp, dec()), W + 4, y + 4);
     }
     const colsVisible = vis.length;
-    info.textContent = `${colsVisible} колонок · корзина ${fmtP(step, Math.max(dec(), 0))} · шкала ${fmtQ(norm)}${replay ? ` · ПОВТОР ${fmtDateTime(replay.cursor)}` : ''}${lastCol ? '' : ' · нет данных в окне'}`;
+    info.textContent = `${colsVisible} колонок${histTiers.length ? ' · разрешение: ' + histTiers.join(', ') : ''}${histGaps.length ? ` · разрывов: ${histGaps.length}` : ''} · корзина ${fmtP(step, Math.max(dec(), 0))} · шкала ${fmtQ(norm)}${replay ? ` · ПОВТОР ${fmtDateTime(replay.cursor)}` : ''}${lastCol ? '' : ' · нет данных в окне'}`;
   }
 
   // ---------- data loading ----------
@@ -484,7 +508,9 @@ export function createHeatmapTab(): Tab {
     if (fetchKey === key) return;
     fetchKey = key;
     try {
-      const r = await api<{ cols: HeatColumn[] }>('/api/heatmap', { source: store.source, symbol: store.symbol, from: Math.round(t0), to: Math.round(t1), maxCols: Math.max(300, Math.min(3000, canvas.clientWidth * 2)) });
+      const r = await api<{ cols: HeatColumn[]; tiers?: string[]; gaps?: typeof histGaps }>('/api/heatmap', { source: store.source, symbol: store.symbol, from: Math.round(t0), to: Math.round(t1), maxCols: Math.max(300, Math.min(3000, canvas.clientWidth * 2)) });
+      histGaps = r.gaps ?? [];
+      histTiers = r.tiers ?? [];
       store.setHeatHistory(r.cols, t0);
       painter.mark();
     } catch (e) {
@@ -613,6 +639,21 @@ export function createHeatmapTab(): Tab {
     if (replay) replay.lastWall = performance.now();
     frozen = paused && !replay ? { end: endT() } : null;
     painter.mark();
+  };
+  delBtn.onclick = async () => {
+    const t1 = endT();
+    const t0 = t1 - p.span;
+    if (!ownerToken()) return void alert('Удаление доступно только владельцу: войдите на вкладке «Источники».');
+    if (!confirm(`Удалить сохранённую историю ${store.symbol} за ${fmtDateTime(t0)} — ${fmtDateTime(t1)} (UTC)? Действие необратимо.`)) return;
+    try {
+      await api('/api/history', { source: store.source, symbol: store.symbol, from: Math.round(t0), to: Math.round(t1) }, { method: 'DELETE' });
+      fetchKey = '';
+      store.setHeatHistory([], t0);
+      histGaps = [];
+      void ensureHistory();
+    } catch (e) {
+      alert('Не удалось удалить: ' + (e as Error).message);
+    }
   };
   clearBtn.onclick = () => {
     store.heat = [];

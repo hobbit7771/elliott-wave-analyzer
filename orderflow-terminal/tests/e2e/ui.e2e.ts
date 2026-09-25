@@ -155,7 +155,6 @@ describe('History survives a restart (Supabase is the source of truth)', () => {
     expect(tiles).toBeGreaterThan(0);
     expect(blk).toBeTruthy();
 
-    // hard gap in the venue while running -> must be recorded
     await server.stop();
     server = await startServer({ venueUrl: venue.url, venueWs: venue.wsUrl, pgPort: pg.port, archiveUrl: arch.url });
     BASE = server.base;
@@ -166,8 +165,15 @@ describe('History survives a restart (Supabase is the source of truth)', () => {
     const heat = (await (await fetch(`${BASE}/api/heatmap?${q({ from: String(Date.now() - 10 * 60_000) })}`)).json()) as { cols: unknown[]; tiers: string[] };
     expect(heat.cols.length).toBeGreaterThan(0);
 
-    const gaps = (await (await fetch(`${BASE}/api/gaps?${q()}`)).json()) as { gaps: unknown[]; coverage: unknown[] };
-    expect(Array.isArray(gaps.gaps)).toBe(true);
+    // the downtime between the two processes is recorded as a gap (never interpolated)
+    let gaps: { gaps: { reason: string; t0: number; t1: number | null }[]; coverage: unknown[] } = { gaps: [], coverage: [] };
+    for (let i = 0; i < 30 && !gaps.gaps.some((g) => /сервис не работал/.test(g.reason)); i++) {
+      await wait(1000);
+      gaps = await (await fetch(`${BASE}/api/gaps?${q()}`)).json();
+    }
+    const down = gaps.gaps.find((g) => /сервис не работал/.test(g.reason));
+    expect(down).toBeTruthy();
+    expect(down!.t1! - down!.t0).toBeGreaterThan(0);
     expect(gaps.coverage.length).toBeGreaterThan(0);
 
     const t = Math.floor((Number(blk.t0) + Number(blk.t1)) / 2);

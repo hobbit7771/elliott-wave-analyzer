@@ -42,6 +42,8 @@ export class LargeOrderDetector {
   private flicker = new Map<string, number[]>();
   /** levels recently flagged as spoof suspects (used by the iceberg filter) */
   readonly spoofed = new Map<string, number>();
+  private lastSpoof = { bid: -Infinity, ask: -Infinity };
+  private lastPulled = { bid: -Infinity, ask: -Infinity };
   thr: ThresholdInfo = { bid: Infinity, ask: Infinity, pctDepth: { bid: 0, ask: 0 }, pctl: NaN, atrFactor: 1, samples: 0, warm: false };
   private lastSample = 0;
 
@@ -191,9 +193,15 @@ export class LargeOrderDetector {
     const life = now - tr.firstSeen;
     const p = priceOf(this.ctx, tr.tick);
     const { cfg } = this.ctx;
+    const midTick = (this.ctx.book.bestBidTick + this.ctx.book.bestAskTick) / 2;
+    const distNow = Math.abs(tr.tick - midTick);
+    const midPrice = midTick * this.ctx.tick;
+    const nearPct = (ticks: number) => (ticks * this.ctx.tick) / Math.max(midPrice, 1e-12);
     if (tr.confirmed) {
       this.update(tr, now, `Снят: ${fq(tr.cancelled)} без исполнения против ${fq(tr.executed)} исполнено.`);
-      if (this.ctx.gateOpen) {
+      // only material pulls near the market: the removed size itself exceeds the large threshold
+      if (this.ctx.gateOpen && tr.cancelled >= tr.threshold && nearPct(distNow) <= cfg.pulled.maxDistPct && now - this.lastPulled[tr.side] >= cfg.pulled.cooldownMs) {
+        this.lastPulled[tr.side] = now;
         this.ctx.emit({
           id: `pulled-${k}-${now}`,
           t: now,
@@ -207,9 +215,7 @@ export class LargeOrderDetector {
         });
       }
     }
-    // spoofing suspicion: large, short-lived, removed by cancellation as price approached
-    const midTick = (this.ctx.book.bestBidTick + this.ctx.book.bestAskTick) / 2;
-    const distNow = Math.abs(tr.tick - midTick);
+    // spoofing suspicion: large, short-lived, near the market, removed by cancellation as price approached
     const cancelFrac = tr.cancelled / Math.max(tr.peak, 1e-12);
     const fl = (this.flicker.get(k) ?? []).filter((t) => now - t < 120_000);
     fl.push(now);
@@ -221,12 +227,15 @@ export class LargeOrderDetector {
       life <= cfg.spoof.maxLifeMs &&
       cancelFrac >= cfg.spoof.minCancelFrac &&
       tr.executed <= 0.1 * tr.peak &&
-      (approached >= 1 - cfg.spoof.approachFrac || fl.length >= 3)
+      nearPct(tr.distAtSeen) <= cfg.spoof.maxDistPct &&
+      approached >= 1 - cfg.spoof.approachFrac &&
+      now - this.lastSpoof[tr.side] >= cfg.spoof.cooldownMs
     ) {
       const quick = 1 - life / cfg.spoof.maxLifeMs;
       const conf = Math.round(100 * clamp01(0.3 * clamp01(approached) + 0.25 * quick + 0.25 * clamp01((fl.length - 1) / 3) + 0.2 * clamp01(cancelFrac)));
       this.spoofed.set(k, now);
       if (conf >= cfg.minConfidence) {
+        this.lastSpoof[tr.side] = now;
         this.ctx.emit({
           id: `spoof-${k}-${now}`,
           t: now,

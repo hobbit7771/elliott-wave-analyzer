@@ -9,7 +9,9 @@ describe('Liquidity cluster detector', () => {
   it('forms a Bid Liquidity Cluster, then marks it Broken Liquidity when traded through', () => {
     const h = harness();
     for (const p of [99.5, 99.4, 99.3]) h.sim.set('bid', p, 20);
-    h.idle(6000);
+    h.idle(20_000);
+    expect(h.events.filter((e) => e.kind === 'cluster')).toHaveLength(0); // not held long enough yet
+    h.idle(12_000);
     const c = h.events.filter((e) => e.kind === 'cluster');
     expect(c).toHaveLength(1);
     expect(c[0]).toMatchObject({ title: 'Кластер ликвидности bid', side: 'bid', price: 99.3, priceHi: 99.6 });
@@ -24,12 +26,24 @@ describe('Liquidity cluster detector', () => {
   it('labels a cluster Tested Liquidity after aggressive volume hits it and it survives', () => {
     const h = harness();
     for (const p of [100.0, 99.9, 99.8]) h.sim.set('bid', p, 20);
-    h.idle(6000);
+    h.idle(32_000);
     h.step([[100.0, 2, -1]]);
     h.idle(1000);
     const cl = h.engine.clusters.list().find((x) => x.side === 'bid')!;
     expect(cl.status).toBe('tested');
     expect(cl.label).toBe('Протестированная ликвидность');
+  });
+
+  it('does not announce a second event when a zone briefly drops out of the book and returns', () => {
+    const h = harness();
+    for (const p of [99.5, 99.4, 99.3]) h.sim.set('bid', p, 20);
+    h.idle(32_000);
+    for (const p of [99.5, 99.4, 99.3]) h.sim.set('bid', p, 4);
+    h.idle(5000);
+    for (const p of [99.5, 99.4, 99.3]) h.sim.set('bid', p, 20);
+    h.idle(35_000);
+    const ids = new Set(h.events.filter((e) => e.kind === 'cluster').map((e) => e.id));
+    expect(ids.size).toBe(1);
   });
 
   it('ignores ordinary uniform depth', () => {

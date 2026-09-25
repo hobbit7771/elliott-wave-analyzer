@@ -28,17 +28,35 @@ export function isSource(s: string): s is SourceId {
 export const UNAVAILABLE_SOURCES = [
   {
     id: 'bybit',
-    name: 'Bybit (linear perpetuals)',
-    reason: 'Adapter interface ready (MarketAdapter); not implemented in this release. Public orderbook.200 + publicTrade streams are free and would fit.',
+    name: 'Bybit (линейные бессрочные контракты)',
+    status: 'не реализован',
+    reason: 'Интерфейс адаптера (MarketAdapter) готов; публичные потоки orderbook.200 и publicTrade бесплатны, но адаптер в этом выпуске не написан.',
   },
   {
-    id: 'cme',
-    name: 'CME futures (NQ, ES, GC, CL)',
-    reason: 'A real CME depth-of-market feed requires a licensed paid data feed (e.g. Rithmic, CQG, dxFeed, Databento). No free public WebSocket exists, so it is not offered.',
+    id: 'databento-glbx',
+    name: 'CME Globex через Databento (GLBX.MDP3: NQ, ES, GC, CL)',
+    status: 'адаптер написан, не проверен на реальных данных',
+    reason: 'Исторический HTTP-клиент Databento (схемы mbp-10 и trades, сторона агрессора из поля side) реализован и покрыт тестами на документированном формате записей. Реальных данных не получали: нужен ключ, а трафик Databento платный. Live-шлюз (Raw API) не реализован.',
+    needs: ['DATABENTO_API_KEY в секретах Render', 'ваше отдельное разрешение на платное использование данных', 'лицензия CME на non-display/display использование при необходимости'],
+  },
+  {
+    id: 'databento-xnas',
+    name: 'Nasdaq TotalView через Databento (XNAS.ITCH)',
+    status: 'адаптер написан, не проверен на реальных данных',
+    reason: 'Тот же клиент Databento; для акций Nasdaq доступен L3 (MBO) и L2 (mbp-10). Не проверен: нет ключа и разрешения на платные данные.',
+    needs: ['DATABENTO_API_KEY', 'разрешение на платное использование'],
+  },
+  {
+    id: 'dxfeed',
+    name: 'dxFeed (CME / фьючерсы)',
+    status: 'не реализован',
+    reason: 'dxFeed отдаёт стакан CME только по платной подписке с биржевыми лицензиями; бесплатного реального потока нет. Адаптер не писался, чтобы не выдавать непроверенный код за рабочий.',
+    needs: ['платная подписка dxFeed и ваше разрешение'],
   },
   {
     id: 'cfd',
     name: 'CFD / OTC XAUUSD, BRXUSD',
-    reason: 'CFD and spot-FX/OTC metals have no centralized order book; broker "depth" is the broker\'s own quote ladder and is not comparable to exchange depth. Not offered.',
+    status: 'недоступно по природе рынка',
+    reason: 'У CFD и спотового OTC-золота нет централизованного стакана: «глубина» брокера — его собственная лестница котировок, не сравнимая с биржевой. Не предлагается.',
   },
 ];

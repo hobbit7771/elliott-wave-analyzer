@@ -328,9 +328,11 @@ function renderStatus(): void {
   sb.badge.textContent = netDown ? 'Сервер: ' + (STATE_LABEL[state] ?? state) : STATE_LABEL[state] ?? state;
   sb.badge.title = s?.gate === false && s.gateReason ? 'Новые сигналы заблокированы: ' + s.gateReason : '';
   const ps = s?.persist;
-  sb.hist.textContent = !ps ? '' : !ps.enabled ? '⚠ История не записывается' : ps.lastError ? '⚠ Ошибка записи истории' : `История: запись ок · очередь ${ps.queued}`;
-  sb.hist.className = 'hist ' + (!ps || (ps.enabled && !ps.lastError) ? 'muted' : 'warn');
-  sb.hist.title = ps?.lastError || (ps ? `Последняя успешная запись: ${ps.lastOkAt ? new Date(ps.lastOkAt).toISOString() : '—'}; несохранённый хвост ≈ ${Math.round(ps.oldestUnsavedMs / 1000)} с` : '');
+  // a past error followed by a successful write is not the current state
+  const psErr = ps && ps.lastError && (ps.lastErrorAt ?? 0) > ps.lastOkAt ? ps.lastError : '';
+  sb.hist.textContent = !ps ? '' : !ps.enabled ? '⚠ История не записывается' : psErr ? '⚠ Ошибка записи истории' : `История: запись ок · очередь ${ps.queued}`;
+  sb.hist.className = 'hist ' + (!ps || (ps.enabled && !psErr) ? 'muted' : 'warn');
+  sb.hist.title = psErr || (ps ? `Последняя успешная запись: ${ps.lastOkAt ? new Date(ps.lastOkAt).toISOString() : '—'}; несохранённый хвост ≈ ${Math.round(ps.oldestUnsavedMs / 1000)} с` : '');
   const age = s?.lastUpdate ? Date.now() - s.lastUpdate : NaN;
   sb.last.textContent = s?.lastUpdate ? ago(age) + ' назад' : '–';
   sb.fresh.style.background = !isFinite(age) ? '#8a93a6' : age < 1500 ? '#2ecc71' : age < 5000 ? '#ffb300' : '#ef5350';

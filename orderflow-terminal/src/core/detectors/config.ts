@@ -35,6 +35,12 @@ export interface DetectorConfig {
     maxLifeMs: number;
     minCancelFrac: number;
     approachFrac: number;
+    maxDistPct: number;     // only levels this close to mid (fraction of price) can be spoof suspects
+    cooldownMs: number;     // at most one suspicion per side per cooldown
+  };
+  pulled: {
+    maxDistPct: number;     // only report pulls near the market
+    cooldownMs: number;     // per side
   };
   cluster: {
     elevationMult: number;  // bucket considered elevated if >= mult * median bucket size
@@ -86,8 +92,9 @@ export const DEFAULT_DETECTOR_CONFIG: DetectorConfig = {
   large: { depthPct: 0.02, percentile: 0.97, minQty: 0, minHoldMs: 3000, minDistanceTicks: 0, atrAdjust: true, minSamples: 400 },
   iceberg: { minRefills: 3, minTradedToDisplayed: 1.5, minObservationMs: 4000, maxIdleMs: 90_000, maxCancelRatio: 0.6 },
   absorption: { windowMs: 10_000, volPercentile: 0.95, maxMoveAtr: 0.15, minMoveTicks: 2, minSamples: 60, cooldownMs: 15_000 },
-  spoof: { maxLifeMs: 20_000, minCancelFrac: 0.8, approachFrac: 0.6 },
-  cluster: { elevationMult: 2.5, minBuckets: 3, maxGapBuckets: 1, minHoldMs: 5000 },
+  spoof: { maxLifeMs: 20_000, minCancelFrac: 0.8, approachFrac: 0.6, maxDistPct: 0.002, cooldownMs: 60_000 },
+  pulled: { maxDistPct: 0.003, cooldownMs: 20_000 },
+  cluster: { elevationMult: 2.5, minBuckets: 3, maxGapBuckets: 1, minHoldMs: 30_000 },
   sweep: { windowMs: 1000, minRangeTicks: 5, minRangeAtr: 0.2, volPercentile: 0.95, cooldownMs: 3000 },
   stopRun: { lookbackBars: 30, reclaimMs: 60_000 },
   imbalance: { threshold: 0.6, minMs: 3000, levels: 10 },

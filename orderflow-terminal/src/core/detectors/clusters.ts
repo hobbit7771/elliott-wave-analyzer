@@ -117,8 +117,10 @@ export class ClusterDetector {
     for (const f of found) {
       f.lo = +f.lo.toFixed(dec);
       f.hi = +f.hi.toFixed(dec);
-      const tr = this.tracks.find((t) => t.side === f.side && t.status !== 'broken' && t.status !== 'faded' && f.lo <= t.hi && f.hi >= t.lo);
+      // a zone that briefly dropped out of the scan (book noise) keeps its identity instead of becoming a new event
+      const tr = this.tracks.find((t) => t.side === f.side && t.status !== 'broken' && (t.status !== 'faded' || now - t.lastSeen < 60_000) && f.lo <= t.hi && f.hi >= t.lo);
       if (tr) {
+        if (tr.status === 'faded') tr.status = tr.lastStatus as ClusterTrack['status'];
         tr.lo = f.lo;
         tr.hi = f.hi;
         tr.total = f.total;
@@ -175,7 +177,9 @@ export class ClusterDetector {
     const age = now - t.firstSeen;
     const cc = this.ctx.cfg.cluster;
     t.confidence = Math.round(100 * clamp01(0.3 + 0.3 * clamp01(age / (6 * cc.minHoldMs)) + 0.2 * clamp01(t.levels / (3 * cc.minBuckets)) + 0.2 * clamp01(t.executed / Math.max(t.initialTotal, 1e-12))));
-    if (!t.announced && age >= cc.minHoldMs && t.status !== 'faded' && t.status !== 'broken') {
+    // do not announce a zone overlapping one already announced on this side in the last 5 minutes
+    const dup = () => this.tracks.some((o) => o !== t && o.announced && o.side === t.side && t.lo <= o.hi && t.hi >= o.lo && now - o.lastSeen < 300_000);
+    if (!t.announced && age >= cc.minHoldMs && t.status !== 'faded' && t.status !== 'broken' && !dup()) {
       t.announced = true;
       t.lastStatus = t.status;
       this.emitCluster(t, now, 'formed');

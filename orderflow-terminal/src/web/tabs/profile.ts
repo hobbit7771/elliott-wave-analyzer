@@ -15,7 +15,7 @@ export function createProfileTab(): Tab {
   for (const n of [1, 5, 10, 25, 50, 100, 250, 500, 1000]) rowSel.append(el('option', { value: String(n), text: `${n} tick` }));
   const daySel = el('select', { 'aria-label': 'TPO session' });
   const vpInfo = el('span', { class: 'muted' });
-  root.append(el('div', { class: 'toolbar' }, el('label', {}, 'VP', rangeSel), el('label', {}, 'Rows', rowSel), el('label', {}, 'TPO day', daySel), vpInfo));
+  root.append(el('div', { class: 'toolbar' }, el('label', {}, 'VP', rangeSel), el('label', {}, 'Строк', rowSel), el('label', {}, 'TPO: сессия (UTC-сутки)', daySel), vpInfo));
   const split = el('div', { class: 'split', style: 'flex-wrap:wrap' });
   const vpBox = el('div', { class: 'fill', style: 'min-width:280px;min-height:260px' });
   const tpoBox = el('div', { class: 'fill', style: 'min-width:280px;min-height:260px;border-left:1px solid var(--line)' });
@@ -135,7 +135,7 @@ export function createProfileTab(): Tab {
     const day = +daySel.value;
     const periods = tpoCandles.filter((c) => Math.floor(c.t / 86_400_000) === day);
     if (!periods.length) {
-      tpoEmpty.textContent = tpoErr || 'Loading 30m candles…';
+      tpoEmpty.textContent = tpoErr || 'Загрузка 30-минутных свечей…';
       return;
     }
     tpoEmpty.textContent = '';
@@ -173,7 +173,9 @@ export function createProfileTab(): Tab {
       ctx.fillText(label, w - 48, y - 6);
     }
     ctx.fillStyle = '#8a93a6';
-    ctx.fillText(`TPO ${new Date(day * 86_400_000).toISOString().slice(0, 10)} · 30m periods ${t.periods} · POC ${fmtP(t.poc, dec)} VA ${fmtP(t.val, dec)}–${fmtP(t.vah, dec)}`, 4, 10);
+    ctx.fillText(`TPO ≈ ${new Date(day * 86_400_000).toISOString().slice(0, 10)} UTC · периодов 30м: ${t.periods} · POC ${fmtP(t.poc, dec)} VA ${fmtP(t.val, dec)}–${fmtP(t.vah, dec)}`, 4, 10);
+    ctx.fillStyle = '#8a93a6';
+    ctx.fillText('Приближение: каждый 30м период заполняет весь диапазон high–low свечи (без тиков внутри периода). Сессия = сутки UTC, без перехода на летнее время.', 4, h - 4);
   }
 
   async function loadTpo(): Promise<void> {

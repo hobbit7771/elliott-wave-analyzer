@@ -31,20 +31,49 @@ describe('Large limit order detector (dynamic threshold)', () => {
     expect(lo.confidence).toBeGreaterThan(0);
   });
 
-  it('marks a pulled order and reports Major Liquidity Removed', () => {
+  it('marks a pulled order near the market and reports Major Liquidity Removed', () => {
     const h = harness();
     h.idle(25_000);
-    h.sim.set('ask', 100.6, 40);
+    h.sim.set('ask', 100.2, 40); // 0.15% from mid
+    h.idle(4000);
+    h.sim.set('ask', 100.2, 0);
+    h.idle(1000);
+    const lo = h.engine.large.list(h.sim.t).find((x) => x.price === 100.2)!;
+    expect(lo.status).toBe('pulled');
+    expect(lo.cancelled).toBe(40);
+    expect(h.events.some((e) => e.kind === 'liquidity_pulled' && e.price === 100.2)).toBe(true);
+  });
+
+  it('does not report pulls of levels far from the market (routine requoting)', () => {
+    const h = harness();
+    h.idle(25_000);
+    h.sim.set('ask', 100.6, 40); // 0.55% from mid
     h.idle(4000);
     h.sim.set('ask', 100.6, 0);
     h.idle(1000);
-    const lo = h.engine.large.list(h.sim.t).find((x) => x.price === 100.6)!;
-    expect(lo.status).toBe('pulled');
-    expect(lo.cancelled).toBe(40);
-    expect(h.events.some((e) => e.kind === 'liquidity_pulled' && e.price === 100.6)).toBe(true);
+    expect(h.engine.large.list(h.sim.t).find((x) => x.price === 100.6)?.status).toBe('pulled');
+    expect(h.events.some((e) => e.kind === 'liquidity_pulled')).toBe(false);
   });
 
-  it('flags spoofing suspicion for repeated large appear/cancel cycles, never as fact', () => {
+  it('flags spoofing suspicion when a large nearby level is cancelled as price approaches, never as fact', () => {
+    const h = harness();
+    h.idle(25_000);
+    h.sim.set('ask', 100.2, 40);
+    h.idle(4000);
+    // price moves toward the level: the ask in front is taken away, bids step up
+    h.sim.set('ask', 100.1, 0);
+    h.sim.set('bid', 100.1, 5);
+    h.idle(500);
+    h.sim.set('ask', 100.2, 0);
+    h.idle(1000);
+    const sp = h.events.filter((e) => e.kind === 'spoofing');
+    expect(sp).toHaveLength(1);
+    expect(sp[0].title).toMatch(/Подозрение/);
+    expect(sp[0].explain).toMatch(/cannot be proven/);
+    expect(h.engine.large.spoofed.has('a1002')).toBe(true);
+  });
+
+  it('does not call far-away appear/cancel flicker spoofing', () => {
     const h = harness();
     h.idle(25_000);
     for (let i = 0; i < 3; i++) {
@@ -53,11 +82,7 @@ describe('Large limit order detector (dynamic threshold)', () => {
       h.sim.set('ask', 100.6, 0);
       h.idle(2000);
     }
-    const sp = h.events.filter((e) => e.kind === 'spoofing');
-    expect(sp.length).toBeGreaterThanOrEqual(1);
-    expect(sp[0].title).toMatch(/Подозрение/);
-    expect(sp[0].explain).toMatch(/cannot be proven/);
-    expect(h.engine.large.spoofed.has('a1006')).toBe(true);
+    expect(h.events.filter((e) => e.kind === 'spoofing')).toHaveLength(0);
   });
 
   it('a filled order is not called spoofing', () => {

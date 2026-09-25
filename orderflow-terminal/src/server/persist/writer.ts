@@ -9,7 +9,7 @@ import { backoffDelay } from '../ingestion/wsClient.js';
 import type { ArchiveClient } from './archive.js';
 import type { GapRow, Repo } from './repo.js';
 
-export const ALGO_VERSION = 'oft-detectors-2';
+export const ALGO_VERSION = 'oft-detectors-3';
 
 export interface PersistStatus {
   enabled: boolean;
@@ -118,6 +118,7 @@ export class PersistWriter {
 
   /** A (re)synced book: start a new archive block from its exact current state. */
   onSynced(book: OrderBook, t: number): void {
+    if (!this.firstSyncT) this.firstSyncT = t;
     this.closeBlock(t);
     if (this.openGap) {
       this.openGap.t1 = t;
@@ -222,6 +223,22 @@ export class PersistWriter {
     }
   }
   private pendingCoverage: { t0: number; t1: number } | null = null;
+  private firstSyncT = 0;
+  private downtimeChecked = false;
+
+  /** Once per process: the interval between the previous process's last recorded book and our first sync is a gap. */
+  private async recordDowntime(): Promise<void> {
+    if (this.downtimeChecked || !this.firstSyncT || !this.repo) return;
+    const prev = (await this.repo.coverage(this.meta.source, this.meta.symbol)).filter((c) => c.stream === 'l2' && c.t0 < this.firstSyncT);
+    const prevEnd = prev.reduce((m, c) => Math.max(m, Math.min(c.t1, this.firstSyncT)), 0);
+    if (prevEnd && this.firstSyncT - prevEnd > 5000) {
+      await this.repo.upsertGaps([
+        { source: this.meta.source, symbol: this.meta.symbol, stream: 'l2', t0: prevEnd, t1: this.firstSyncT, reason: 'сервис не работал (перезапуск, деплой или сон Render Free) — данных за интервал нет' },
+      ]);
+      this.log(`[persist ${this.meta.symbol}] downtime gap recorded: ${new Date(prevEnd).toISOString()} .. ${new Date(this.firstSyncT).toISOString()}`);
+    }
+    this.downtimeChecked = true;
+  }
 
   // ---------------- flushing ----------------
 
@@ -248,6 +265,7 @@ export class PersistWriter {
         await this.repo.upsertCoverage(src, sym, 'l2', this.pendingCoverage.t0, this.pendingCoverage.t1);
         this.pendingCoverage = null;
       }
+      await this.recordDowntime();
       this.status.savedRows += batch.length;
       await this.flushBlocks();
       this.failCount = 0;

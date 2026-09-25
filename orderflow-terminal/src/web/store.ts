@@ -7,6 +7,7 @@ export interface PersistStatusView {
   enabled: boolean;
   lastOkAt: number;
   lastError: string;
+  lastErrorAt?: number;
   queued: number;
   oldestUnsavedMs: number;
   dropped: number;
