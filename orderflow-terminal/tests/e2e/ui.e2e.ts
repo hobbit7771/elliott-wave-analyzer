@@ -46,7 +46,7 @@ async function openApp(viewport: { width: number; height: number }, mobile: bool
   }, OWNER);
   const page = await ctx.newPage();
   const errors: string[] = [];
-  page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
+  page.on('pageerror', (e) => errors.push('pageerror: ' + e.message + ' ' + (e.stack ?? '').slice(0, 600)));
   page.on('console', (m) => m.type() === 'error' && errors.push('console: ' + m.text()));
   page.on('response', (r) => r.status() >= 400 && errors.push(`http ${r.status()} ${r.url()}`));
   await page.goto(BASE + '/#chart');

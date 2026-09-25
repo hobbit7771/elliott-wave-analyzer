@@ -22,6 +22,7 @@ import {
 import type { Tab } from '../main.js';
 import { store } from '../store.js';
 import { api, el, fmtQ, fmtP, fmtDateTime, loadPref, savePref, loadPrefRaw, KIND_COLOR, isBullish, ownerToken } from '../util.js';
+import { LEVEL_COLORS, labelSlots, selectLevels, type LevelMark } from '../levels.js';
 import { DrawingsPrimitive, loadDrawings, saveDrawings, type Drawing, type DrawingType } from '../drawings.js';
 import { CandleBuilder, TF_MS, candleDelta, type Timeframe } from '../../core/candles.js';
 import { atr, cvd, ema, macd, rsi, vwap } from '../../core/indicators.js';
@@ -98,9 +99,13 @@ interface Zone {
   label: string;
 }
 
-/** Draws rectangular zones (absorption / clusters / vacuum) behind candles. */
+/**
+ * Draws the curated liquidity levels as thin horizontal lines with small labels (important ones in purple),
+ * plus faint absorption zones without text, behind the candles.
+ */
 class ZonesPrimitive implements ISeriesPrimitive<Time> {
   zones: Zone[] = [];
+  levels: LevelMark[] = [];
   private p: SeriesAttachedParameter<Time, SeriesType> | null = null;
   constructor(private toTime: (ms: number) => number | null) {}
   attached(p: SeriesAttachedParameter<Time, SeriesType>): void {
@@ -109,8 +114,9 @@ class ZonesPrimitive implements ISeriesPrimitive<Time> {
   detached(): void {
     this.p = null;
   }
-  update(z: Zone[]): void {
+  update(z: Zone[], levels: LevelMark[] = this.levels): void {
     this.zones = z;
+    this.levels = levels;
     this.p?.requestUpdate();
   }
   paneViews() {
@@ -124,24 +130,51 @@ class ZonesPrimitive implements ISeriesPrimitive<Time> {
             if (!p) return;
             target.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
               const ts = p.chart.timeScale();
+              const xAt = (ms: number | null, dflt: number) => {
+                if (ms === null) return dflt;
+                const a = self.toTime(ms);
+                if (a === null) return dflt;
+                try {
+                  return ts.timeToCoordinate(a as UTCTimestamp) ?? dflt;
+                } catch {
+                  return dflt; // time outside the loaded bars
+                }
+              };
               for (const z of self.zones) {
-                const a = self.toTime(z.t0);
-                const x0 = a === null ? 0 : (ts.timeToCoordinate(a as UTCTimestamp) ?? 0);
-                const b = z.t1 === null ? null : self.toTime(z.t1);
-                const x1 = b === null ? mediaSize.width : (ts.timeToCoordinate(b as UTCTimestamp) ?? mediaSize.width);
+                const x0 = xAt(z.t0, 0);
+                const x1 = xAt(z.t1, mediaSize.width);
                 const y0 = p.series.priceToCoordinate(z.hi);
                 const y1 = p.series.priceToCoordinate(z.lo);
                 if (y0 === null || y1 === null) continue;
-                const hgt = Math.max(2, y1 - y0);
-                ctx.fillStyle = z.color + '33';
-                ctx.strokeStyle = z.color + 'aa';
-                ctx.fillRect(x0, y0, Math.max(2, x1 - x0), hgt);
-                ctx.strokeRect(x0 + 0.5, y0 + 0.5, Math.max(2, x1 - x0) - 1, hgt - 1);
-                if (z.label) {
-                  ctx.fillStyle = z.color;
-                  ctx.font = '10px sans-serif';
-                  ctx.fillText(z.label, x0 + 3, y0 + 10);
-                }
+                ctx.fillStyle = z.color + '14';
+                ctx.fillRect(x0, y0, Math.max(2, x1 - x0), Math.max(1, y1 - y0));
+              }
+              const items: { l: LevelMark; y: number; x0: number }[] = [];
+              for (const l of self.levels) {
+                const y = p.series.priceToCoordinate(l.price);
+                if (y === null || y < 0 || y > mediaSize.height) continue;
+                items.push({ l, y: Math.round(y) + 0.5, x0: Math.max(0, xAt(l.t0, 0)) });
+              }
+              // ordinary first, important on top
+              items.sort((a, b) => Number(a.l.important) - Number(b.l.important));
+              for (const it of items) {
+                ctx.strokeStyle = it.l.important ? LEVEL_COLORS.important : LEVEL_COLORS[it.l.side] + 'b0';
+                ctx.lineWidth = it.l.important ? 1.5 : 1;
+                ctx.setLineDash(it.l.important ? [] : [4, 3]);
+                ctx.beginPath();
+                ctx.moveTo(it.x0, it.y);
+                ctx.lineTo(mediaSize.width, it.y);
+                ctx.stroke();
+              }
+              ctx.setLineDash([]);
+              ctx.lineWidth = 1;
+              ctx.font = '9px system-ui, sans-serif';
+              const shown = labelSlots([...items].sort((a, b) => Number(b.l.important) - Number(a.l.important)), 10);
+              for (const it of shown) {
+                const txt = it.l.label;
+                const w = ctx.measureText(txt).width;
+                ctx.fillStyle = it.l.important ? LEVEL_COLORS.important : LEVEL_COLORS[it.l.side];
+                ctx.fillText(txt, mediaSize.width - w - 4, it.y - 2);
               }
             });
           },
@@ -156,15 +189,24 @@ export function createChartTab(): Tab {
   const layers = loadPref<Record<LayerKey, boolean>>('chartLayers', DEFAULT_LAYERS);
   let minConf = loadPrefRaw<number>('chartMinConf', 45);
   const layersBtn = el('button', { text: 'Слои' });
-  const confInput = el('input', { type: 'number', min: '0', max: '100', step: '5', value: String(minConf), title: 'Minimum confidence for markers' });
+  const confInput = el('input', { type: 'number', min: '0', max: '100', step: '5', value: String(minConf), title: 'Минимальный score для меток и уровней' });
   const toolSel = el('select', { 'aria-label': 'Инструмент рисования' });
   for (const [v, l] of [['', 'Рисование: нет'], ['hline', 'Горизонтальный уровень'], ['trend', 'Трендовая линия'], ['fib', 'Фибоначчи: коррекция'], ['fibext', 'Фибоначчи: расширение']]) toolSel.append(el('option', { value: v, text: l }));
   const clearDraw = el('button', { text: 'Удалить рисунки' });
   const fitBtn = el('button', { text: 'Вписать' });
   const liveBtn = el('button', { text: 'LIVE', class: 'on', title: 'К текущему времени' });
+  let maxLevels = loadPrefRaw<number>('chartMaxLevels', 6);
+  const levelsSel = el('select', { 'aria-label': 'Сколько уровней показывать', title: 'Сколько сильнейших уровней показывать (фиолетовые — важные)' });
+  for (const n of [0, 3, 6, 10, 15]) levelsSel.append(el('option', { value: String(n), text: n ? `Уровней: ${n}` : 'Уровни: скрыть' }));
+  levelsSel.value = String(maxLevels);
+  levelsSel.onchange = () => {
+    maxLevels = +levelsSel.value;
+    savePref('chartMaxLevels', maxLevels);
+    refreshOverlays();
+  };
   const barState = el('span', { class: 'badge' });
   const originNote = el('span', { class: 'muted' });
-  root.append(el('div', { class: 'toolbar' }, layersBtn, el('label', {}, 'Мин. score', confInput), toolSel, clearDraw, fitBtn, liveBtn, barState, originNote));
+  root.append(el('div', { class: 'toolbar' }, layersBtn, el('label', {}, 'Мин. score', confInput), levelsSel, toolSel, clearDraw, fitBtn, liveBtn, barState, originNote));
   const fill = el('div', { class: 'fill' });
   const host = el('div', { class: 'chart-host' });
   const legend = el('div', { class: 'legend' });
@@ -299,9 +341,12 @@ export function createChartTab(): Tab {
       lines.set('macdS', chart.addSeries(LineSeries, { color: '#ff9800', lineWidth: 1, priceLineVisible: false, lastValueVisible: false }, p));
     }
     if (layers.atr) lines.set('atr', chart.addSeries(LineSeries, { color: '#90a4ae', lineWidth: 1, priceLineVisible: false, title: 'ATR' }, pane++));
-    // indicator panes smaller than the price pane
+    // price pane keeps most of the height; indicator panes share the rest (~30% in total)
     const panes = chart.panes();
-    for (let i = 1; i < panes.length; i++) panes[i].setHeight(90);
+    if (panes.length > 1) {
+      panes[0].setStretchFactor(7 * (panes.length - 1));
+      for (let i = 1; i < panes.length; i++) panes[i].setStretchFactor(3);
+    }
     chart.subscribeCrosshairMove((param) => {
       if (!param.time || !candleS) return renderLegend(builder.candles.length - 1);
       const t = param.time as number;
@@ -434,45 +479,47 @@ export function createChartTab(): Tab {
     const evs = store.eventList().filter(eventVisible);
     const ms: SeriesMarker<Time>[] = [];
     const zs: Zone[] = [];
-    for (const e of evs.slice(-400)) {
+    for (const e of evs.slice(-150)) {
       const bt = barTime(e.t);
       if (bt === null) continue;
       const color = KIND_COLOR[e.kind];
-      const text = layers.conf ? `${short(e)} ${e.confidence}` : short(e);
-      if ((e.kind === 'absorption' || e.kind === 'cluster' || e.kind === 'vacuum') && e.priceHi !== undefined) {
-        zs.push({ t0: e.t, t1: e.endT ?? (e.kind === 'absorption' ? e.t + 15 * 60_000 : null), lo: e.price, hi: e.priceHi, color, label: layers.conf ? `${e.title} (${e.confidence})` : e.title });
-        continue;
+      if (e.kind === 'absorption' && e.priceHi !== undefined) {
+        zs.push({ t0: e.t, t1: e.endT ?? e.t + 15 * 60_000, lo: e.price, hi: e.priceHi, color, label: '' });
       }
-      if (e.kind === 'large_order') continue; // shown as price lines while active
+      // clusters, vacuums and large levels are drawn as curated lines below, not as markers
+      if (e.kind === 'large_order' || e.kind === 'cluster' || e.kind === 'vacuum') continue;
       const bull = isBullish(e);
-      ms.push({ time: bt as UTCTimestamp, position: 'atPriceMiddle', price: e.price, shape: bull === null ? 'circle' : bull ? 'arrowUp' : 'arrowDown', color, text, id: e.id });
+      // short text only for strong events; the rest are plain glyphs (details on hover / Signals tab)
+      const text = e.confidence >= 80 ? (layers.conf ? `${short(e)} ${e.confidence}` : short(e)) : '';
+      ms.push({ time: bt as UTCTimestamp, position: 'atPriceMiddle', price: e.price, shape: bull === null ? 'circle' : bull ? 'arrowUp' : 'arrowDown', color, text, size: 0.6, id: e.id });
     }
     if (layers.liq) {
       for (const l of store.liqs) {
         const bt = barTime(l.t);
-        if (bt !== null) ms.push({ time: bt as UTCTimestamp, position: 'atPriceMiddle', price: l.price, shape: 'square', color: l.side === 'sell' ? '#ef5350' : '#26a69a', text: `LIQ ${fmtQ(l.qty)}` });
+        if (bt !== null) ms.push({ time: bt as UTCTimestamp, position: 'atPriceMiddle', price: l.price, shape: 'square', color: l.side === 'sell' ? '#ef5350' : '#26a69a', text: '', size: 0.5 });
       }
     }
     ms.sort((a, b) => (a.time as number) - (b.time as number));
     markers.setMarkers(ms);
-    // live clusters as zones
-    if (layers.clusters) {
-      for (const c of store.clusters.list) {
-        if (c.status === 'faded') continue;
-        if (c.confidence < minConf) continue;
-        zs.push({ t0: c.firstSeen, t1: c.status === 'broken' ? c.lastSeen : null, lo: c.lo, hi: c.hi, color: c.side === 'bid' ? '#26a69a' : '#ef5350', label: layers.conf ? `${c.label} (${c.confidence})` : c.label });
-      }
-    }
-    zones.update(zs);
-    // large orders + trading levels as price lines
+    const lv =
+      layers.large || layers.clusters
+        ? selectLevels(
+            {
+              large: layers.large ? store.large.list : [],
+              clusters: layers.clusters ? store.clusters.list : [],
+              events: store.eventList().slice(-300),
+              now: store.now(),
+              minConf,
+            },
+            maxLevels,
+            store.meta?.tickSize ?? 0.01,
+          )
+        : [];
+    zones.update(zs, lv);
     for (const pl of priceLines) candleS.removePriceLine(pl);
     priceLines = [];
-    if (layers.large) {
-      for (const lo of store.large.list) {
-        if ((lo.status !== 'active' && lo.status !== 'partially_filled') || lo.confidence < minConf) continue;
-        priceLines.push(candleS.createPriceLine({ price: lo.price, color: lo.side === 'bid' ? '#26a69a' : '#ef5350', lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: `${lo.side === 'bid' ? 'BID' : 'ASK'} ${fmtQ(lo.size)}${layers.conf ? ' c' + lo.confidence : ''}` }));
-      }
-    }
+    // important levels also get a compact tag on the price axis
+    for (const l of lv) if (l.important) priceLines.push(candleS.createPriceLine({ price: l.price, color: LEVEL_COLORS.important, lineVisible: false, axisLabelVisible: true, title: '' }));
     if (layers.levels) {
       for (const d of drawings) if (d.type === 'hline') priceLines.push(candleS.createPriceLine({ price: d.a.p, color: '#ffd54f', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: 'Уровень' }));
       for (const p of paperOpen.filter((x) => x.key === store.key)) {

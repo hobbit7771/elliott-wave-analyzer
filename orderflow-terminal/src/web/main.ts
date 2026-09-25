@@ -67,7 +67,7 @@ const statusbar = el(
   el('span', {}, 'Задержка ', sb.lat),
   el('span', { class: 'hide-m' }, 'RTT ', sb.rtt),
   el('span', {}, 'Сделок ', sb.trades),
-  el('span', {}, 'Уровней ', sb.depth),
+  el('span', {}, 'Цен в стакане ', sb.depth),
   el('span', { class: 'hide-m' }, 'Разрывы/ресинхр. ', sb.gaps),
   el('span', { class: 'hide-m' }, 'Отброшено ', sb.dropped),
   el('span', { class: 'hide-m' }, 'Источник ', sb.src),

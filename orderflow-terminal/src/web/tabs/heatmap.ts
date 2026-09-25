@@ -2,6 +2,7 @@
 // with executions, adds, cancels, price, events, clusters, vacuums, replay and export.
 import type { Tab } from '../main.js';
 import { store } from '../store.js';
+import { LEVEL_COLORS, labelSlots, selectLevels } from '../levels.js';
 import { api, el, fitCanvas, gestures, Painter, fmtQ, fmtP, fmtTime, fmtDateTime, loadPref, savePref, KIND_COLOR, ownerToken } from '../util.js';
 import type { HeatColumn, MarketEvent } from '../../core/types.js';
 
@@ -31,8 +32,9 @@ interface Prefs {
   events: boolean;
   zones: boolean;
   large: boolean;
+  maxLevels: number;
 }
-const DEF: Prefs = { span: 300_000, depthBuckets: 120, minVol: 0, minConf: 45, contrast: 1, log: false, bids: true, asks: true, trades: true, adds: false, cancels: true, price: 'line', events: true, zones: true, large: true };
+const DEF: Prefs = { span: 300_000, depthBuckets: 120, minVol: 0, minConf: 45, contrast: 1, log: false, bids: true, asks: true, trades: true, adds: false, cancels: false, price: 'line', events: true, zones: true, large: true, maxLevels: 6 };
 
 // colour ramps: cold (weak) -> yellow/orange (elevated) -> red (large ask) / green (large bid)
 function ramp(stops: [number, [number, number, number]][]): Uint8ClampedArray {
@@ -57,13 +59,28 @@ const COLD: [number, [number, number, number]][] = [
   [0.65, [255, 215, 0]],
   [0.8, [255, 140, 0]],
 ];
-const LUT_ASK = ramp([...COLD, [1, [255, 40, 40]]]);
-const LUT_BID = ramp([...COLD, [1, [40, 230, 90]]]);
+// Bookmap-style single intensity palette: deep blue -> cyan -> green -> yellow -> orange -> red -> white
+const LUT = ramp([
+  [0, BG],
+  [0.06, [12, 22, 70]],
+  [0.2, [16, 60, 160]],
+  [0.35, [0, 140, 210]],
+  [0.5, [0, 200, 170]],
+  [0.62, [120, 220, 60]],
+  [0.74, [250, 220, 30]],
+  [0.86, [255, 130, 0]],
+  [0.95, [240, 40, 30]],
+  [1, [255, 245, 235]],
+]);
+void COLD;
+
+const SHORT_LABEL: Partial<Record<string, string>> = { iceberg: 'айсб.?', sweep: 'sweep', stop_run: 'stop', spoofing: 'спуф?', liquidity_pulled: 'снят', volume_burst: 'объём' };
 
 export function createHeatmapTab(): Tab {
   const root = el('section', { id: 'tab-heatmap', role: 'tabpanel' });
-  const p = loadPref<Prefs>('heatPrefs', DEF);
-  const save = () => savePref('heatPrefs', p);
+  // v2: new defaults (no cancel dashes, curated levels); older saved layer choices are not carried over
+  const p = { ...DEF, ...loadPref<Partial<Prefs>>('heatPrefs2', {}) } as Prefs;
+  const save = () => savePref('heatPrefs2', p);
 
   const spanSel = el('select', { 'aria-label': 'Период истории' });
   for (const [l, ms] of SPANS) spanSel.append(el('option', { value: String(ms), text: l }));
@@ -110,7 +127,7 @@ export function createHeatmapTab(): Tab {
     ['cancels', 'Снятие без исполнения (оценка по L2)'],
     ['events', 'Айсберги, sweep, события'],
     ['zones', 'Кластеры, поглощение, вакуум'],
-    ['large', 'Крупные уровни (держится / снят / пробит)'],
+    ['large', 'Сильнейшие уровни (линии; фиолетовые — важные)'],
     ['log', 'Логарифмическая шкала'],
   ];
   for (const [k, l] of toggles) {
@@ -123,6 +140,15 @@ export function createHeatmapTab(): Tab {
     };
     layerPanel.append(el('label', {}, cb, l));
   }
+  const lvSel = el('select', { 'aria-label': 'Сколько уровней показывать' });
+  for (const n of [3, 6, 10, 15]) lvSel.append(el('option', { value: String(n), text: `Уровней: ${n}` }));
+  lvSel.value = String(p.maxLevels);
+  lvSel.onchange = () => {
+    p.maxLevels = +lvSel.value;
+    save();
+    painter.mark();
+  };
+  layerPanel.append(el('label', {}, lvSel));
   const priceSel = el('select');
   for (const v of ['line', 'candles', 'none']) priceSel.append(el('option', { value: v, text: 'Цена: ' + ({ line: 'линия', candles: 'свечи', none: 'нет' } as Record<string, string>)[v] }));
   priceSel.value = p.price;
@@ -139,7 +165,6 @@ export function createHeatmapTab(): Tab {
   let paused = false;
   let viewEnd = 0; // when not live
   let centerPrice = NaN; // NaN => auto-center on price
-  let pxPerBucket = 0; // derived from depth
   let replay: { cols: HeatColumn[]; events: MarketEvent[]; from: number; to: number; cursor: number; speed: number; lastWall: number } | null = null;
   let frozen: { end: number } | null = null;
   let fetchKey = '';
@@ -166,14 +191,19 @@ export function createHeatmapTab(): Tab {
   function findCol(cs: HeatColumn[], t: number): HeatColumn | null {
     let lo = 0;
     let hi = cs.length - 1;
-    if (hi < 0 || t > cs[hi].t + 250 || t < cs[0].t - cs[0].dt) return null;
+    if (hi < 0 || t < cs[0].t - cs[0].dt) return null;
+    const last = cs[hi];
+    if (t > last.t) return t <= last.t + Math.max(1500, last.dt) ? last : null;
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
       if (cs[mid].t < t) lo = mid + 1;
       else hi = mid;
     }
     const c = cs[lo];
-    return c.t - c.dt - 250 <= t ? c : null;
+    if (c.t - c.dt - 250 <= t) return c;
+    // between two columns: hold the previous one if the hole is shorter than two intervals (not a data gap)
+    const prev = lo > 0 ? cs[lo - 1] : null;
+    return prev && t - prev.t <= 2 * Math.max(prev.dt, 1000) ? prev : null;
   }
 
   function draw(): void {
@@ -194,7 +224,7 @@ export function createHeatmapTab(): Tab {
     if (isFinite(lp0) && (!isFinite(centerPrice) || (live && Math.abs(lp0 - centerPrice) > half * 0.6))) centerPrice = lp0;
     const pHi = centerPrice + half;
     const pLo = centerPrice - half;
-    pxPerBucket = H / p.depthBuckets;
+
     empty.textContent = cs.length ? '' : store.status?.synced ? 'Идёт запись снимков стакана… первая колонка появится в течение секунды.' : 'Ожидание синхронизированного стакана (heatmap строится только из реальных снимков локального стакана).';
     if (!cs.length || !isFinite(centerPrice)) return;
     const yOf = (price: number) => ((pHi - price) / (pHi - pLo)) * H;
@@ -247,9 +277,9 @@ export function createHeatmapTab(): Tab {
         }
         const q = Math.max(bq, aq);
         if (q <= 0 || q < p.minVol) continue;
-        const v = p.log ? Math.log1p(q) / lnorm : q / norm;
+        const v = p.log ? Math.log1p(q) / lnorm : Math.pow(Math.min(1, q / norm), 0.85);
         const i = Math.min(255, Math.max(0, Math.round(v * 255))) * 3;
-        const lut = bq >= aq ? LUT_BID : LUT_ASK;
+        const lut = LUT;
         px[o] = lut[i];
         px[o + 1] = lut[i + 1];
         px[o + 2] = lut[i + 2];
@@ -289,13 +319,12 @@ export function createHeatmapTab(): Tab {
             const tot = bv + sv;
             const y = yOf(c.p0 + (i + 0.5) * c.step);
             if (y < -10 || y > H + 10) continue;
-            const r = 2 + 12 * Math.sqrt(tot / maxExec);
+            if (tot < maxExec * 0.12) continue; // small prints stay in the tape / footprint
+            const r = 2 + 7 * Math.sqrt(tot / maxExec);
             ctx.beginPath();
             ctx.arc(x - cw / 2, y, r, 0, Math.PI * 2);
-            ctx.fillStyle = bv >= sv ? 'rgba(38,166,154,0.55)' : 'rgba(239,83,80,0.55)';
+            ctx.fillStyle = bv >= sv ? 'rgba(80,220,200,0.38)' : 'rgba(255,90,90,0.38)';
             ctx.fill();
-            ctx.strokeStyle = bv >= sv ? '#26a69a' : '#ef5350';
-            ctx.stroke();
           }
       }
     }
@@ -350,99 +379,87 @@ export function createHeatmapTab(): Tab {
       }
     }
 
-    // zones: clusters, absorption, vacuum
+    // zones: faint absorption fill and dashed vacuum outline, no text (details in the tooltip / Signals)
     const events = replay ? replay.events.filter((e) => e.t <= replay!.cursor) : store.eventList();
-    ctx.font = '10px sans-serif';
     if (p.zones) {
-      const zoneEvents = events.filter((e) => (e.kind === 'absorption' || e.kind === 'cluster' || e.kind === 'vacuum') && e.priceHi !== undefined && e.confidence >= p.minConf);
-      for (const e of zoneEvents) {
+      for (const e of events) {
+        if ((e.kind !== 'absorption' && e.kind !== 'vacuum') || e.priceHi === undefined || e.confidence < p.minConf) continue;
         const x0 = Math.max(0, xOf(e.t));
-        const x1 = Math.min(W, xOf(e.endT ?? (e.kind === 'absorption' ? e.t + 5 * 60_000 : e.kind === 'vacuum' ? e.t + 30_000 : t1)));
+        const x1 = Math.min(W, xOf(e.endT ?? (e.kind === 'absorption' ? e.t + 5 * 60_000 : e.t + 30_000)));
         if (x1 < 0 || x0 > W) continue;
-        const y0 = yOf(e.priceHi!);
+        const y0 = yOf(e.priceHi);
         const y1 = yOf(e.price);
-        const color = e.kind === 'cluster' ? (e.status === 'broken' ? '#bdbdbd' : e.side === 'bid' ? '#26a69a' : '#ef5350') : KIND_COLOR[e.kind];
-        ctx.strokeStyle = color;
-        ctx.fillStyle = color + (e.kind === 'vacuum' ? '18' : '26');
-        ctx.fillRect(x0, y0, x1 - x0, Math.max(2, y1 - y0));
-        ctx.setLineDash(e.kind === 'vacuum' ? [3, 3] : []);
-        ctx.strokeRect(x0 + 0.5, y0 + 0.5, x1 - x0, Math.max(2, y1 - y0));
-        ctx.setLineDash([]);
-        ctx.fillStyle = color;
-        ctx.fillText(`${e.title} ${e.confidence}`, x0 + 3, y0 - 2);
-      }
-      if (!replay) {
-        for (const c of store.clusters.list) {
-          if (c.confidence < p.minConf || c.status === 'faded') continue;
-          const x0 = Math.max(0, xOf(c.firstSeen));
-          const x1 = Math.min(W, xOf(c.status === 'broken' ? c.lastSeen : t1));
-          const y0 = yOf(c.hi);
-          const y1 = yOf(c.lo);
-          ctx.strokeStyle = c.status === 'broken' ? '#bdbdbd' : c.side === 'bid' ? '#26a69a' : '#ef5350';
+        if (e.kind === 'absorption') {
+          ctx.fillStyle = KIND_COLOR.absorption + '22';
+          ctx.fillRect(x0, y0, x1 - x0, Math.max(2, y1 - y0));
+        } else {
+          ctx.strokeStyle = 'rgba(200,200,200,0.35)';
+          ctx.setLineDash([3, 3]);
           ctx.strokeRect(x0 + 0.5, y0 + 0.5, x1 - x0, Math.max(2, y1 - y0));
-          ctx.fillStyle = ctx.strokeStyle;
-          ctx.fillText(`${c.label} ${c.confidence}`, x0 + 3, y1 + 10);
+          ctx.setLineDash([]);
         }
       }
     }
-    // large orders lifetime lines: held vs pulled / broken / filled
-    if (p.large && !replay) {
-      for (const lo of store.large.list) {
-        if (lo.confidence < p.minConf) continue;
-        const y = yOf(lo.price);
-        if (y < 0 || y > H) continue;
-        const x0 = Math.max(0, xOf(lo.firstSeen));
-        const x1 = Math.min(W, xOf(lo.lastSeen));
-        const held = lo.status === 'active' || lo.status === 'partially_filled';
-        ctx.strokeStyle = held ? (lo.side === 'bid' ? '#69f0ae' : '#ff8a80') : '#bdbdbd';
-        ctx.lineWidth = 2;
-        ctx.setLineDash(held ? [] : [4, 3]);
+    // curated levels: thin lines, small labels on the right, important ones purple
+    if (p.large && !replay && p.maxLevels > 0) {
+      const lv = selectLevels({ large: store.large.list, clusters: p.zones ? store.clusters.list : [], events: events.slice(-300), now: store.now(), minConf: p.minConf }, p.maxLevels, store.meta?.tickSize ?? 0.01);
+      const items = lv.map((l) => ({ l, y: Math.round(yOf(l.price)) + 0.5 })).filter((it) => it.y >= 0 && it.y <= H);
+      for (const it of [...items].sort((a, b) => Number(a.l.important) - Number(b.l.important))) {
+        ctx.strokeStyle = it.l.important ? LEVEL_COLORS.important : 'rgba(255,255,255,0.55)';
+        ctx.lineWidth = it.l.important ? 1.5 : 1;
+        ctx.setLineDash(it.l.important ? [] : [4, 3]);
         ctx.beginPath();
-        ctx.moveTo(x0, y);
-        ctx.lineTo(x1, y);
+        ctx.moveTo(Math.max(0, xOf(it.l.t0)), it.y);
+        ctx.lineTo(W, it.y);
         ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.lineWidth = 1;
-        ctx.fillStyle = ctx.strokeStyle;
-        const label = held ? 'Держится' : lo.status === 'broken' ? 'Пробит' : lo.status === 'pulled' ? 'Снят' : 'Исполнен';
-        ctx.fillText(`${label} ${fmtQ(lo.peak)} c${lo.confidence}`, Math.min(x1 + 3, W - 90), y - 3);
+      }
+      ctx.setLineDash([]);
+      ctx.lineWidth = 1;
+      ctx.font = '9px system-ui, sans-serif';
+      for (const it of labelSlots([...items].sort((a, b) => Number(b.l.important) - Number(a.l.important)), 10)) {
+        const w = ctx.measureText(it.l.label).width;
+        ctx.fillStyle = 'rgba(11,14,20,0.75)';
+        ctx.fillRect(W - w - 6, it.y - 10, w + 4, 10);
+        ctx.fillStyle = it.l.important ? LEVEL_COLORS.important : '#e6e6e6';
+        ctx.fillText(it.l.label, W - w - 4, it.y - 2);
       }
     }
-    // point events
+    // point events: small glyphs; a short label only for strong events and only where it does not overlap
     if (p.events) {
+      ctx.font = '9px system-ui, sans-serif';
+      const labels: { y: number; x: number; text: string; color: string }[] = [];
       for (const e of events) {
         if (e.confidence < p.minConf) continue;
-        if (!['iceberg', 'sweep', 'stop_run', 'spoofing', 'liquidity_pulled', 'volume_burst', 'imbalance', 'delta_divergence'].includes(e.kind)) continue;
+        if (!['iceberg', 'sweep', 'stop_run', 'spoofing', 'liquidity_pulled', 'volume_burst'].includes(e.kind)) continue;
         const x = xOf(e.t);
         const y = yOf(e.price);
         if (x < 0 || x > W || y < 0 || y > H) continue;
         const color = KIND_COLOR[e.kind];
-        ctx.strokeStyle = color;
         ctx.fillStyle = color;
-        if (e.kind === 'iceberg') {
-          const x1 = Math.min(W, xOf(e.endT ?? t1));
-          ctx.globalAlpha = 0.35;
-          ctx.fillRect(x, y - pxPerBucket / 2, Math.max(2, x1 - x), Math.max(2, pxPerBucket));
-          ctx.globalAlpha = 1;
-          ctx.beginPath();
-          ctx.arc(x, y, 6, 0, Math.PI * 2);
-          ctx.lineWidth = 2;
-          ctx.stroke();
-          ctx.lineWidth = 1;
-          ctx.fillText(`Предп. айсберг ${e.confidence}`, x + 8, y - 6);
-        } else if (e.kind === 'sweep' || e.kind === 'stop_run') {
+        ctx.strokeStyle = color;
+        if (e.kind === 'sweep' || e.kind === 'stop_run') {
           const up = e.side === 'buy';
           ctx.beginPath();
           ctx.moveTo(x, y);
-          ctx.lineTo(x - 5, y + (up ? 9 : -9));
-          ctx.lineTo(x + 5, y + (up ? 9 : -9));
+          ctx.lineTo(x - 3.5, y + (up ? 6 : -6));
+          ctx.lineTo(x + 3.5, y + (up ? 6 : -6));
           ctx.closePath();
           ctx.fill();
-          ctx.fillText(`${e.kind === 'sweep' ? 'Sweep' : 'Stop run'} ${e.confidence}`, x + 7, y + (up ? 12 : -4));
+        } else if (e.kind === 'iceberg') {
+          ctx.beginPath();
+          ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+          ctx.lineWidth = 1;
         } else {
-          ctx.fillRect(x - 3, y - 3, 6, 6);
-          ctx.fillText(`${e.title.split(' (')[0]} ${e.confidence}`, x + 5, y - 4);
+          ctx.fillRect(x - 2, y - 2, 4, 4);
         }
+        if (e.confidence >= 85) labels.push({ y, x, text: SHORT_LABEL[e.kind] ?? '', color });
+      }
+      for (const l of labelSlots(labels.reverse().slice(0, 12), 11)) {
+        if (!l.text) continue;
+        ctx.fillStyle = l.color;
+        ctx.fillText(l.text, Math.min(l.x + 5, W - 40), l.y - 4);
       }
     }
 
@@ -476,7 +493,7 @@ export function createHeatmapTab(): Tab {
       const price = pLo + ((pHi - pLo) * i) / ticks;
       const y = yOf(price);
       ctx.fillText(fmtP(price, dec()), W + 4, Math.min(H - 2, Math.max(10, y + 3)));
-      ctx.fillStyle = '#1b2230';
+      ctx.fillStyle = 'rgba(255,255,255,0.06)';
       ctx.fillRect(0, y, W, 1);
       ctx.fillStyle = '#aab2c5';
     }
