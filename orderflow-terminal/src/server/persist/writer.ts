@@ -9,7 +9,7 @@ import { backoffDelay } from '../ingestion/wsClient.js';
 import type { ArchiveClient } from './archive.js';
 import type { GapRow, Repo } from './repo.js';
 
-export const ALGO_VERSION = 'oft-detectors-3';
+export const ALGO_VERSION = 'oft-detectors-4';
 
 export interface PersistStatus {
   enabled: boolean;

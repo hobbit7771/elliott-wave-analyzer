@@ -18,16 +18,16 @@ describe('Large limit order detector (dynamic threshold)', () => {
     expect(thr.bid).toBeGreaterThanOrEqual(5);
     expect(thr.bid).toBeLessThan(10);
     h.sim.set('bid', 99.5, 30);
-    h.idle(2000);
+    h.idle(8000);
     expect(h.events.filter((e) => e.kind === 'large_order')).toHaveLength(0); // not held long enough yet
-    h.idle(2000);
+    h.idle(3000);
     const ev = h.events.filter((e) => e.kind === 'large_order');
     expect(ev).toHaveLength(1);
     expect(ev[0]).toMatchObject({ side: 'bid', price: 99.5, title: 'Крупный уровень видимой ликвидности' });
     expect(ev[0].explain).toMatch(/Порог/);
     const lo = h.engine.large.list(h.sim.t).find((x) => x.price === 99.5)!;
     expect(lo).toMatchObject({ side: 'bid', size: 30, status: 'active', executed: 0, cancelled: 0, source: 'binance-futures' });
-    expect(lo.holdMs).toBeGreaterThanOrEqual(3000);
+    expect(lo.holdMs).toBeGreaterThanOrEqual(10_000);
     expect(lo.confidence).toBeGreaterThan(0);
   });
 
@@ -35,7 +35,7 @@ describe('Large limit order detector (dynamic threshold)', () => {
     const h = harness();
     h.idle(25_000);
     h.sim.set('ask', 100.2, 40); // 0.15% from mid
-    h.idle(4000);
+    h.idle(11_000);
     h.sim.set('ask', 100.2, 0);
     h.idle(1000);
     const lo = h.engine.large.list(h.sim.t).find((x) => x.price === 100.2)!;
@@ -48,7 +48,7 @@ describe('Large limit order detector (dynamic threshold)', () => {
     const h = harness();
     h.idle(25_000);
     h.sim.set('ask', 100.6, 40); // 0.55% from mid
-    h.idle(4000);
+    h.idle(11_000);
     h.sim.set('ask', 100.6, 0);
     h.idle(1000);
     expect(h.engine.large.list(h.sim.t).find((x) => x.price === 100.6)?.status).toBe('pulled');
@@ -89,7 +89,7 @@ describe('Large limit order detector (dynamic threshold)', () => {
     const h = harness();
     h.idle(25_000);
     h.sim.set('bid', 100.0, 20);
-    h.idle(4000);
+    h.idle(11_000);
     for (let i = 0; i < 20; i++) h.step([[100.0, 1, -1]], 100);
     h.idle(1000);
     expect(h.events.some((e) => e.kind === 'spoofing')).toBe(false);

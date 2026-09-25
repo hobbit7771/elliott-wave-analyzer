@@ -44,6 +44,7 @@ export function bucketize(ctx: DetectorContext): { bid: BucketProfile; ask: Buck
 export class ClusterDetector {
   private tracks: ClusterTrack[] = [];
   private seq = 0;
+  private rank = new Map<ClusterTrack, number>();
   private lastVacuum: { t: number; lo: number; hi: number; side: BookSide }[] = [];
   vacuums: { side: BookSide; lo: number; hi: number; t: number }[] = [];
 
@@ -151,6 +152,14 @@ export class ClusterDetector {
         });
       }
     }
+    // rank live zones per side by visible volume: only the largest ones are announced
+    this.rank.clear();
+    for (const side of ['bid', 'ask'] as const) {
+      this.tracks
+        .filter((t) => t.side === side && t.status !== 'broken' && t.status !== 'faded')
+        .sort((a, b) => b.total - a.total)
+        .forEach((t, i) => this.rank.set(t, i));
+    }
     const keep: ClusterTrack[] = [];
     for (const t of this.tracks) {
       if (t.status !== 'broken' && t.missing > 3) {
@@ -179,7 +188,8 @@ export class ClusterDetector {
     t.confidence = Math.round(100 * clamp01(0.3 + 0.3 * clamp01(age / (6 * cc.minHoldMs)) + 0.2 * clamp01(t.levels / (3 * cc.minBuckets)) + 0.2 * clamp01(t.executed / Math.max(t.initialTotal, 1e-12))));
     // do not announce a zone overlapping one already announced on this side in the last 5 minutes
     const dup = () => this.tracks.some((o) => o !== t && o.announced && o.side === t.side && t.lo <= o.hi && t.hi >= o.lo && now - o.lastSeen < 300_000);
-    if (!t.announced && age >= cc.minHoldMs && t.status !== 'faded' && t.status !== 'broken' && !dup()) {
+    const top = (this.rank.get(t) ?? Infinity) < cc.topPerSide;
+    if (!t.announced && age >= cc.minHoldMs && top && t.status !== 'faded' && t.status !== 'broken' && !dup()) {
       t.announced = true;
       t.lastStatus = t.status;
       this.emitCluster(t, now, 'formed');
@@ -246,7 +256,7 @@ export class ClusterDetector {
     this.vacuums.push({ side, lo, hi, t: now });
     const vc = this.ctx.cfg.vacuum;
     this.lastVacuum = this.lastVacuum.filter((v) => now - v.t < vc.cooldownMs);
-    if (this.lastVacuum.some((v) => v.side === side && lo <= v.hi && hi >= v.lo)) return;
+    if (this.lastVacuum.some((v) => v.side === side)) return; // at most one per side per cooldown
     this.lastVacuum.push({ t: now, lo, hi, side });
     const widthBuckets = Math.round((hi - lo) / this.ctx.zoneStep);
     const conf = Math.round(100 * clamp01(0.35 + 0.65 * clamp01(widthBuckets / (4 * vc.minBuckets))));

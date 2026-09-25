@@ -1,4 +1,5 @@
 import { harness } from './fixtures/sim.js';
+import { DEFAULT_DETECTOR_CONFIG } from '../src/core/detectors/config.js';
 
 /** light two-sided baseline flow that does not move the book */
 function baseline(h: ReturnType<typeof harness>, ms: number) {
@@ -44,6 +45,17 @@ describe('Liquidity cluster detector', () => {
     h.idle(35_000);
     const ids = new Set(h.events.filter((e) => e.kind === 'cluster').map((e) => e.id));
     expect(ids.size).toBe(1);
+  });
+
+  it('announces only the largest zones per side', () => {
+    // ±3% window: enough ordinary buckets that two elevated zones do not move the median
+    const h = harness({ ...DEFAULT_DETECTOR_CONFIG, rangePct: 0.03, cluster: { ...DEFAULT_DETECTOR_CONFIG.cluster, topPerSide: 1 } });
+    for (const p of [99.9, 99.8, 99.7]) h.sim.set('bid', p, 20);
+    for (const p of [99.4, 99.3, 99.2]) h.sim.set('bid', p, 40);
+    h.idle(32_000);
+    const c = h.events.filter((e) => e.kind === 'cluster');
+    expect(c).toHaveLength(1);
+    expect(c[0].price).toBe(99.2);
   });
 
   it('ignores ordinary uniform depth', () => {
