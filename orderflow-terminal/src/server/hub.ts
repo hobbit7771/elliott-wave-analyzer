@@ -42,6 +42,8 @@ interface Live {
   startedAt: number;
   msgs: number;
   lastUsed: number;
+  /** V8 heap of the ingestion worker (MB), reported every 30 s */
+  heapMb?: number;
 }
 
 const CACHED = new Set(['book', 'status', 'large', 'clusters', 'ice', 'deriv']);
@@ -102,11 +104,14 @@ export class Hub {
     const worker = new Worker(this.o.workerPath, {
       workerData: { meta, cfg: this.config(key), dbPath: this.o.dbPath, backfillMinutes: this.o.backfillMinutes },
       execArgv: ['--disable-warning=ExperimentalWarning'],
+      // a runaway worker is stopped (and restarted) instead of pushing the container over its RAM limit
+      resourceLimits: { maxOldGenerationSizeMb: +(process.env.WORKER_HEAP_MB ?? 128) },
     });
     const live: Live = { key, meta, worker, subs: new Set(), last: new Map(), recentTrades: [], idleSince: Date.now(), startedAt: Date.now(), msgs: 0, lastUsed: Date.now() };
     worker.on('message', (m: { op: string; ch?: string; s?: string; m?: string }) => {
       if (m.op === 'pub' && m.ch && m.s) this.onPub(live, m.ch, m.s);
       else if (m.op === 'log' && m.m) this.o.log(m.m);
+      else if (m.op === 'mem') live.heapMb = (m as unknown as { heapMb: number }).heapMb;
     });
     worker.on('error', (e) => this.o.log(`[${key}] worker error: ${e.stack ?? e.message}`));
     worker.on('exit', (code) => {

@@ -2,7 +2,7 @@
 // server-side paper trading and alerts, retention / quota guard, diagnostics.
 import http from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync, statfsSync } from 'node:fs';
 import { extname, join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
@@ -542,6 +542,7 @@ async function api(req: http.IncomingMessage, res: http.ServerResponse, u: URL):
   if (p === '/api/diag' || p === '/api/perf') {
     const mem = process.memoryUsage();
     return json(res, 200, {
+      memory: memReport(),
       at: new Date().toISOString(),
       uptimeSec: Math.round(process.uptime()),
       node: process.version,
@@ -604,6 +605,37 @@ async function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, 
   res.writeHead(200, headers);
   res.end(await readFile(file));
 }
+
+// memory evidence for the 512 MB free instance: process RSS, main heap, each worker heap, local cache
+// file size, and whether the cache directory is RAM-backed (tmpfs files count against container memory)
+function memReport(): Record<string, unknown> {
+  const m = process.memoryUsage();
+  let cacheBytes = 0;
+  for (const f of [DB_PATH, DB_PATH + '-wal']) {
+    try {
+      cacheBytes += statSync(f).size;
+    } catch {
+      /* not there */
+    }
+  }
+  let tmpfs: boolean | null = null;
+  try {
+    tmpfs = Number(statfsSync(dirname(DB_PATH)).type) === 0x01021994;
+  } catch {
+    tmpfs = null;
+  }
+  const mb = (b: number) => Math.round(b / 1048576);
+  return {
+    rssMb: mb(m.rss),
+    mainHeapMb: mb(m.heapUsed),
+    externalMb: mb(m.external),
+    workersHeapMb: Object.fromEntries([...hub.sessions.values()].map((l) => [l.key, l.heapMb ?? null])),
+    cacheMb: mb(cacheBytes),
+    cacheOnTmpfs: tmpfs,
+    cachePath: DB_PATH,
+  };
+}
+setInterval(() => log('OFT_MEM ' + JSON.stringify(memReport())), 60_000).unref();
 
 const server = http.createServer((req, res) => {
   const u = new URL(req.url ?? '/', 'http://localhost');

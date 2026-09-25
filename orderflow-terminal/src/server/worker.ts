@@ -1,4 +1,5 @@
 // Ingestion worker thread: one per live instrument. Keeps WebSocket parsing, book reconstruction,
+import { getHeapStatistics } from 'node:v8';
 // detectors, local SQLite cache and Supabase writes off the main (HTTP/WebSocket-serving) thread.
 import { parentPort, workerData } from 'node:worker_threads';
 import type { InstrumentMeta } from '../core/types.js';
@@ -53,6 +54,9 @@ const session = new Session(init.meta, adapter, init.cfg, {
   // serialize once here; the main thread fans the string out to all subscribers unchanged
   publish: (ch, d) => port.postMessage({ op: 'pub', ch, s: JSON.stringify({ ch, k: key, d }) }),
 });
+
+// report this isolate's heap so the main thread can log memory per instrument
+setInterval(() => port.postMessage({ op: 'mem', heapMb: Math.round(getHeapStatistics().used_heap_size / 1048576) }), 30_000).unref();
 
 port.on('message', async (msg: { op: string; cfg?: DetectorConfig; policy?: { archive: boolean; heat10: boolean } }) => {
   if (msg.op === 'config' && msg.cfg) session.setConfig(msg.cfg);

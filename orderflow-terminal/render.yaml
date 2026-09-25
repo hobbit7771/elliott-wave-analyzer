@@ -20,7 +20,7 @@ services:
       - key: NODE_OPTIONS
         value: --max-old-space-size=384
       - key: DB_PATH
-        value: /tmp/orderflow.sqlite
+        value: data/orderflow.sqlite
       - key: MAX_SESSIONS
         value: "2"
       - key: DEFAULT_SYMBOLS

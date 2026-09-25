@@ -21,10 +21,10 @@ export interface Retention {
 }
 
 export const DEFAULT_RETENTION: Retention = {
-  heatRawMs: +(process.env.HEAT_RAW_RETENTION_MS ?? 2 * 3600_000),
-  heat10Ms: +(process.env.HEAT_10S_RETENTION_MS ?? 24 * 3600_000),
-  heat60Ms: +(process.env.HEAT_60S_RETENTION_MS ?? 7 * 24 * 3600_000),
-  tradesMs: +(process.env.TRADES_RETENTION_MS ?? 6 * 3600_000),
+  heatRawMs: +(process.env.HEAT_RAW_RETENTION_MS ?? 45 * 60_000),
+  heat10Ms: +(process.env.HEAT_10S_RETENTION_MS ?? 6 * 3600_000),
+  heat60Ms: +(process.env.HEAT_60S_RETENTION_MS ?? 2 * 24 * 3600_000),
+  tradesMs: +(process.env.TRADES_RETENTION_MS ?? 2 * 3600_000),
   eventsMs: 7 * 24 * 3600_000,
 };
 
