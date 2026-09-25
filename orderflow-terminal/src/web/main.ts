@@ -119,10 +119,11 @@ worker.onmessage = (e: MessageEvent) => {
       case 'net': {
         const prev = store.net.state;
         store.net.state = (m.d as { state: string }).state;
+        if (store.net.state === 'open' && prev !== 'open') void checkBuild();
         if (prev === 'open' && store.net.state !== 'open') {
           // the browser lost its connection to the server: raise it through the alert rules like any feed event
           const t = Date.now();
-          alerts.onEvent({ id: `client-net-${t}`, t, kind: 'feed', title: 'Order-book disconnect (browser ↔ server) — reconnecting', price: store.lastTrade?.price ?? NaN, confidence: 100, explain: 'The live connection to the OrderFlow server dropped; data shown is frozen until it reconnects.', source: store.source, symbol: store.symbol }, true);
+          alerts.onEvent({ id: `client-net-${t}`, t, kind: 'feed', title: 'Связь браузера с сервером потеряна — переподключение', price: store.lastTrade?.price ?? NaN, confidence: 100, explain: 'Соединение с сервером OrderFlow прервалось; данные на экране заморожены до переподключения.', source: store.source, symbol: store.symbol }, true);
         }
         touched.add('net');
         break;
@@ -362,3 +363,22 @@ setTf(loadPrefRaw<Timeframe>('tf', '1m'));
 activate((location.hash.slice(1) || loadPrefRaw('tab', 'chart')) as string);
 void loadInstruments().then(() => selectSymbol(inst.source, inst.symbol));
 if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/sw.js').catch(() => {});
+
+// ---------- new deploy -> reload the tab (an open page must not keep running an old UI) ----------
+let knownBuild = '';
+async function checkBuild(): Promise<void> {
+  try {
+    const h = (await (await fetch('/api/health', { cache: 'no-store' })).json()) as { build?: string };
+    if (!h.build) return;
+    if (!knownBuild) knownBuild = h.build;
+    else if (h.build !== knownBuild) {
+      noteBar.textContent = 'На сервере новая версия — обновляю страницу…';
+      noteBar.style.display = '';
+      setTimeout(() => location.reload(), 1500);
+    }
+  } catch {
+    /* server unreachable: the reconnect will check again */
+  }
+}
+void checkBuild();
+setInterval(() => void checkBuild(), 5 * 60_000);

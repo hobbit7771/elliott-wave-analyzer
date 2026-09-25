@@ -129,6 +129,7 @@ class ZonesPrimitive implements ISeriesPrimitive<Time> {
             const p = self.p;
             if (!p) return;
             target.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
+              try {
               const ts = p.chart.timeScale();
               const xAt = (ms: number | null, dflt: number) => {
                 if (ms === null) return dflt;
@@ -175,6 +176,9 @@ class ZonesPrimitive implements ISeriesPrimitive<Time> {
                 const w = ctx.measureText(txt).width;
                 ctx.fillStyle = it.l.important ? LEVEL_COLORS.important : LEVEL_COLORS[it.l.side];
                 ctx.fillText(txt, mediaSize.width - w - 4, it.y - 2);
+              }
+              } catch {
+                /* series not ready (data being replaced): skip this frame */
               }
             });
           },
@@ -475,6 +479,22 @@ export function createChartTab(): Tab {
   }
 
   function refreshOverlays(): void {
+    try {
+      refreshOverlaysUnsafe();
+    } catch (e) {
+      // lightweight-charts throws while a series is being rebuilt; retry on the next tick instead of failing the page
+      console.warn('overlay refresh skipped:', (e as Error).message);
+      setTimeout(() => {
+        try {
+          refreshOverlaysUnsafe();
+        } catch {
+          /* next store update will redraw */
+        }
+      }, 300);
+    }
+  }
+
+  function refreshOverlaysUnsafe(): void {
     if (!candleS || !markers || !zones) return;
     const evs = store.eventList().filter(eventVisible);
     const ms: SeriesMarker<Time>[] = [];

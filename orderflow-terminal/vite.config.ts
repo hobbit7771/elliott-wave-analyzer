@@ -4,6 +4,7 @@ export default defineConfig({
   root: 'src/web',
   publicDir: 'public',
   build: {
+    sourcemap: true,
     outDir: '../../dist/web',
     emptyOutDir: true,
     target: 'es2022',

@@ -77,6 +77,7 @@ export class DrawingsPrimitive implements ISeriesPrimitive<Time> {
             const p = self.p;
             if (!p) return;
             target.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
+              try {
               const ts = p.chart.timeScale();
               const x = (ms: number): number | null => {
                 const t = self.toTime(ms);
@@ -123,6 +124,9 @@ export class DrawingsPrimitive implements ISeriesPrimitive<Time> {
                   ctx.arc(xa, ya, 4, 0, Math.PI * 2);
                   ctx.fill();
                 }
+              }
+              } catch {
+                /* series not ready (data being replaced): skip this frame */
               }
             });
           },

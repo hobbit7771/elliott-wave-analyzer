@@ -140,12 +140,14 @@ async function initSupabase(attempt = 0): Promise<void> {
     retention = new RetentionService(r, archive, policyFromEnv(), log, (p) => hub.toWorkers({ op: 'policy', policy: p }));
     setTimeout(() => void retention?.run(), 60_000);
     setInterval(() => void retention?.run(), 10 * 60_000);
-    setInterval(() => {
+    const verifyAll = () => {
       for (const k of hub.pinned) {
         const [src, sym] = k.split(':');
         void retention?.verifyArchive(src, sym, src === 'binance-futures');
       }
-    }, 15 * 60_000);
+    };
+    setTimeout(verifyAll, 11 * 60_000); // two consecutive 5-min blocks exist by then
+    setInterval(verifyAll, 15 * 60_000);
     let list = await r.recordList();
     if (!list.length) {
       for (const k of (process.env.DEFAULT_SYMBOLS ?? 'binance-futures:BTCUSDT,binance-futures:ETHUSDT').split(',').map((s) => s.trim()).filter(Boolean)) {
@@ -315,7 +317,7 @@ async function tradesHistory(source: string, symbol: string, key: string, from: 
 async function api(req: http.IncomingMessage, res: http.ServerResponse, u: URL): Promise<void> {
   const p = u.pathname;
   const m = req.method ?? 'GET';
-  if (p === '/api/health') return json(res, 200, { ok: true, t: Date.now(), sessions: hub.sessions.size, supabase: supabaseState.connected });
+  if (p === '/api/health') return json(res, 200, { ok: true, t: Date.now(), build: BUILD, sessions: hub.sessions.size, supabase: supabaseState.connected });
   if (p === '/api/sources') {
     return json(res, 200, {
       available: SOURCES.map((id) => {
@@ -636,6 +638,9 @@ function memReport(): Record<string, unknown> {
   };
 }
 setInterval(() => log('OFT_MEM ' + JSON.stringify(memReport())), 60_000).unref();
+
+// build id: lets open browser tabs notice a new deploy and reload instead of running an old UI
+const BUILD = (process.env.RENDER_GIT_COMMIT ?? '').slice(0, 12) || String(Date.now());
 
 const server = http.createServer((req, res) => {
   const u = new URL(req.url ?? '/', 'http://localhost');

@@ -17,6 +17,9 @@ services:
         value: production
       - key: NODE_VERSION
         value: "22.22.0"
+      # fewer glibc malloc arenas: worker threads otherwise fragment native memory and RSS creeps up
+      - key: MALLOC_ARENA_MAX
+        value: "2"
       - key: NODE_OPTIONS
         value: --max-old-space-size=384
       - key: DB_PATH
