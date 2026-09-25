@@ -28,7 +28,7 @@ beforeAll(async () => {
       PORT: String(PORT),
       DB_PATH: `/tmp/oft-e2e-${PORT}.sqlite`,
       BINANCE_FUTURES_REST: venue.url,
-      BINANCE_FUTURES_WS: venue.wsUrl,
+      BINANCE_FUTURES_WS_BASE: venue.wsUrl,
       DEFAULT_SYMBOLS: 'binance-futures:TESTUSDT',
       BACKFILL_MINUTES: '1',
     },

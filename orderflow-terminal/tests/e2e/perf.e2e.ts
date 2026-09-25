@@ -9,7 +9,7 @@ it('keeps event-loop lag and memory low while ingesting, recording and fanning o
   rmSync(`/tmp/oft-perf-${port}.sqlite`, { force: true });
   const v = await startTestVenue();
   const s = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'dist/server/index.js'], {
-    env: { ...process.env, PORT: String(port), DB_PATH: `/tmp/oft-perf-${port}.sqlite`, BINANCE_FUTURES_REST: v.url, BINANCE_FUTURES_WS: v.wsUrl, DEFAULT_SYMBOLS: 'binance-futures:TESTUSDT', BACKFILL_MINUTES: '1' },
+    env: { ...process.env, PORT: String(port), DB_PATH: `/tmp/oft-perf-${port}.sqlite`, BINANCE_FUTURES_REST: v.url, BINANCE_FUTURES_WS_BASE: v.wsUrl, DEFAULT_SYMBOLS: 'binance-futures:TESTUSDT', BACKFILL_MINUTES: '1' },
   });
   await new Promise((r) => setTimeout(r, 1500));
   // three clients subscribed to the live stream

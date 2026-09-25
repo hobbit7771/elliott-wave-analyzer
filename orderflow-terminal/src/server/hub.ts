@@ -15,6 +15,12 @@ export interface HubOptions {
   backfillMinutes: number;
   reader: HistoryReader;
   log: (m: string) => void;
+  /** observe parsed payloads of selected channels (paper, alerts, diagnostics) */
+  tap?: (key: string, ch: string, d: unknown) => void;
+  tapChannels?: Set<string>;
+  /** persistent detector config (Supabase); falls back to local SQLite settings */
+  loadConfig?: (key: string) => Promise<unknown | undefined>;
+  saveConfig?: (key: string, cfg: unknown) => Promise<void>;
 }
 
 interface Client {
@@ -115,6 +121,13 @@ export class Hub {
 
   private onPub(live: Live, ch: string, s: string): void {
     live.msgs++;
+    if (this.o.tap && this.o.tapChannels?.has(ch)) {
+      try {
+        this.o.tap(live.key, ch, JSON.parse(s).d);
+      } catch (e) {
+        this.o.log(`tap ${ch} failed: ${(e as Error).message}`);
+      }
+    }
     if (CACHED.has(ch)) live.last.set(ch, s);
     if (ch === 'trades') {
       live.recentTrades.push(s);
@@ -149,6 +162,22 @@ export class Hub {
     }
     ws.send(s);
     this.sent++;
+  }
+
+  /** send one message to every connected client (alerts, policy notices) */
+  broadcastAll(ch: string, d: unknown): void {
+    const s = JSON.stringify({ ch, d });
+    for (const c of this.clients) this.send(c, ch, s);
+  }
+
+  /** forward a message to every ingestion worker */
+  toWorkers(msg: unknown): void {
+    for (const l of this.sessions.values()) l.worker.postMessage(msg);
+  }
+
+  lastStatus(key: string): Record<string, unknown> | null {
+    const s = this.sessions.get(key)?.last.get('status');
+    return s ? (JSON.parse(s).d as Record<string, unknown>) : null;
   }
 
   addClient(ws: WebSocket): Client {
@@ -212,7 +241,7 @@ export class Hub {
     if (!s) return;
     this.sessions.delete(key);
     s.worker.postMessage({ op: 'stop' });
-    setTimeout(() => void s.worker.terminate(), 3000);
+    setTimeout(() => void s.worker.terminate(), 12_000); // let it flush its Supabase queue
     this.o.log(`[${key}] session stopped`);
   }
 
@@ -231,8 +260,19 @@ export class Hub {
     };
   }
 
-  shutdown(): void {
+  setPinned(keys: string[]): void {
+    this.o.pinned = keys;
+  }
+  get pinned(): string[] {
+    return this.o.pinned;
+  }
+
+  /** Stop all workers, letting each flush its Supabase queue; resolves when all exited or on deadline. */
+  async shutdown(deadlineMs = 15_000): Promise<void> {
     clearInterval(this.timer);
-    for (const k of [...this.sessions.keys()]) this.stop(k);
+    const exits = [...this.sessions.values()].map((s) => new Promise<void>((r) => s.worker.once('exit', () => r())));
+    for (const s of this.sessions.values()) s.worker.postMessage({ op: 'stop' });
+    this.sessions.clear();
+    await Promise.race([Promise.all(exits), new Promise((r) => setTimeout(r, deadlineMs))]);
   }
 }

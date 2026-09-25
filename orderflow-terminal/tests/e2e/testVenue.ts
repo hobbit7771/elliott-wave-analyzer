@@ -38,9 +38,12 @@ export async function startTestVenue(port = 0): Promise<TestVenue> {
     history.push({ t, o, h: Math.max(o, c) + 0.3, l: Math.min(o, c) - 0.3, c, v: 50, bv: 25 + Math.sin(i / 3) * 10, n: 100 });
   }
 
+  // route-aware like Binance since the base-URL split: /public = depth + bookTicker, /market = the rest
+  const route = new Map<WebSocket, 'public' | 'market'>();
   const send = (stream: string, data: unknown) => {
+    const want = /@depth|@bookTicker/.test(stream) ? 'public' : 'market';
     const s = JSON.stringify({ stream, data });
-    for (const ws of sockets) if (ws.readyState === 1) ws.send(s);
+    for (const ws of sockets) if (ws.readyState === 1 && route.get(ws) === want) ws.send(s);
   };
 
   const icebergPx = 99.5;
@@ -144,8 +147,11 @@ export async function startTestVenue(port = 0): Promise<TestVenue> {
         res.writeHead(404).end();
     }
   });
-  const wss = new WebSocketServer({ server, path: '/stream' });
-  wss.on('connection', (ws) => {
+  const wss = new WebSocketServer({ server });
+  wss.on('connection', (ws, req) => {
+    const path = (req.url ?? '').split('?')[0];
+    if (path !== '/public/stream' && path !== '/market/stream') return ws.close(1008, 'unrouted connection');
+    route.set(ws, path.startsWith('/public') ? 'public' : 'market');
     sockets.add(ws);
     ws.on('close', () => sockets.delete(ws));
   });
@@ -153,7 +159,7 @@ export async function startTestVenue(port = 0): Promise<TestVenue> {
   const p = (server.address() as AddressInfo).port;
   return {
     url: `http://127.0.0.1:${p}`,
-    wsUrl: `ws://127.0.0.1:${p}/stream`,
+    wsUrl: `ws://127.0.0.1:${p}`,
     close: async () => {
       clearInterval(timer);
       clearInterval(markTimer);

@@ -2,7 +2,7 @@
 import type { BookSnapshot, Candle, InstrumentMeta, Level, SourceId, Trade } from '../../core/types.js';
 import type { Timeframe } from '../../core/candles.js';
 import { decimalsOf } from '../../core/precision.js';
-import { type MarketAdapter, type NormalizedMsg, getJson } from './adapter.js';
+import { type MarketAdapter, type NormalizedMsg, type StreamRoute, getJson } from './adapter.js';
 
 const TF_BINANCE: Partial<Record<Timeframe, string>> = {
   '1s': '1s',
@@ -113,12 +113,12 @@ abstract class BinanceBase implements MarketAdapter {
     return rows.map((r) => ({ t: r.T, price: +r.p, qty: +r.q, side: r.m ? -1 : 1, id: r.a }));
   }
 
-  streamUrl(symbol: string): string {
-    const s = symbol.toLowerCase();
-    return `${this.ws}?streams=${this.streams(s).join('/')}`;
-  }
+  abstract streamRoutes(symbol: string): StreamRoute[];
 
-  protected abstract streams(s: string): string[];
+  async fetchAggTradesFromId(symbol: string, fromId: number, limit: number): Promise<Trade[]> {
+    const rows = await getJson<RawAggTrade[]>(`${this.rest}${this.path.aggTrades}?symbol=${symbol}&fromId=${fromId}&limit=${Math.min(1000, limit)}`);
+    return rows.map((r) => ({ t: r.T, price: +r.p, qty: +r.q, side: r.m ? -1 : 1, id: r.a }));
+  }
 
   parse(raw: string): NormalizedMsg[] {
     let m: { stream?: string; data?: Record<string, unknown> };
@@ -143,7 +143,7 @@ abstract class BinanceBase implements MarketAdapter {
       case 'aggTrade':
         return [{ kind: 'trade', eventTime: d.E as number, tr: { t: d.T as number, price: +(d.p as string), qty: +(d.q as string), side: d.m ? -1 : 1, id: d.a as number } }];
       case 'bookTicker':
-        return [{ kind: 'bbo', eventTime: (d.E as number) ?? Date.now(), t: (d.T as number) ?? (d.E as number) ?? Date.now(), bid: +(d.b as string), bidQty: +(d.B as string), ask: +(d.a as string), askQty: +(d.A as string) }];
+        return [{ kind: 'bbo', u: d.u as number, eventTime: (d.E as number) ?? Date.now(), t: (d.T as number) ?? (d.E as number) ?? Date.now(), bid: +(d.b as string), bidQty: +(d.B as string), ask: +(d.a as string), askQty: +(d.A as string) }];
       case 'markPriceUpdate':
         return [{ kind: 'mark', eventTime: d.E as number, t: d.E as number, mark: +(d.p as string), index: +(d.i as string), funding: +(d.r as string), nextFunding: d.T as number }];
       case 'forceOrder': {
@@ -153,7 +153,7 @@ abstract class BinanceBase implements MarketAdapter {
       default:
         // spot bookTicker has no "e" field
         if (d.u !== undefined && d.b !== undefined && d.a !== undefined && d.B !== undefined) {
-          return [{ kind: 'bbo', eventTime: Date.now(), t: Date.now(), bid: +(d.b as string), bidQty: +(d.B as string), ask: +(d.a as string), askQty: +(d.A as string) }];
+          return [{ kind: 'bbo', u: d.u as number, eventTime: Date.now(), t: Date.now(), bid: +(d.b as string), bidQty: +(d.B as string), ask: +(d.a as string), askQty: +(d.A as string) }];
         }
         return [{ kind: 'ignore' }];
     }
@@ -186,15 +186,20 @@ export class BinanceFuturesAdapter extends BinanceBase {
     'Futures API is geo-restricted in some regions (e.g. US IPs get HTTP 451); deploy in an allowed region.',
   ];
   protected rest = process.env.BINANCE_FUTURES_REST ?? 'https://fapi.binance.com';
-  protected ws = process.env.BINANCE_FUTURES_WS ?? 'wss://fstream.binance.com/stream';
+  // Since the 2026 base-URL split: /public = high-frequency book data, /market = trades, mark price, liquidations.
+  protected ws = process.env.BINANCE_FUTURES_WS_BASE ?? 'wss://fstream.binance.com';
   protected path = { depth: '/fapi/v1/depth', klines: '/fapi/v1/klines', aggTrades: '/fapi/v1/aggTrades', exchangeInfo: '/fapi/v1/exchangeInfo' };
 
   protected accept(s: RawSymbol): boolean {
     return s.contractType === 'PERPETUAL' && (s.quoteAsset === 'USDT' || s.quoteAsset === 'USDC');
   }
 
-  protected streams(s: string): string[] {
-    return [`${s}@depth@100ms`, `${s}@aggTrade`, `${s}@bookTicker`, `${s}@markPrice@1s`, `${s}@forceOrder`];
+  streamRoutes(symbol: string): StreamRoute[] {
+    const s = symbol.toLowerCase();
+    return [
+      { route: 'depth', url: `${this.ws}/public/stream?streams=${s}@depth@100ms/${s}@bookTicker` },
+      { route: 'flow', url: `${this.ws}/market/stream?streams=${s}@aggTrade/${s}@markPrice@1s/${s}@forceOrder` },
+    ];
   }
 
   async fetchOpenInterest(symbol: string): Promise<{ t: number; oi: number }> {
@@ -229,11 +234,12 @@ export class BinanceSpotAdapter extends BinanceBase {
   protected ws = process.env.BINANCE_SPOT_WS ?? 'wss://stream.binance.com:9443/stream';
   protected path = { depth: '/api/v3/depth', klines: '/api/v3/klines', aggTrades: '/api/v3/aggTrades', exchangeInfo: '/api/v3/exchangeInfo?permissions=SPOT' };
 
-  protected accept(s: RawSymbol): boolean {
-    return s.quoteAsset === 'USDT' || s.quoteAsset === 'USDC' || s.quoteAsset === 'FDUSD';
+  streamRoutes(symbol: string): StreamRoute[] {
+    const s = symbol.toLowerCase();
+    return [{ route: 'all', url: `${this.ws}?streams=${s}@depth@100ms/${s}@aggTrade/${s}@bookTicker` }];
   }
 
-  protected streams(s: string): string[] {
-    return [`${s}@depth@100ms`, `${s}@aggTrade`, `${s}@bookTicker`];
+  protected accept(s: RawSymbol): boolean {
+    return s.quoteAsset === 'USDT' || s.quoteAsset === 'USDC' || s.quoteAsset === 'FDUSD';
   }
 }

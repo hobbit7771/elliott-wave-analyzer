@@ -21,10 +21,15 @@ export interface Capabilities {
 export type NormalizedMsg =
   | { kind: 'diff'; d: DepthDiff; eventTime: number }
   | { kind: 'trade'; tr: Trade; eventTime: number }
-  | { kind: 'bbo'; t: number; bid: number; bidQty: number; ask: number; askQty: number; eventTime: number }
+  | { kind: 'bbo'; t: number; u?: number; bid: number; bidQty: number; ask: number; askQty: number; eventTime: number }
   | { kind: 'mark'; t: number; mark: number; index: number; funding: number; nextFunding: number; eventTime: number }
   | { kind: 'liq'; t: number; side: 'buy' | 'sell'; price: number; qty: number; eventTime: number }
   | { kind: 'ignore' };
+
+export interface StreamRoute {
+  route: 'depth' | 'flow' | 'all';
+  url: string;
+}
 
 export interface MarketAdapter {
   id: SourceId;
@@ -37,8 +42,14 @@ export interface MarketAdapter {
   fetchSnapshot(symbol: string): Promise<BookSnapshot>;
   fetchKlines(symbol: string, tf: Timeframe, limit: number, endTime?: number): Promise<Candle[]>;
   fetchAggTrades(symbol: string, startTime: number, endTime: number): Promise<Trade[]>;
+  /** aggTrades by id (fromId, up to 1000) — used to fill id gaps in the live trade stream */
+  fetchAggTradesFromId?(symbol: string, fromId: number, limit: number): Promise<Trade[]>;
   fetchOpenInterest?(symbol: string): Promise<{ t: number; oi: number }>;
-  streamUrl(symbol: string): string;
+  /**
+   * WebSocket connections needed for one instrument. 'depth' carries order-book diffs (+ BBO),
+   * 'flow' carries trades / mark price / liquidations, 'all' carries everything on one socket.
+   */
+  streamRoutes(symbol: string): StreamRoute[];
   parse(raw: string): NormalizedMsg[];
 }
 

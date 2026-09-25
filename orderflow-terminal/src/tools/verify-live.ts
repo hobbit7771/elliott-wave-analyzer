@@ -64,24 +64,31 @@ let gaps = 0;
 let bboChecks = 0;
 let bboMismatch = 0;
 let lat = 0;
-const ws = new WebSocket(ad.streamUrl(symbol));
-ws.on('message', (raw) => {
-  for (const m of ad.parse(raw.toString())) {
-    if (m.kind === 'diff') {
-      diffs++;
-      lat = Date.now() - m.eventTime;
-      const r = sync.onDiff(m.d);
-      if (r.gap) gaps++;
-      for (const d of r.applied) book.applyDiff(d);
-    } else if (m.kind === 'trade') trades++;
-    else if (m.kind === 'bbo' && sync.state === 'synced') {
-      bboChecks++;
-      if (Math.abs(book.bestBid - m.bid) > inst!.tickSize * 20 || Math.abs(book.bestAsk - m.ask) > inst!.tickSize * 20) bboMismatch++;
+let marks = 0;
+const sockets = ad.streamRoutes(symbol).map((r) => {
+  const ws = new WebSocket(r.url);
+  ws.on('message', (raw) => {
+    for (const m of ad.parse(raw.toString())) {
+      if (m.kind === 'diff') {
+        diffs++;
+        lat = Date.now() - m.eventTime;
+        const res = sync.onDiff(m.d);
+        if (res.gap) gaps++;
+        for (const d of res.applied) book.applyDiff(d);
+      } else if (m.kind === 'trade') trades++;
+      else if (m.kind === 'mark') marks++;
+      else if (m.kind === 'bbo' && sync.state === 'synced') {
+        bboChecks++;
+        if (Math.abs(book.bestBid - m.bid) > inst!.tickSize * 20 || Math.abs(book.bestAsk - m.ask) > inst!.tickSize * 20) bboMismatch++;
+      }
     }
-  }
+  });
+  return { r, ws };
 });
-await new Promise((r) => ws.on('open', r));
-ok('WebSocket connected: ' + ad.streamUrl(symbol));
+for (const { r, ws } of sockets) {
+  await new Promise((res, rej) => (ws.once('open', res), ws.once('error', rej)));
+  ok(`WebSocket (${r.route}) connected: ${r.url}`);
+}
 await new Promise((r) => setTimeout(r, 1500));
 const snap = await ad.fetchSnapshot(symbol);
 book.applySnapshot(snap);
@@ -89,7 +96,8 @@ const res = sync.onSnapshot(snap.lastUpdateId);
 for (const d of res.applied) book.applyDiff(d);
 res.gap ? bad('snapshot could not be bridged by buffered diffs: ' + res.reason) : ok(`snapshot ${snap.lastUpdateId} bridged, ${res.applied.length} buffered diffs applied`);
 await new Promise((r) => setTimeout(r, seconds * 1000));
-ws.close();
+for (const { ws } of sockets) ws.close();
+if (ad.caps.markPrice) marks > 0 ? ok(`${marks} markPrice updates (/market route)`) : bad('no markPrice updates');
 diffs > 0 ? ok(`${diffs} depth diffs (${(diffs / (seconds + 1.5)).toFixed(1)}/s)`) : bad('no depth diffs');
 trades > 0 ? ok(`${trades} aggTrades`) : bad('no trades (illiquid symbol?)');
 gaps === 0 ? ok('sequence continuity: no gaps') : bad(`${gaps} sequence gaps`);

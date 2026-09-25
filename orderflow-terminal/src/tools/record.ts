@@ -25,27 +25,32 @@ const klines = await ad.fetchKlines(symbol, '1m', 300);
 let wroteMeta = false;
 let diffs = 0;
 let trades = 0;
-const ws = new ReconnectingWs({
-  url: ad.streamUrl(symbol),
-  onOpen: () => {
-    setTimeout(async () => {
-      const snap = await ad.fetchSnapshot(symbol);
-      if (!wroteMeta) {
-        const range = snap.asks[snap.asks.length - 1][0] - snap.bids[snap.bids.length - 1][0];
-        line({ k: 'meta', meta, syncMode: ad.syncMode, heatStep: autoHeatStep(meta.tickSize, range, 600) });
-        line({ k: 'klines', c: klines });
-        wroteMeta = true;
-      }
-      line({ k: 'snap', s: snap });
-    }, 500);
-  },
-  onMessage: (raw) => {
-    for (const m of ad.parse(raw)) {
-      if (m.kind === 'diff') (line({ k: 'diff', d: m.d }), diffs++);
-      else if (m.kind === 'trade') (line({ k: 'trade', tr: m.tr }), trades++);
-    }
-  },
-});
+const routes = ad.streamRoutes(symbol);
+const sockets = routes.map(
+  (r) =>
+    new ReconnectingWs({
+      url: r.url,
+      onOpen: () => {
+        if (r.route === 'flow') return;
+        setTimeout(async () => {
+          const snap = await ad.fetchSnapshot(symbol);
+          if (!wroteMeta) {
+            const range = snap.asks[snap.asks.length - 1][0] - snap.bids[snap.bids.length - 1][0];
+            line({ k: 'meta', meta, syncMode: ad.syncMode, heatStep: autoHeatStep(meta.tickSize, range, 600) });
+            line({ k: 'klines', c: klines });
+            wroteMeta = true;
+          }
+          line({ k: 'snap', s: snap });
+        }, 500);
+      },
+      onMessage: (raw) => {
+        for (const m of ad.parse(raw)) {
+          if (m.kind === 'diff') (line({ k: 'diff', d: m.d }), diffs++);
+          else if (m.kind === 'trade') (line({ k: 'trade', tr: m.tr }), trades++);
+        }
+      },
+    }),
+);
 // buffer early lines until meta is written: meta must come first for replay
 const origWrite = w.write.bind(w);
 const early: string[] = [];
@@ -62,10 +67,10 @@ w.write = ((chunk: string) => {
   return origWrite(chunk);
 }) as typeof w.write;
 const ticker = setInterval(() => wroteMeta && line({ k: 'tick', t: Date.now() }), 250);
-ws.start();
+for (const ws of sockets) ws.start();
 setTimeout(() => {
   clearInterval(ticker);
-  ws.stop();
+  for (const ws of sockets) ws.stop();
   w.end(() => {
     console.log(`recorded ${diffs} depth diffs and ${trades} trades to ${out}`);
     process.exit(0);

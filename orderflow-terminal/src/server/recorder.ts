@@ -65,7 +65,15 @@ export class Recorder {
 
   constructor(private db: DatabaseSync, private key: string, private ret: Retention = DEFAULT_RETENTION) {}
 
+  private recent: Trade[] = [];
+  /** the last few thousand live trades (for REST cross-checks) */
+  recentTrades(): Trade[] {
+    return this.recent;
+  }
+
   trade(t: Trade): void {
+    this.recent.push(t);
+    if (this.recent.length > 6000) this.recent.splice(0, 1000);
     this.tradesBuf.push(t);
     if (this.tradesBuf.length > 50_000) this.flush(Date.now());
   }
