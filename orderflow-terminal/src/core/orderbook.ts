@@ -219,6 +219,9 @@ export class BookSync {
   state: 'idle' | 'buffering' | 'synced' = 'idle';
   private buffer: DepthDiff[] = [];
   private lastU = 0;
+  /** snapshot applied but no buffered diff reached it yet: the next live diff must bridge the snapshot id */
+  private awaitingBridge = false;
+  private snapId = 0;
   dropped = 0;
 
   constructor(public mode: SyncMode, public maxBuffer = 2000) {}
@@ -227,6 +230,7 @@ export class BookSync {
     this.state = 'buffering';
     this.buffer = [];
     this.lastU = 0;
+    this.awaitingBridge = false;
   }
 
   get buffered(): number {
@@ -243,6 +247,24 @@ export class BookSync {
         this.dropped++;
       }
       return { applied: [], gap: false, dropped: 0 };
+    }
+    if (this.awaitingBridge) {
+      const L = this.snapId;
+      const stale = this.mode === 'futures' ? d.lastId < L : d.lastId <= L;
+      if (stale) {
+        this.dropped++;
+        return { applied: [], gap: false, dropped: 1 };
+      }
+      const bridges = this.mode === 'futures' ? d.firstId <= L && d.lastId >= L : d.firstId <= L + 1 && d.lastId >= L + 1;
+      if (!bridges) {
+        this.awaitingBridge = false;
+        this.state = 'buffering';
+        this.buffer = [d];
+        return { applied: [], gap: true, dropped: 0, reason: `snapshot ${L} not bridged by live diff U=${d.firstId} u=${d.lastId}` };
+      }
+      this.awaitingBridge = false;
+      this.lastU = d.lastId;
+      return { applied: [d], gap: false, dropped: 0 };
     }
     if (!this.continues(d)) {
       this.state = 'buffering';
@@ -312,6 +334,9 @@ export class BookSync {
     this.dropped += dropped;
     this.lastU = lastU;
     this.state = 'synced';
+    // snapshot newer than everything buffered: wait for the live diff that contains the snapshot id
+    this.awaitingBridge = first;
+    this.snapId = lastUpdateId;
     return { applied: out, gap: false, dropped };
   }
 }

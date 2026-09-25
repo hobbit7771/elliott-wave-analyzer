@@ -99,6 +99,27 @@ describe('BookSync sequence validation (futures)', () => {
     expect(r.gap).toBe(true);
   });
 
+  it('snapshot newer than every buffered diff: waits for the live diff that bridges it (seen live on Binance)', () => {
+    const s = new BookSync('futures');
+    s.reset();
+    s.onDiff(diff(90, 95, 89));
+    const r = s.onSnapshot(120);
+    expect(r.gap).toBe(false);
+    expect(r.applied).toHaveLength(0);
+    expect(s.onDiff(diff(100, 110, 95)).applied).toHaveLength(0); // older than the snapshot: dropped, no false gap
+    const b = s.onDiff(diff(111, 125, 110)); // contains 120: bridges the snapshot even though pu != 120
+    expect(b.gap).toBe(false);
+    expect(b.applied).toHaveLength(1);
+    expect(s.onDiff(diff(126, 130, 125)).applied).toHaveLength(1);
+  });
+
+  it('a live diff that jumps past the snapshot without bridging it is a gap', () => {
+    const s = new BookSync('futures');
+    s.reset();
+    s.onSnapshot(120);
+    expect(s.onDiff(diff(130, 140, 129)).gap).toBe(true);
+  });
+
   it('bounds the pre-snapshot buffer', () => {
     const s = new BookSync('futures', 10);
     s.reset();

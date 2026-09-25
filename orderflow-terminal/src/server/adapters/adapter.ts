@@ -59,16 +59,35 @@ export class HttpError extends Error {
   }
 }
 
+/** REST health per host (exchanges ban shared cloud IPs; this is shown in diagnostics, never hidden). */
+export const restHealth: Record<string, { ok: number; fail: number; lastStatus: number; lastError: string; bannedUntil: number; lastOkAt: number }> = {};
+
 export async function getJson<T>(url: string, timeoutMs = 10_000): Promise<T> {
+  const host = new URL(url).host;
+  const h = (restHealth[host] ??= { ok: 0, fail: 0, lastStatus: 0, lastError: '', bannedUntil: 0, lastOkAt: 0 });
   const ac = new AbortController();
   const to = setTimeout(() => ac.abort(), timeoutMs);
   try {
-    const r = await fetch(url, { signal: ac.signal, headers: { 'user-agent': 'orderflow-terminal/0.1' } });
+    const r = await fetch(url, { signal: ac.signal, headers: { 'user-agent': 'orderflow-terminal/0.2' } });
+    h.lastStatus = r.status;
     if (!r.ok) {
       const body = await r.text().catch(() => '');
+      h.fail++;
+      h.lastError = `${r.status} ${body.slice(0, 160)}`;
+      // Binance 418/429: IP ban / rate limit. "banned until <epoch ms>" is reported to the UI.
+      const m = /banned until (\d{13})/.exec(body);
+      if (m) h.bannedUntil = +m[1];
       throw new HttpError(r.status, `${r.status} ${url.split('?')[0]} ${body.slice(0, 200)}`);
     }
+    h.ok++;
+    h.lastOkAt = Date.now();
     return (await r.json()) as T;
+  } catch (e) {
+    if (!(e instanceof HttpError)) {
+      h.fail++;
+      h.lastError = (e as Error).message;
+    }
+    throw e;
   } finally {
     clearTimeout(to);
   }

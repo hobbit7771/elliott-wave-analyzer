@@ -11,9 +11,8 @@ function recording(): ReplayRecord[] {
   out.push({ k: 'snap', s: sim.snapshot() });
   sim.set('bid', 100, 3);
   for (let i = 0; i < 80; i++) {
-    out.push({ k: 'trade', tr: sim.trade(100, 1, -1) });
+    out.push({ k: 'trade', tr: sim.trade(100, 1, -1, false) }); // executed without visible depletion
     sim.advance(200);
-    if (sim.qty('bid', 100) <= 0) sim.set('bid', 100, 3);
     out.push({ k: 'diff', d: sim.diff() });
     out.push({ k: 'tick', t: sim.t });
   }

@@ -5,7 +5,7 @@ import type { Candle, ConnState, FeedStatus, HeatColumn, InstrumentMeta, MarketE
 import { MarketEngine } from '../core/engine.js';
 import { autoHeatStep } from '../core/heatmap.js';
 import type { DetectorConfig } from '../core/detectors/config.js';
-import type { MarketAdapter, NormalizedMsg, StreamRoute } from './adapters/adapter.js';
+import { restHealth, type MarketAdapter, type NormalizedMsg, type StreamRoute } from './adapters/adapter.js';
 import { ReconnectingWs, backoffDelay, type WsClientOptions } from './ingestion/wsClient.js';
 import type { Recorder } from './recorder.js';
 import { symKey } from './recorder.js';
@@ -69,6 +69,8 @@ export class Session {
   private lastTradeId = 0;
   private liveBars = new Map<number, Candle>();
   private firstLiveBar = 0;
+  /** minutes during which trade ids were missing: their live-built bars are incomplete */
+  private gapMinutes = new Set<number>();
   private stopped = false;
   private log: (m: string) => void;
 
@@ -197,7 +199,7 @@ export class Session {
           (e) => this.log(`[${this.key}] OI poll failed: ${e.message}`),
         );
       poll();
-      this.timers.push(setInterval(poll, 15_000));
+      this.timers.push(setInterval(poll, 30_000));
     }
   }
 
@@ -421,7 +423,12 @@ export class Session {
     const bt = Math.floor(tr.t / 60_000) * 60_000;
     if (!this.firstLiveBar) this.firstLiveBar = bt;
     let c = this.liveBars.get(bt);
-    if (!c) this.liveBars.set(bt, (c = { t: bt, o: tr.price, h: tr.price, l: tr.price, c: tr.price, v: 0, bv: 0, n: 0 }));
+    if (!c) {
+      // the previous minute is closed: persist it if it was observed from its start without trade-id gaps
+      const prev = this.liveBars.get(bt - 60_000);
+      if (prev && prev.t > this.firstLiveBar && !this.gapMinutes.has(prev.t)) this.o.persist?.onCandle(prev, 'live');
+      this.liveBars.set(bt, (c = { t: bt, o: tr.price, h: tr.price, l: tr.price, c: tr.price, v: 0, bv: 0, n: 0 }));
+    }
     c.h = Math.max(c.h, tr.price);
     c.l = Math.min(c.l, tr.price);
     c.c = tr.price;
@@ -437,6 +444,7 @@ export class Session {
     const v = this.status.verify.trades;
     v.idGaps++;
     v.missingIds += toId - fromId + 1;
+    this.gapMinutes.add(Math.floor(Date.now() / 60_000) * 60_000);
     this.o.persist?.onGap(Date.now(), `aggTrade ids ${fromId}..${toId} missing on the live stream`);
     this.log(`[${this.key}] trade id gap ${fromId}..${toId}`);
     if (!this.adapter.fetchAggTradesFromId || this.o.skipWarmup) return;
@@ -506,6 +514,7 @@ export class Session {
           streams: Object.fromEntries(Object.entries(s.streams).map(([k, v]) => [k, { c: v.connected, msgs: v.messages, ageMs: v.lastMsgAt ? Date.now() - v.lastMsgAt : null, url: v.url }])),
           verify: s.verify,
           persist: this.o.persist?.getStatus(),
+          rest: restHealth,
           mark: this.deriv.mark,
           book: { bb: this.engine.book.bestBid, ba: this.engine.book.bestAsk, levels: this.engine.book.size },
         }),
@@ -605,7 +614,7 @@ export class Session {
   }
 
   private publishStatus(): void {
-    this.o.publish('status', { ...this.status, heatStep: this.engine?.opts.heatStep, cvd: this.engine?.sessionCvd, atr1m: this.engine?.ctx.atr1m, persist: this.o.persist?.getStatus() });
+    this.o.publish('status', { ...this.status, heatStep: this.engine?.opts.heatStep, cvd: this.engine?.sessionCvd, atr1m: this.engine?.ctx.atr1m, persist: this.o.persist?.getStatus(), rest: restHealth });
   }
 
   private publishDeriv(): void {

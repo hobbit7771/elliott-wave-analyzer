@@ -1,17 +1,23 @@
 import { harness } from './fixtures/sim.js';
 
-/** Sellers repeatedly hit the 100.0 bid; the displayed 3.0 refills each time it is consumed. */
-function icebergRun(h: ReturnType<typeof harness>, seconds: number, refill = true, display = 3) {
+/**
+ * Sellers repeatedly hit the 100.0 bid. `hidden`: the displayed 3.0 does not shrink inside the same
+ * depth batch (classic L2 iceberg signature). `visible`: the level is depleted and re-added in a later
+ * diff, which is also exactly what ordinary new orders look like.
+ */
+function icebergRun(h: ReturnType<typeof harness>, seconds: number, mode: 'hidden' | 'visible' = 'hidden', display = 3) {
   h.sim.set('bid', 100.0, display);
   h.step([]);
   for (let i = 0; i < seconds * 5; i++) {
-    const before = h.sim.qty('bid', 100.0);
+    if (mode === 'hidden') {
+      h.step([[100.0, 1, -1, false]], 200);
+      continue;
+    }
     h.step([[100.0, 1, -1]], 200);
-    if (refill && h.sim.qty('bid', 100.0) <= 0) {
+    if (h.sim.qty('bid', 100.0) <= 0) {
       h.sim.set('bid', 100.0, display);
       h.step([], 50);
     }
-    if (!refill && before <= 0) break;
   }
 }
 
@@ -26,12 +32,21 @@ describe('Iceberg detector', () => {
     expect(e.price).toBe(100);
     expect(e.confidence).toBeGreaterThanOrEqual(60);
     expect(e.confidence).toBeLessThanOrEqual(100);
-    expect(e.title).toMatch(/Iceberg/);
+    expect(e.title).toMatch(/Предполагаемый айсберг/);
     expect(['absorption_iceberg', 'replenishment_iceberg', 'probable_bid_iceberg']).toContain(e.subtype);
-    expect(e.explain).toMatch(/Estimated Hidden Liquidity/);
-    expect(e.explain).toMatch(/never directly visible/);
+    expect(e.explain).toMatch(/НЕ точный размер скрытого остатка/);
+    expect(e.explain).toMatch(/не калиброванная вероятность/);
     expect(Number(e.data?.estimatedHidden)).toBeGreaterThan(0);
     expect(Number(e.data?.refills)).toBeGreaterThanOrEqual(3);
+  });
+
+  it('visible replenishment alone is only "Признаки пополнения", never an iceberg', () => {
+    const h = harness();
+    icebergRun(h, 15, 'visible');
+    expect(h.events.filter((e) => e.kind === 'iceberg')).toHaveLength(0);
+    const rep = h.events.filter((e) => e.kind === 'replenishment');
+    expect(rep).toHaveLength(1);
+    expect(rep[0].explain).toMatch(/недостаточно/);
   });
 
   it('does not flag an ordinary large bid that is simply consumed (no refills)', () => {

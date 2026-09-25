@@ -25,6 +25,11 @@ interface LevelState {
   cancelled: number;
   added: number;
   refills: number;
+  /** executions at the level that the displayed size did not reflect (classic L2 iceberg signature) */
+  hiddenRefills: number;
+  /** size re-added right after executions (also explained by ordinary new orders) */
+  visibleRefills: number;
+  replenishEmitted: boolean;
   trades: number;
   broken: boolean;
   atTouchMs: number;
@@ -106,6 +111,9 @@ export class IcebergDetector {
           cancelled: 0,
           added: 0,
           refills: 0,
+          hiddenRefills: 0,
+          visibleRefills: 0,
+          replenishEmitted: false,
           trades: 0,
           broken: false,
           atTouchMs: 0,
@@ -136,12 +144,16 @@ export class IcebergDetector {
       // refill evidence #1: executions not reflected in the displayed size
       if (r.hidden > 0 && r.hidden >= refillMin) {
         s.refills++;
+        s.hiddenRefills++;
         s.pendingDepletion = 0;
       }
       // refill evidence #2: size added right after an execution depleted the level
       if (r.added > 0) {
         s.added += r.added;
-        if (s.pendingDepletion >= refillMin && r.added >= 0.5 * Math.min(s.pendingDepletion, s.maxDisplayed)) s.refills++;
+        if (s.pendingDepletion >= refillMin && r.added >= 0.5 * Math.min(s.pendingDepletion, s.maxDisplayed)) {
+          s.refills++;
+          s.visibleRefills++;
+        }
         s.pendingDepletion = 0;
       }
     }
@@ -168,6 +180,7 @@ export class IcebergDetector {
         if ((s.side === 'bid' && stats.microprice < stats.mid) || (s.side === 'ask' && stats.microprice > stats.mid)) s.microAgainst += dt;
       }
       const sc = this.score(s, now);
+      if (!sc.eligible && this.ctx.gateOpen && !s.replenishEmitted) this.maybeReplenishment(s, now, sc);
       if (!sc.eligible || !this.ctx.gateOpen) continue;
       if (sc.confidence < cfg.minConfidence) continue;
       if (!s.emittedId) {
@@ -220,6 +233,9 @@ export class IcebergDetector {
     if (cancelRatio > ic.maxCancelRatio) (eligible = false), reasons.push(`cancel ratio ${cancelRatio.toFixed(2)} (spoof/noise filter)`);
     if (spoof) (eligible = false), reasons.push('level flagged as spoof suspect');
     if (estHidden <= 0) (eligible = false), reasons.push('no volume beyond displayed size');
+    // visible re-adds are also what ordinary new orders look like: they are never sufficient on their own
+    if (s.hiddenRefills < 2) (eligible = false), reasons.push(`only ${s.hiddenRefills} execution(s) without visible depletion`);
+    if (s.hidden < 0.2 * traded) (eligible = false), reasons.push('most executions are explained by visible depletion');
 
     const s1 = clamp01((f.tradedToDisplayed - 1) / 4);
     const s2 = clamp01((s.refills - ic.minRefills + 1) / (ic.minRefills * 2));
@@ -245,16 +261,16 @@ export class IcebergDetector {
     const p = priceOf(this.ctx, s.tick);
     const f = score.features;
     const typeLabel: Record<IcebergType, string> = {
-      probable_bid_iceberg: 'Probable Bid Iceberg',
-      probable_ask_iceberg: 'Probable Ask Iceberg',
-      absorption_iceberg: 'Absorption Iceberg (probable)',
-      replenishment_iceberg: 'Replenishment Iceberg (probable)',
-      weak_suspicion: 'Weak Iceberg Suspicion',
+      probable_bid_iceberg: 'Предполагаемый айсберг (bid)',
+      probable_ask_iceberg: 'Предполагаемый айсберг (ask)',
+      absorption_iceberg: 'Предполагаемый айсберг: поглощение',
+      replenishment_iceberg: 'Предполагаемый айсберг: признаки пополнения',
+      weak_suspicion: 'Слабые признаки айсберга',
     };
     const traded = s.visibleExec + s.hidden;
     this.ctx.emit({
       id: s.emittedId || `ice-${this.key(s.side, s.tick)}-${s.first}`,
-      t: s.emittedId ? now : now,
+      t: now,
       kind: 'iceberg',
       title: typeLabel[score.type],
       subtype: score.type,
@@ -264,12 +280,13 @@ export class IcebergDetector {
       status,
       endT: status === 'broken' ? now : undefined,
       explain:
-        (status === 'broken' ? 'Level was traded through — iceberg estimate closed. ' : '') +
-        `Probable Iceberg / Estimated Hidden Liquidity ≈ ${fq(f.estHidden)} at ${fp(this.ctx, p)} (${s.side}). ` +
-        `Traded ${fq(traded)} vs max displayed ${fq(s.maxDisplayed)} (${f.tradedToDisplayed.toFixed(1)}×; ${fq(s.hidden)} executed with no visible depletion), ${s.refills} refills, ` +
-        `held ${(f.holdSec).toFixed(0)}s (${(f.atTouchFrac * 100).toFixed(0)}% at the touch), ${(f.concentration * 100).toFixed(0)}% of opposing aggression in 30s hit this level, ` +
-        `CVD against level ${(f.cvdAgainstRatio * 100).toFixed(0)}%, OFI against ${(f.ofiAgainstFrac * 100).toFixed(0)}% of time, cancel ratio ${(f.cancelRatio * 100).toFixed(0)}%. ` +
-        'Inferred from public trades + depth; hidden size is never directly visible.',
+        (status === 'broken' ? 'Цена прошла сквозь уровень — оценка закрыта. ' : '') +
+        `Измерено на ${fp(this.ctx, p)} (${s.side}): исполнено ${fq(traded)} при максимуме видимого объёма ${fq(s.maxDisplayed)} (${f.tradedToDisplayed.toFixed(1)}×); ` +
+        `${fq(s.hidden)} исполнено без видимого уменьшения объёма (${s.hiddenRefills} раз), видимых пополнений после исполнений: ${s.visibleRefills}. ` +
+        `Удержание ${f.holdSec.toFixed(0)} c (${(f.atTouchFrac * 100).toFixed(0)}% времени на лучшей цене), ${(f.concentration * 100).toFixed(0)}% встречной агрессии за 30 с пришлось на уровень, ` +
+        `CVD против уровня ${(f.cvdAgainstRatio * 100).toFixed(0)}%, OFI против ${(f.ofiAgainstFrac * 100).toFixed(0)}% времени, доля отмен ${(f.cancelRatio * 100).toFixed(0)}%. ` +
+        `Предположение детектора: объём сверх первоначально видимого ≈ ${fq(f.estHidden)} — это НЕ точный размер скрытого остатка (его также объясняют новые независимые заявки и агрегация потока). ` +
+        'Score 0–100 — эвристика, не калиброванная вероятность.',
       data: {
         estimatedHidden: +f.estHidden.toFixed(6),
         traded: +traded.toFixed(6),
@@ -277,6 +294,29 @@ export class IcebergDetector {
         refills: s.refills,
         icebergConfidence: score.confidence,
       },
+    });
+  }
+
+  /** Visible re-adds after executions without iceberg evidence: reported separately as "Признаки пополнения". */
+  private maybeReplenishment(s: LevelState, now: number, sc: IcebergScore): void {
+    const ic = this.ctx.cfg.iceberg;
+    const traded = s.visibleExec + s.hidden;
+    if (s.visibleRefills < ic.minRefills || traded < ic.minTradedToDisplayed * Math.max(s.maxDisplayed, 1e-12) || now - s.first < ic.minObservationMs || s.broken) return;
+    if (sc.features.cancelRatio > ic.maxCancelRatio) return;
+    const score = Math.min(100, Math.round(100 * clamp01(0.3 + 0.1 * (s.visibleRefills - ic.minRefills) + 0.3 * clamp01((now - s.first) / 30_000))));
+    if (score < this.ctx.cfg.minConfidence) return;
+    s.replenishEmitted = true;
+    const p = priceOf(this.ctx, s.tick);
+    this.ctx.emit({
+      id: `rep-${this.key(s.side, s.tick)}-${s.first}`,
+      t: now,
+      kind: 'replenishment',
+      title: 'Признаки пополнения уровня',
+      side: s.side,
+      price: p,
+      confidence: score,
+      explain: `На ${fp(this.ctx, p)} (${s.side}) видимый объём ${s.visibleRefills} раз восстанавливался после исполнений; исполнено ${fq(traded)} при максимуме видимого ${fq(s.maxDisplayed)}. Это может быть айсберг, а может быть обычные новые заявки разных участников — одного видимого пополнения недостаточно для вывода об айсберге.`,
+      data: { visibleRefills: s.visibleRefills, traded, maxDisplayed: s.maxDisplayed },
     });
   }
 

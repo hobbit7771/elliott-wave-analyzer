@@ -10,10 +10,11 @@ import { timingSafeEqual } from 'node:crypto';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { WebSocketServer } from 'ws';
 import type { HeatColumn, MarketEvent, SourceId, Trade } from '../core/types.js';
-import { isTimeframe, candlesFromTrades, TF_MS } from '../core/candles.js';
+import { isTimeframe, candlesFromTrades, resampleCandles, TF_MS, type Timeframe } from '../core/candles.js';
 import { columnsToCsv, downsample } from '../core/heatmap.js';
 import { blockTrades, decodeBlock, replayBlock } from '../core/archiveCodec.js';
 import { getAdapter, isSource, SOURCES, UNAVAILABLE_SOURCES } from './adapters/registry.js';
+import { restHealth } from './adapters/adapter.js';
 import { HistoryReader, openDb, symKey } from './recorder.js';
 import { Hub } from './hub.js';
 import { DEFAULT_DETECTOR_CONFIG, type DeepPartial, type DetectorConfig } from '../core/detectors/config.js';
@@ -314,11 +315,22 @@ async function api(req: http.IncomingMessage, res: http.ServerResponse, u: URL):
       const ck = `${key}:${tf}:${limit}:${end ?? 'now'}`;
       const c = klineCache.get(ck);
       if (c && Date.now() - c.t < (end ? 600_000 : 2000)) return json(res, 200, c.data);
-      const candles = await ad.fetchKlines(symbol, tf, limit, end);
       // the exchange includes the forming bar: flag it so the client never treats it as closed
       const barMs = TF_MS[tf as keyof typeof TF_MS];
       const liveFrom = Math.floor(Date.now() / barMs) * barMs;
-      const data = { candles, origin: 'exchange-rest', tf, liveFrom };
+      let data: Record<string, unknown>;
+      try {
+        data = { candles: await ad.fetchKlines(symbol, tf, limit, end), origin: 'exchange-rest', tf, liveFrom };
+      } catch (e) {
+        // exchange REST unavailable (e.g. shared cloud IP banned): fall back to stored closed 1m candles
+        if (!repo) throw e;
+        const to = end ?? Date.now();
+        const stored = await repo.candles(source, symbol, to - Math.min(limit * barMs, 14 * 86_400_000), to);
+        if (!stored.length) throw e;
+        const candles = barMs === 60_000 ? stored : resampleCandles(stored, tf as Exclude<Timeframe, 'tick'>);
+        data = { candles: candles.slice(-limit), origin: 'stored-1m', tf, liveFrom, warning: `Exchange REST unavailable (${(e as Error).message.slice(0, 120)}); showing closed 1m candles stored in Supabase, resampled` };
+        return json(res, 200, data);
+      }
       klineCache.set(ck, { t: Date.now(), data });
       if (klineCache.size > 300) klineCache.delete(klineCache.keys().next().value!);
       return json(res, 200, data);
@@ -503,6 +515,7 @@ async function api(req: http.IncomingMessage, res: http.ServerResponse, u: URL):
       hub: hub.info(),
       localCache: reader.sizeInfo(),
       supabase: supabaseState,
+      exchangeRest: restHealth,
       storage: retention?.status ?? null,
       recording: hub.pinned,
       ownerActions: OWNER_TOKEN ? 'enabled (token required)' : 'disabled (OWNER_TOKEN not set)',
