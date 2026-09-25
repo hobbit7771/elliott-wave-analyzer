@@ -50,6 +50,8 @@ const SOFT_LIMIT = 1 << 20; // 1 MiB buffered => drop droppable channels
 const HARD_LIMIT = 8 << 20; // 8 MiB => client too slow, disconnect
 
 export class Hub {
+  /** persistent instrument parameters (Supabase), used when the exchange REST is unavailable */
+  metaStore?: { get(source: SourceId, symbol: string): Promise<InstrumentMeta | undefined>; put(meta: InstrumentMeta): Promise<void> };
   sessions = new Map<string, Live>();
   clients = new Set<Client>();
   sent = 0;
@@ -79,8 +81,17 @@ export class Hub {
       cur.lastUsed = Date.now();
       return cur;
     }
-    const list = await getAdapter(source).listInstruments();
-    const meta = list.find((m) => m.symbol === symbol);
+    let meta: InstrumentMeta | undefined;
+    try {
+      meta = (await getAdapter(source).listInstruments()).find((m) => m.symbol === symbol);
+      if (meta && this.metaStore) void this.metaStore.put(meta).catch(() => {});
+    } catch (e) {
+      // exchange REST unavailable (e.g. shared cloud IP banned): fall back to the last parameters seen,
+      // so recording is not blocked — the WebSocket streams do not need REST
+      meta = await this.metaStore?.get(source, symbol).catch(() => undefined);
+      if (!meta) throw e;
+      this.o.log(`[${key}] exchange REST unavailable (${(e as Error).message.slice(0, 80)}); using stored instrument parameters`);
+    }
     if (!meta) throw new Error(`unknown instrument ${symbol} on ${source}`);
     if (this.sessions.size >= this.o.maxSessions) {
       // stop the least recently used unpinned session without subscribers

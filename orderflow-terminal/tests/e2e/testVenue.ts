@@ -10,6 +10,8 @@ import type { Candle, Trade } from '../../src/core/types.js';
 export interface TestVenue {
   url: string;
   wsUrl: string;
+  /** REST paths that answer like a Binance IP ban (HTTP 418) */
+  banned: Set<string>;
   close(): Promise<void>;
 }
 
@@ -121,12 +123,17 @@ export async function startTestVenue(port = 0): Promise<TestVenue> {
       .map((c) => [c.t, String(c.o), String(c.h), String(c.l), String(c.c), String(c.v), c.t + ms - 1, '0', c.n ?? 0, String(c.bv), '0', '0']);
   };
 
+  const banned = new Set<string>();
   const server = http.createServer((req, res) => {
     const u = new URL(req.url ?? '/', 'http://x');
     const json = (b: unknown) => {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify(b));
     };
+    if (banned.has(u.pathname)) {
+      res.writeHead(418, { 'content-type': 'application/json' });
+      return void res.end(JSON.stringify({ code: -1003, msg: 'Way too many requests; IP banned until 9999999999999 (test)' }));
+    }
     switch (u.pathname) {
       case '/fapi/v1/exchangeInfo':
         return json({ symbols: [{ symbol: 'TESTUSDT', status: 'TRADING', baseAsset: 'TEST', quoteAsset: 'USDT', contractType: 'PERPETUAL', filters: [{ filterType: 'PRICE_FILTER', tickSize: '0.10' }, { filterType: 'LOT_SIZE', stepSize: '0.001' }] }] });
@@ -160,6 +167,7 @@ export async function startTestVenue(port = 0): Promise<TestVenue> {
   return {
     url: `http://127.0.0.1:${p}`,
     wsUrl: `ws://127.0.0.1:${p}`,
+    banned,
     close: async () => {
       clearInterval(timer);
       clearInterval(markTimer);

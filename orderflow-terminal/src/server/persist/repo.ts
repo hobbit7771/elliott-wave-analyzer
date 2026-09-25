@@ -49,6 +49,9 @@ export interface Repo {
   candles(source: string, symbol: string, from: number, to: number): Promise<(Candle & { origin: string })[]>;
   gaps(source: string, symbol: string, from: number, to: number): Promise<GapRow[]>;
   coverage(source: string, symbol: string): Promise<{ stream: string; t0: number; t1: number }[]>;
+  putInstrument(meta: { source: string; symbol: string }): Promise<void>;
+  getInstrument<T>(source: string, symbol: string): Promise<T | undefined>;
+  listInstruments<T>(source: string): Promise<T[]>;
   getSetting<T>(k: string): Promise<T | undefined>;
   setSetting(k: string, v: unknown): Promise<void>;
   recordList(): Promise<{ source: string; symbol: string; enabled: boolean }[]>;
@@ -153,6 +156,21 @@ export class PgRepo implements Repo {
   async gaps(source: string, symbol: string, from: number, to: number): Promise<GapRow[]> {
     const rows = await this.sql`select * from oft.gaps where source=${source} and symbol=${symbol} and coalesce(t1, ${to}) >= ${from} and t0 <= ${to} order by t0 limit 1000`;
     return rows.map((r) => ({ source: String(r.source), symbol: String(r.symbol), stream: String(r.stream), t0: n(r.t0), t1: r.t1 === null ? null : n(r.t1), reason: String(r.reason) }));
+  }
+
+  async putInstrument(meta: { source: string; symbol: string }): Promise<void> {
+    await this.sql`insert into oft.instruments (source, symbol, meta) values (${meta.source}, ${meta.symbol}, ${this.sql.json(meta as never)})
+      on conflict (source, symbol) do update set meta=excluded.meta, updated_at=now()`;
+  }
+
+  async getInstrument<T>(source: string, symbol: string): Promise<T | undefined> {
+    const r = await this.sql`select meta from oft.instruments where source=${source} and symbol=${symbol}`;
+    return r.length ? (r[0].meta as T) : undefined;
+  }
+
+  async listInstruments<T>(source: string): Promise<T[]> {
+    const r = await this.sql`select meta from oft.instruments where source=${source} order by symbol`;
+    return r.map((x) => x.meta as T);
   }
 
   async coverage(source: string, symbol: string): Promise<{ stream: string; t0: number; t1: number }[]> {

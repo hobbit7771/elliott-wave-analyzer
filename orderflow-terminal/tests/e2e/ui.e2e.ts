@@ -156,8 +156,13 @@ describe('History survives a restart (Supabase is the source of truth)', () => {
     expect(blk).toBeTruthy();
 
     await server.stop();
+    // restart while the exchange REST refuses instrument info (as with Binance 418 bans on shared cloud IPs):
+    // recording must still start from the instrument parameters stored in Postgres
+    venue.banned.add('/fapi/v1/exchangeInfo');
     server = await startServer({ venueUrl: venue.url, venueWs: venue.wsUrl, pgPort: pg.port, archiveUrl: arch.url });
     BASE = server.base;
+    const inst = (await (await fetch(`${BASE}/api/instruments?source=binance-futures`)).json()) as { symbol: string }[];
+    expect(inst.map((i) => i.symbol)).toContain('TESTUSDT');
     const after = (await (await fetch(`${BASE}/api/events?${q()}`)).json()) as { id: string }[];
     const ids = new Set(after.map((e) => e.id));
     expect(before.filter((e) => ids.has(e.id)).length).toBe(before.length);
@@ -172,6 +177,7 @@ describe('History survives a restart (Supabase is the source of truth)', () => {
       gaps = await (await fetch(`${BASE}/api/gaps?${q()}`)).json();
     }
     const down = gaps.gaps.find((g) => /сервис не работал/.test(g.reason));
+    expect(server.log.join('')).toMatch(/using stored instrument parameters/);
     expect(down).toBeTruthy();
     expect(down!.t1! - down!.t0).toBeGreaterThan(0);
     expect(gaps.coverage.length).toBeGreaterThan(0);
@@ -185,5 +191,6 @@ describe('History survives a restart (Supabase is the source of truth)', () => {
     // owner-only endpoints refuse anonymous writes
     const anon = await fetch(`${BASE}/api/paper/order`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     expect(anon.status).toBe(401);
+    venue.banned.clear();
   });
 });

@@ -16,7 +16,7 @@ services:
       - key: NODE_ENV
         value: production
       - key: NODE_VERSION
-        value: "22.12.0"
+        value: "22.22.0"
       - key: NODE_OPTIONS
         value: --max-old-space-size=384
       - key: DB_PATH
@@ -24,6 +24,19 @@ services:
       - key: MAX_SESSIONS
         value: "2"
       - key: DEFAULT_SYMBOLS
-        value: binance-futures:BTCUSDT
+        value: binance-futures:BTCUSDT,binance-futures:ETHUSDT
       - key: BACKFILL_MINUTES
         value: "10"
+      - key: SUPABASE_PROJECT_REF
+        sync: false
+      - key: SUPABASE_REGION
+        value: eu-central-1
+      - key: OFT_DB_USER
+        value: oft_app
+      # секреты: вводятся вручную во вкладке Environment, в репозитории их нет
+      - key: OFT_DB_PASSWORD
+        sync: false
+      - key: OFT_ARCHIVE_KEY
+        sync: false
+      - key: OWNER_TOKEN
+        sync: false

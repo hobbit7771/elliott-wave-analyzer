@@ -9,7 +9,7 @@ import { gzipSync } from 'node:zlib';
 import { timingSafeEqual } from 'node:crypto';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { WebSocketServer } from 'ws';
-import type { HeatColumn, MarketEvent, SourceId, Trade } from '../core/types.js';
+import type { HeatColumn, InstrumentMeta, MarketEvent, SourceId, Trade } from '../core/types.js';
 import { isTimeframe, candlesFromTrades, resampleCandles, TF_MS, type Timeframe } from '../core/candles.js';
 import { columnsToCsv, downsample } from '../core/heatmap.js';
 import { blockTrades, decodeBlock, replayBlock } from '../core/archiveCodec.js';
@@ -124,6 +124,8 @@ async function initSupabase(attempt = 0): Promise<void> {
   try {
     const { sql, host } = await connectDb(dbCfg, log, 3);
     repo = new PgRepo(sql);
+    const r0 = repo;
+    hub.metaStore = { get: (src, sym) => r0.getInstrument<InstrumentMeta>(src, sym), put: (m) => r0.putInstrument(m) };
     supabaseState = { configured: true, connected: true, host, error: '' };
     // restore settings: paper state, alert rules, detector configs, record list
     const r = repo;
@@ -169,7 +171,7 @@ function startRecording(keys: string[]): void {
     if (!isSource(src) || !sym) continue;
     const tryStart = (attempt: number): void => {
       hub.ensure(src, sym).catch((e) => {
-        const delay = Math.min(300_000, 5000 * 2 ** attempt);
+        const delay = Math.min(60_000, 5000 * 2 ** attempt);
         log(`[${k}] could not start recording session (retry in ${delay / 1000}s): ${e.message}`);
         setTimeout(() => tryStart(attempt + 1), delay);
       });
@@ -304,7 +306,14 @@ async function api(req: http.IncomingMessage, res: http.ServerResponse, u: URL):
   if (p === '/api/instruments') {
     const source = u.searchParams.get('source') ?? 'binance-futures';
     if (!isSource(source)) return json(res, 400, { error: 'bad source' });
-    return json(res, 200, await getAdapter(source).listInstruments(), { 'cache-control': 'max-age=600' });
+    try {
+      return json(res, 200, await getAdapter(source).listInstruments(), { 'cache-control': 'max-age=600' });
+    } catch (e) {
+      // exchange REST unavailable: the instruments recorded before are still usable
+      const stored = repo ? await repo.listInstruments<InstrumentMeta>(source).catch(() => []) : [];
+      if (!stored.length) throw e;
+      return json(res, 200, stored, { 'x-oft-origin': 'stored' });
+    }
   }
   if (p === '/api/klines') {
     const { source, symbol, key } = params(u);

@@ -45,6 +45,15 @@ describe('Supabase repository on real Postgres', () => {
     expect(await repo.events('binance-futures', 'TESTUSDT', 0, 1e12, 10, 1200)).toHaveLength(0); // not yet detected
   });
 
+  it('stores instrument parameters for use while the exchange REST is unavailable', async () => {
+    const meta = { source: 'binance-futures', symbol: 'AAAUSDT', base: 'AAA', quote: 'USDT', tickSize: 0.1, stepSize: 0.001, pricePrecision: 1, qtyPrecision: 3 };
+    await repo.putInstrument(meta);
+    await repo.putInstrument({ ...meta, tickSize: 0.01, pricePrecision: 2 } as typeof meta);
+    expect(await repo.getInstrument('binance-futures', 'AAAUSDT')).toEqual({ ...meta, tickSize: 0.01, pricePrecision: 2 });
+    expect(await repo.getInstrument('binance-futures', 'NOPE')).toBeUndefined();
+    expect((await repo.listInstruments<{ symbol: string }>('binance-futures')).map((m) => m.symbol)).toContain('AAAUSDT');
+  });
+
   it('heat tiles round-trip and settings / record list / paper persist', async () => {
     const col: HeatColumn = { t: 10_000, dt: 10_000, p0: 99, step: 0.5, n: 2, bids: [1, -1], asks: [0, 2], exec: [], add: [], rem: [], bb: 99, ba: 99.5, hi: 0, lo: 0, last: 99.2 };
     await repo.upsertHeat('binance-futures', 'AAA', 10, [col]);

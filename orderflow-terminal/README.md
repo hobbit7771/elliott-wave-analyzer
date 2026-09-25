@@ -1,284 +1,230 @@
 # OrderFlow Terminal
 
-A browser-based order-flow trading terminal: candlestick chart (TradingView lightweight-charts), order-book heatmap, DOM, footprint, CVD/Delta, Volume Profile/TPO and a mathematical detector for large orders, probable icebergs, absorption, spoofing (as suspicion), clusters, sweeps, stop runs and imbalances.
+Браузерный терминал анализа потока ордеров: свечной график с инструментами рисования, heatmap ликвидности,
+DOM, footprint, CVD/дельта, Volume Profile / TPO, детекторы (крупные уровни, предполагаемые айсберги,
+поглощение, подозрение на спуфинг, кластеры, sweep, stop-run, дисбаланс, вакуум ликвидности), replay,
+paper-trading и алерты на сервере. **Только анализ, paper-trading и бэктест — кода отправки реальных ордеров нет.**
 
-**Analysis, paper trading and backtesting only.** The project has no code that sends orders to an exchange and needs no API keys. It uses only public, free endpoints.
+Работает на реальных данных Binance USDⓈ-M Futures и Spot. История хранится в Supabase Free
+(Postgres + Storage), сервер — Render Free (Frankfurt).
 
-> **Honest boundary.** The public order book never shows the hidden part of an iceberg order. The terminal shows a **Probable Iceberg / Estimated Hidden Liquidity / Iceberg Confidence** estimate, never a fact. Every event carries a confidence score (0–100) and a text explanation of why it was detected.
+## Содержание
 
----
+1. [Статус: что проверено](#status)
+2. [Архитектура](#arch)
+3. [Источники данных и ограничения](#sources)
+4. [Детекторы и честная семантика](#detectors)
+5. [История и архив в Supabase](#history)
+6. [Безопасность](#security)
+7. [Локальный запуск](#local)
+8. [Настройка Supabase](#supabase)
+9. [Деплой на Render Free](#render)
+10. [Тесты](#tests)
+11. [Измерения](#perf)
+12. [Что сознательно не заявляется](#notclaimed)
+13. [Перенос в отдельный репозиторий](#split)
 
-## Contents
-1. [Stack and why it was chosen](#stack)
-2. [Project file tree](#tree)
-3. [System architecture](#arch)
-4. [Implemented features](#features)
-5. [Detector algorithms](#algo)
-6. [Data source limitations](#limits)
-7. [Local setup](#local)
-8. [Deploying on Render Free](#render)
-9. [Tests](#tests)
-10. [Live WebSocket verification](#verify)
-11. [Performance report](#perf)
-12. [Features deliberately not claimed](#notclaimed)
-13. [Moving to a separate repository](#split)
+<a id="status"></a>
+## 1. Статус: что проверено
 
----
+Уровни: «код написан» → «локальные тесты прошли» → «сайт развёрнут» → «реальный поток проверен».
 
-<a id="stack"></a>
-## 1. Stack and why it was chosen
-
-| Layer | Choice | Why |
-|---|---|---|
-| Language | TypeScript everywhere | One core (book, detectors, footprint, paper) is shared by the server, the browser, the replay tool and the tests, so the same math runs everywhere |
-| Server | Node.js 22, `http` + `ws`, `worker_threads` | No framework: minimal RAM for Render Free (512 MB). Ingestion for each instrument runs in its own worker thread, separate from the HTTP/WS thread |
-| Database | SQLite via built-in `node:sqlite` (WAL) | No native dependencies, nothing to install, free. Retention tiers keep the size bounded |
-| Chart | `lightweight-charts` v5 (TradingView, Apache-2.0) | The real TradingView engine: scaling, history scrolling, crosshair, panes, price-anchored markers |
-| Heatmap / DOM / Footprint / Profile | Canvas 2D, custom renderers | Full control over performance (ImageData, redrawing only visible rows/columns, rAF throttling) |
-| Client networking | Web Worker (`net.worker.ts`) | WebSocket and JSON parsing stay off the UI thread; batching and coalescing provide backpressure |
-| Build | Vite (web) + esbuild (server) | Fast, single-file server bundle |
-| Tests | Vitest + Playwright (Chromium) | Unit, integration (real local WebSockets), load, e2e on iPhone and desktop viewports |
-
-<a id="tree"></a>
-## 2. Project file tree
-
-```
-orderflow-terminal/
-├── Dockerfile, .dockerignore, render.yaml, .node-version, .env.example
-├── package.json, tsconfig.json, vite.config.ts, vitest.config.ts, vitest.e2e.config.ts
-├── scripts/
-│   ├── build-server.mjs          # esbuild: server, worker, tools
-│   └── dev.mjs                   # dev: rebuild + restart server, Vite dev server
-├── src/
-│   ├── core/                     # pure logic, no IO (shared by server/client/tests)
-│   │   ├── types.ts              # unified format: Trade, DepthDiff, Candle, HeatColumn, MarketEvent...
-│   │   ├── precision.ts          # tick grid, price/quantity precision
-│   │   ├── orderbook.ts          # OrderBook, BookSync (sequences), FlowClassifier (add/cancel/execute), OFI
-│   │   ├── candles.ts            # timeframes tick/1s/1m…1D, candles from trades
-│   │   ├── indicators.ts         # EMA, RMA, ATR, RSI, MACD, VWAP, CVD
-│   │   ├── footprint.ts          # footprint, imbalance, stacked, POC, UA, Volume Profile, HVN/LVN, TPO
-│   │   ├── heatmap.ts            # heatmap columns from the local book, merging, CSV
-│   │   ├── engine.ts             # MarketEngine: book → flow → detectors → heatmap
-│   │   ├── paper.ts              # paper trading + event backtests
-│   │   ├── replay.ts             # deterministic replay of NDJSON recordings
-│   │   ├── stats.ts              # rolling sums, percentiles, EWMA
-│   │   └── detectors/            # config, context, largeOrders (+spoof, pulled), iceberg, flow, clusters
-│   ├── server/
-│   │   ├── index.ts              # HTTP API, static files, WebSocket, production guards
-│   │   ├── hub.ts                # sessions per instrument, fan-out, backpressure
-│   │   ├── session.ts            # WS ingestion, snapshot/resync, stale gating, BBO check
-│   │   ├── worker.ts             # worker thread for one instrument
-│   │   ├── recorder.ts           # SQLite: trades, heat (1s/10s/60s), events, candles, settings
-│   │   ├── ingestion/wsClient.ts # reconnect, heartbeat, backoff
-│   │   └── adapters/             # MarketAdapter, Binance Futures/Spot, registry (+ unavailable sources)
-│   ├── tools/                    # verify-live, record (NDJSON), replay
-│   └── web/                      # frontend
-│       ├── index.html, styles.css, main.ts, store.ts, util.ts, net.worker.ts
-│       ├── public/ (manifest, sw.js for notifications, icon)
-│       └── tabs/ chart, heatmap, dom, footprint, profile, signals, paper, alerts, sources
-└── tests/
-    ├── fixtures/ sim.ts (deterministic exchange simulator), fakeVenue.ts   ← tests only
-    ├── e2e/ testVenue.ts (local Binance-protocol venue), ui.e2e.ts, perf.e2e.ts
-    └── *.test.ts                 # 84 unit/integration tests
-```
+| Часть | Статус |
+|---|---|
+| Binance USDⓈ-M Futures: стакан (`/public`: depth@100ms + bookTicker), поток (`/market`: aggTrade, markPrice, forceOrder) | реальный поток проверен на Render (BTCUSDT, ETHUSDT) |
+| Синхронизация стакана (snapshot + diffs, `pu`/`U`/`u`, ожидание «мостового» diff) | реальный поток проверен: 30 мин, 0 разрывов; bookTicker = локальный стакан при том же updateId: 771/771 (BTC), 974/974 (ETH) |
+| Непрерывность aggTrade id, сверка с REST | 1300/1300 (BTC), 900/900 (ETH) выборок совпали; 1m-свечи OHLC 21/21 |
+| Запись истории в Supabase (свечи, тайлы heatmap 10 с / 60 с, события, разрывы, покрытие) | проверено на Render; данные пережили перезапуск сервиса |
+| Архив L2-блоков (snapshot + непрерывные diffs + сделки, sha256, pending→final) | проверено: блоки BTC/ETH по 5 мин, проверка «replay блока A = snapshot блока B» — mismatched=0 |
+| Запись простоя (перезапуск, деплой, сон Render) как разрыва | локальные e2e-тесты прошли; на Render проверяется после деплоя `6a949dc` |
+| Binance Spot | код и тесты есть; на Render не включён (экономия CPU Free-плана) |
+| Databento (CME GLBX.MDP3, Nasdaq XNAS.ITCH) | адаптер написан, **не проверен на реальных данных** — нужен ключ и платное использование |
+| dxFeed, Bybit | не реализованы |
+| Paper-trading и алерты на сервере | локальные тесты и e2e прошли |
 
 <a id="arch"></a>
-## 3. System architecture
+## 2. Архитектура
 
 ```
- Binance WS (depth@100ms, aggTrade, bookTicker, markPrice@1s, forceOrder)      Binance REST
-            │                                                                   (depth snapshot,
-            ▼                                                                    klines, aggTrades,
- ┌───────────────────────── worker thread (one per instrument) ─────────────┐     exchangeInfo, OI)
- │ 1 Ingestion   ReconnectingWs: heartbeat (20 s silence), ping,            │◄──────────┘
- │               exp. backoff, 23 h reconnect, buffer ≤2000 diffs           │
- │ 2 Normalize   adapter.parse → Trade / DepthDiff / BBO / Mark / Liq (UTC)  │
- │ 3 Book engine BookSync (U/u/pu) → OrderBook → FlowClassifier + OFI        │
- │               gap → Data gap → snapshot resync; BBO cross-check           │
- │ 5 Detection   MarketEngine: large/iceberg/absorption/spoof/cluster/...    │
- │               gate: no signals when stale / unsynced / disconnected       │
- │ 4 Recorder    SQLite: trades, heat 1s→10s→60s, events, 1m candles         │
- └───────────────┬──────────────────────────────────────────────────────────┘
-                 │ postMessage (pre-serialized JSON)
- ┌───────────────▼────────── main thread ───────────────────────────────────┐
- │ Hub: subscriptions, cache of latest book/status, backpressure             │
- │   (>1 MiB buffer → drop book/heat and send a trade "gap" → REST reload;   │
- │    >8 MiB → disconnect)                                                   │
- │ REST: /api/klines /trades /heatmap /events /config /perf /export/*        │
- └───────────────┬──────────────────────────────────────────────────────────┘
-                 │ WebSocket /ws
- ┌───────────────▼────────── browser ───────────────────────────────────────┐
- │ Web Worker: WS + JSON parse + batches every 100 ms (ack backpressure)     │
- │ Store → tabs (6 Visualization): Chart, Heatmap, DOM, Footprint,           │
- │   Profile/TPO, Signals; 7 Paper/Backtest; Alerts; Sources & Settings      │
- │ Rendering: requestAnimationFrame + per-tab throttling, only visible tabs  │
- └───────────────────────────────────────────────────────────────────────────┘
+Binance WS (/public, /market) ─┐
+Binance REST (snapshot, backfill, сверка)─┤
+                               ▼
+                 worker_threads: по одному на инструмент
+   BookSync → OrderBook → FlowClassifier → детекторы → heat/candles/footprint
+        │                         │
+        │                  PersistWriter ──► Supabase Postgres (схема oft, роль oft_app)
+        │                         └────────► Edge Function oft-archive ──► приватный bucket (L2-блоки)
+        ▼
+   main thread: Hub (WS к браузерам), REST API, PaperService, AlertService, RetentionService
+        ▼
+   Браузер: Vite + lightweight-charts v5, Canvas, Web Worker для декодирования потока
 ```
 
-Adapters: the `MarketAdapter` interface (`src/server/adapters/adapter.ts`) declares only capabilities that actually exist (`caps`) plus a list of `limitations`. Implemented: **Binance USDⓈ-M Futures** and **Binance Spot**. Bybit / CME / CFD are listed as unavailable with the reason; they never appear in the instrument picker.
+- Локальный `node:sqlite` — только горячий кэш последних часов. На Render Free диск эфемерный, поэтому
+  источник истины — Supabase: после перезапуска история (события, heatmap, свечи, разрывы, архив) читается оттуда.
+- «Ворота сигналов»: новые сигналы выдаются, только когда стакан синхронизирован и свежий, а поток сделок жив
+  (тишина > 15 с закрывает ворота). При разрыве — ресинхронизация и запись интервала разрыва; данные
+  никогда не интерполируются.
+- Свечи: закрытые бары помечены CLOSED, формирующийся — LIVE. Если REST биржи недоступен (бан IP), график
+  строится из сохранённых закрытых 1m-свечей с явной пометкой происхождения.
 
-<a id="features"></a>
-## 4. Implemented features
+<a id="sources"></a>
+## 3. Источники данных и ограничения
 
-**Data and infrastructure**
-- Binance USDⓈ-M Futures: depth diff 100 ms, aggTrade, bookTicker, markPrice + funding, open interest (REST every 15 s), liquidations (forceOrder), klines, depth snapshot of 1000 levels. Binance Spot: depth, aggTrade, bookTicker, klines (including native 1s).
-- Local book: snapshot + buffered diffs using Binance rules (futures `pu == prev u`, spot `U == prev u + 1`), automatic resync on a gap, cross-check against bookTicker (a crossed book for >3 s triggers a forced resync), pruning of distant levels, a "reliable range" (the heatmap does not show unknown zones as empty).
-- Stale-data protection: no depth for more than `staleMs` (5 s) puts the feed in `Stale` and closes the gate on **all** new signals; 30 s → forced reconnect.
-- Statuses: Connected / Reconnecting / Stale / Snapshot syncing / Data gap / Disconnected, last update, latency (exchange→server EWMA), RTT (browser↔server), trade count, depth levels, gaps/resyncs, dropped (server/browser), source, freshness indicator.
-- History: SQLite with retention (heat 1s: 2 h, 10s: 24 h, 60s: 7 d; trades: 6 h; events: 7 d), replay, CSV/JSON/PNG export, history purge.
+- **Binance L2** — суммарный объём на цене, без order ID, владельца и очереди. Отдельные ордера не видны.
+- Стакан приходит пакетами по 100 мс: разделение «исполнено / снято» внутри пакета — оценка.
+- **История стакана** существует только с момента начала записи: биржа её не отдаёт.
+- **Общий исходящий IP Render** (74.220.51.139) периодически получает от Binance REST бан 418 из-за чужого
+  трафика. WebSocket при этом работает; снапшоты стакана проходят со второй-третьей попытки; сверка с REST,
+  OI и бэкфилл временно недоступны — это видно в диагностике («REST биржи»). Параметры инструментов (шаг цены,
+  лота) сохраняются в Supabase, поэтому запись после перезапуска стартует и во время бана.
+- **CME / Nasdaq** — только через лицензированные платные фиды (Databento, dxFeed, Rithmic, CQG). Бесплатного
+  реального стакана нет. Данные Binance никогда не смешиваются с данными CME.
+- **CFD / OTC (XAUUSD, BRXUSD)** — централизованного стакана нет; не предлагается. Контракт Binance XAUUSDT —
+  собственный стакан Binance, а не COMEX.
 
-**Tabs**
-- **Chart**: candles (tick with a choice of 50–1000 trades, 1s, 1m, 3m, 5m, 15m, 30m, 1H, 4H, 1D), zoom/scroll with lazy loading of older history, crosshair, volume, EMA 9/18/50/200, VWAP, ATR, RSI, MACD, CVD, Delta; large-order price lines with confidence; markers for icebergs, sweeps, stop runs, imbalance, divergence, bursts, liquidity removal and spoofing suspicion anchored to their **price and time**; absorption/cluster/vacuum zones; user trading levels and paper SL/TP; liquidations; per-layer toggles and a minimum-confidence filter.
-- **Heatmap**: time × price axes, bid/ask history from real snapshots of the local book (1 column/s), colours: cold (weak) → yellow/orange (elevated) → red (large ask) / green (large bid), purple for probable icebergs, white/grey for removed liquidity (cancels); added liquidity; executions (bubbles); held (Held) / pulled / filled / broken large orders; clusters (Bid/Ask/Absorption/Tested/Broken); absorption zones; liquidity vacuum; price line or candles, bid/ask lines; depth range, history period (1m…7d), minimum volume, minimum confidence, intensity, log scale, pause, replay (1–60×), view clear, CSV and PNG export, crosshair tooltip.
-- **DOM**: bid/ask, price, displayed quantity, executed at bid/ask over the period, delta, volume, imbalance, last trade, spread, microprice/mid, book imbalance, OFI, trade speed, session CVD, large-order threshold; highlighting of active levels, large levels, `ICE`/`ABS`. Settings: grouping, number of levels, minimum large size, minimum refills (writes to the server detector), analysis period, colour scheme. Canvas virtualization.
-- **Footprint**: bid × ask / delta / volume, buy/sell diagonal imbalance (ratio, minimum volume), stacked imbalance, POC, HVN/LVN (visible-range profile), unfinished auction, absorption/iceberg markers, bar delta, session delta (UTC), volume.
-- **Profile / TPO**: exact Volume Profile from trades (POC/VAH/VAL/HVN/LVN, split into buys and sells), TPO built from 30m candles (letters, POC, VA, IB).
-- **Signals**: event journal (type, side, price, confidence, status, explanation), large-order table (price, size, side, appearance time, hold duration, refills, executed, cancelled, status, confidence, source), clusters, iceberg candidates, JSON export.
-- **Paper**: market paper orders against the live book (opposite side of the spread + slippage), SL/TP, fees, funding at the exchange's funding-time rollover, P&L, win rate, expectancy, profit factor, max drawdown, journal; backtest of detector events on recorded trades.
-- **Alerts**: rules (instrument, event types, minimum confidence, minimum volume, timeframe = at most one alert per bar, sound, browser notification); feed events (disconnect, stale, resync, data gap, spread expansion) plus loss of the browser↔server connection.
-- **Sources & Settings**: available/unavailable sources and their limitations, a per-instrument editor for all detector parameters, server performance.
+<a id="detectors"></a>
+## 4. Детекторы и честная семантика
 
-<a id="algo"></a>
-## 5. Detector algorithms (all math runs on WebSocket data; no LLMs)
+Все расчёты — детерминированная математика по WebSocket-данным. **Score 0–100 — эвристика, а не
+калиброванная вероятность.** Каждое событие содержит объяснение: что измерено, что предположено.
 
-**Add / cancel / execute classification** (`FlowClassifier`). An aggressive sell (`m=true`) executes against the bid at the trade price; a buy executes against the ask. For each diff at time T and each level: `drop = max(0, old−new)`, `executed = min(drop, V≤T)`, `cancelled = drop − executed`, `added = max(0, new−old)`, `hidden = V − executed` (volume that the visible depletion does not explain). A trade that arrives after its diff reclassifies the level's recent cancel as an execution.
+- **«Предполагаемый айсберг»** — исполнено на уровне заметно больше, чем было видно, при этом видимый объём
+  не уменьшался (≥ 2 скрытых пополнения, скрытое ≥ 20% исполненного). Величина «исполнено − первоначально
+  видимое» — **не точный размер скрытого остатка**: то же дают новые независимые заявки и агрегация потока.
+- **«Признаки пополнения уровня»** — объём восстанавливался видимыми добавлениями после исполнений.
+- **«Поглощение»** — сильная агрессия в уровень без продвижения цены.
+- **«Подозрение на спуфинг»** — только подозрение: крупный уровень рядом с рынком (≤ 0,2% от mid), к которому
+  цена приблизилась, снят почти без исполнения; не чаще раза в минуту на сторону. Намерение участника по
+  публичным данным доказать нельзя.
+- **«Снятие крупной ликвидности»** — снятый объём сам превышает порог крупного уровня, рядом с рынком.
+- **Кластеры** — зона повышенной ликвидности, державшаяся ≥ 30 с; кратковременное исчезновение не создаёт
+  новое событие.
+- Порог крупного уровня динамический: `max(2% глубины стороны, P97 объёмов уровней) × ATR-множитель [1; 1,5]`.
+- Версия алгоритма пишется в каждое событие (`algo_version`), история статусов события хранится отдельно:
+  запрос «как было на момент T» (`/api/events?asOf=`) не заглядывает в будущее.
 
-**Large limit order.** `threshold = max(minQty, depthPct × side depth within ±rangePct, P97 of level sizes sampled once per second) × ATR factor` (`sqrt(ATR/avgATR)` clamped to [1, 1.5]). A level must exceed the threshold, sit at least `minDistanceTicks` from mid and hold for at least `minHoldMs`. Warm-up: no signals until 400 samples exist. Tracked: size, peak, appearance, hold time, refills, executed, cancelled, status (active/partially_filled/filled/pulled/broken), confidence.
+<a id="history"></a>
+## 5. История и архив в Supabase
 
-**Probable Iceberg.** For each level being hit, the detector accumulates displayed size, executed volume, the executed volume the depletion does not explain, refills (both "executed without depletion" and "size added right after execution"), time at best, trade-throughs, the share of opposite-side aggression hitting the level, CVD against the level, the share of time with OFI/microprice against the level, trade speed and cancel ratio. **Eligibility** (all required): `refills ≥ minRefills` (3), `traded/maxDisplayed ≥ 1.5`, observation ≥ 4 s, the level is not broken, `cancel ratio ≤ 0.6`, the level is not on the spoof list, and `Estimated Hidden = traded − displayed at first hit > 0`. **Confidence** = 100 × (0.25·ratio + 0.20·refills + 0.12·hold + 0.15·at-touch + 0.15·(concentration+CVD) + 0.05·speed + 0.08·(OFI+microprice)) × (1 − cancelRatio). **Types:** absorption iceberg, replenishment iceberg, probable bid/ask iceberg, weak suspicion (<45). When price trades through the level, status becomes `broken`.
+| Данные | Где | Срок хранения (по умолчанию) |
+|---|---|---|
+| Тайлы heatmap 10 с | `oft.heat_tiles` | 2 дня |
+| Тайлы heatmap 60 с | `oft.heat_tiles` | 30 дней |
+| События и история их статусов | `oft.events`, `oft.event_status` | 60 дней |
+| Закрытые 1m-свечи | `oft.candles_1m` | 365 дней |
+| Исходные L2-блоки (точный replay) | bucket `oft-archive`, манифесты `oft.archives` | 12 часов |
+| Разрывы и покрытие | `oft.gaps`, `oft.coverage` | вместе с данными |
 
-**Absorption.** Over a 10 s window: aggressive volume ≥ P95 of the rolling distribution, adverse move ≤ max(2 ticks, 0.15·ATR1m), no new extreme for ≥ 3 s, and ≥ 50 % of the volume hit the extreme zone after it formed.
+- Блок архива: snapshot стакана в фиксированной полосе ±2% + все diffs + сделки за 5 минут, gzip, sha256.
+  Манифест пишется как `pending` до загрузки и становится `final` после проверки наличия объекта; незавершённые
+  после сбоя манифесты доводятся или удаляются с записью разрыва.
+- `/api/archive/book?t=` восстанавливает точный стакан (в пределах полосы) на момент t.
+- Квоты: при превышении бюджета БД (400 МБ) приостанавливаются тайлы 10 с, при превышении Storage (850 МБ) —
+  архивные блоки. Решение видно в диагностике и в логах (`OFT_STORAGE`). Данные молча не пропадают.
+- Удаление истории — только владельцем, только явного интервала, с подтверждением (heatmap → «Удалить историю окна»).
 
-**Spoofing suspicion.** A large order that lived ≤ 20 s, was ≥ 80 % cancelled with ≤ 10 % executed, and was pulled as price approached **or** repeated appear/cancel cycles (≥ 3 in 2 min). This is a suspicion only; the level is excluded from iceberg detection.
+<a id="security"></a>
+## 6. Безопасность
 
-**Clusters / vacuum.** Buckets of `zoneStep` within ±1 %: elevated when ≥ 2.5 × the median bucket, clusters of ≥ 3 buckets with gaps ≤ 1. Tracked over time with statuses formed/tested/absorption/broken. Vacuum: ≥ 5 consecutive buckets holding ≤ 15 % of the median, starting from best price.
-
-**Sweep / Stop run.** Same-side trades within 1 s crossing ≥ max(5 ticks, 0.2·ATR) with volume ≥ P95; the event keeps extending while the sweep continues. Stop run: a sweep beyond the 30-bar 1m extreme followed by a return behind that level within 60 s.
-
-**Imbalance** (|OBI top-10| ≥ 0.6 held for ≥ 3 s), **Volume burst** (1 s volume ≥ P99.5 and ≥ 5× the median), **Delta divergence** (new 10-bar high/low without CVD confirmation), **Spread expansion** (≥ 4× the median for ≥ 1 s). OFI follows Cont–Kukanov–Stoikov; microprice = (bid·askQty + ask·bidQty)/(bidQty + askQty).
-
-Every parameter can be edited per instrument (Sources & Settings → saved on the server and applied to the live detector immediately).
-
-<a id="limits"></a>
-## 6. Data source limitations
-
-- **Hidden orders are not visible** in public data. An iceberg can only be estimated. Displayed size is available only in aggregate per price level (no individual orders, no MBO).
-- Binance depth diffs are batched every **100 ms**: adds and cancels within one batch are merged, and the classification is statistical.
-- The trades stream and the depth stream are separate: trades are joined to diffs by time, and a late trade triggers reclassification (this is still not an exact queue).
-- Heatmap history exists **only from the moment the server started recording**. The exchange provides no historical order book.
-- Futures REST has no 1s candles: 1s/tick charts and the footprint are built from recorded trades plus an aggTrades backfill (10 minutes by default). For 1H–1D the footprint covers only the recorded range, and the tab shows which range that is.
-- `forceOrder`: at most one liquidation per symbol per second (a Binance rule). Open interest is REST-only.
-- **Binance Futures blocks US IPs (HTTP 451).** Deploy in the EU or Asia (Frankfurt/Singapore).
-- Render Free: the disk is **ephemeral**; after a restart or sleep, history is lost. The service sleeps after 15 minutes without HTTP traffic, and ingestion stops while it sleeps.
-- **CME (NQ, ES, GC, CL)**: a real DOM requires a paid licensed feed (Rithmic/CQG/dxFeed/Databento), so it is not offered. **XAUUSD / BRXUSD CFD**: no centralized order book exists (a broker's quotes are not an exchange book), so they are not offered. If Binance lists a commodity perpetual (e.g. XAUUSDT), the UI warns that this is **Binance's own order book**, not CME/COMEX/OTC. Data from different sources is never mixed.
-- Alerts and paper stops fire while the instrument is open in the browser (no server-side Web Push).
+- Схема `oft` не публикуется через Supabase API; RLS включён на всех таблицах; у `anon`/`authenticated` прав нет.
+- Сервер подключается ролью `oft_app` с минимальными правами. Ключ `service_role` в сервере не используется:
+  он есть только внутри Edge Function `oft-archive` (переменная окружения Supabase).
+- Доступ к архиву — через Edge Function с ключом `x-oft-key`, сверяемым с `oft.secrets`. Анонимной записи
+  и удаления нет.
+- Изменяющие действия (paper, алерты, настройки, объекты графика, удаление истории, диагностика) требуют
+  токена владельца (`x-oft-owner` = `OWNER_TOKEN`). Токен вводится на вкладке «Источники» и хранится только
+  в браузере владельца.
+- Секреты (`OFT_DB_PASSWORD`, `OFT_ARCHIVE_KEY`, `OWNER_TOKEN`) — только в секретах Render. В репозитории,
+  фронтенде (`VITE_*`) и логах их нет.
+- В production сервер отказывается ходить на хосты, отличные от официальных Binance / Supabase / Databento.
 
 <a id="local"></a>
-## 7. Local setup
+## 7. Локальный запуск
 
-Requirements: Node.js ≥ 22.12, and network access to `fapi.binance.com`, `fstream.binance.com` (plus `api.binance.com` and `stream.binance.com` for Spot).
+Нужен Node.js ≥ 22.5 (используется `node:sqlite`; проверено на 22.22).
 
 ```bash
 cd orderflow-terminal
 npm ci
-npm run build
-npm start                     # http://localhost:8080
-# or in development mode (Vite on :5173 with a proxy to :8080):
+cp .env.example .env      # без Supabase сервер работает, но paper, алерты и история недоступны
+npm run build && npm start   # http://localhost:8080
+# режим разработки: Vite на :5173 с прокси на :8080
 npm run dev
 ```
 
-Settings go in `.env` variables (see `.env.example`); none are required.
+<a id="supabase"></a>
+## 8. Настройка Supabase
+
+1. Создайте проект Free в регионе `eu-central-1`.
+2. Примените миграции из `supabase/migrations/` по порядку (`0001_oft_init.sql`, `0002_oft_app_role.sql`).
+3. Создайте роль приложения и ключ архива (значения придумайте сами и сохраните только в секретах Render):
+   ```sql
+   create role oft_app login password '<пароль>';
+   insert into oft.secrets (k, v) values ('archive_key', '<ключ архива>');
+   ```
+   Права роли выдаёт миграция `0002`.
+4. Разверните Edge Function `supabase/functions/oft-archive` (проверка JWT отключена: доступ проверяется по `x-oft-key`).
 
 <a id="render"></a>
-## 8. Deploying on Render Free
+## 9. Деплой на Render Free
 
-**Option A: Blueprint.** When the project is in its own repository (see §13), `render.yaml` is at the repository root: Render → New → Blueprint → choose the repository → Apply.
+Web Service, регион **Frankfurt** (Binance Futures отвечает 451 на IP из США), план Free.
 
-**Option B: manual setup** (also works from a subfolder of this repository):
-1. Render → New → Web Service → connect the repository.
-2. **Root Directory:** `orderflow-terminal`
-3. **Runtime:** Node · **Region:** Frankfurt (not US, because of Binance's HTTP 451) · **Instance type:** Free
-4. **Build Command:** `npm ci --include=dev && npm run build`
-5. **Start Command:** `npm start`
-6. **Health Check Path:** `/api/health`
-7. Environment: `NODE_ENV=production`, `NODE_VERSION=22.12.0`, `NODE_OPTIONS=--max-old-space-size=384`, `MAX_SESSIONS=2`, `DB_PATH=/tmp/orderflow.sqlite`.
-
-**Docker** (Render/Fly/Koyeb/any host): `docker build -t orderflow-terminal . && docker run -p 8080:8080 -v oft-data:/data orderflow-terminal`.
-
-On iPhone: open the site in Safari → Share → "Add to Home Screen" (notifications require iOS 16.4+ and the app installed to the home screen).
+- Build: `npm ci --include=dev && npm run build`, Start: `npm start`, Health check: `/api/health`.
+  Если проект лежит в подпапке — Root Directory `orderflow-terminal`.
+- Переменные окружения — см. `render.yaml` и `.env.example`. Секреты `OFT_DB_PASSWORD`, `OFT_ARCHIVE_KEY`,
+  `OWNER_TOKEN`, `SUPABASE_PROJECT_REF` вводятся вручную во вкладке Environment.
+- Render Free засыпает после ~15 минут без входящих запросов. Искусственный keep-alive не используется: время
+  сна записывается как разрыв данных и видно на heatmap и в `/api/gaps`.
 
 <a id="tests"></a>
-## 9. Tests
+## 10. Тесты
 
 ```bash
-npm test              # 84 unit/integration tests (vitest)
-npm run test:load     # load test of the engine only
-npm run test:e2e      # build + real server + Chromium (iPhone 390×844 and desktop 1440×900) + performance
 npm run typecheck
+npm test            # 106 модульных тестов: стакан, детекторы, архив, репозиторий на настоящем Postgres (PGlite), paper, алерты, Databento-формат
+npm run test:e2e    # 5 e2e: реальный сервер + Chromium + локальная тестовая биржа + Postgres + заглушка архива
 ```
 
-Coverage: order-book reconstruction, sequence gap/resync (futures and spot), add/cancel/execute classification and late trades, OFI; iceberg detector (positive, ordinary large order, too little data, trade-through, closed gate); large-order detector (warm-up, threshold, lifecycle, pulled); spoofing filter; clusters (formed/tested/broken); absorption; sweep/stop run; imbalance/burst/divergence; heatmap aggregation/merging/tiers/CSV; candles/indicators/footprint/VP/TPO; paper trading and backtests; WebSocket reconnect, heartbeat and backoff; the full live session over a local WS (sync, gap→resync, stale→gate closed→recovery, reconnect); recorder and retention; deterministic replay of recordings; load test; **checks that production code contains no fake data** (no `Math.random`, no imports of fixtures/mocks, no hard-coded price series; in production the server refuses to start with non-Binance endpoints); e2e mobile layout (no horizontal overflow, all tabs, heatmap/DOM/footprint render, a paper order).
-
-Synthetic scenarios (`tests/fixtures/sim.ts`, `tests/e2e/testVenue.ts`) exist **only in `tests/`**; the `no-fake-data` test guarantees that `src/` never imports them.
-
-<a id="verify"></a>
-## 10. Live WebSocket verification
-
-```bash
-# directly against Binance: snapshot + diffs, sequences, comparison with bookTicker, latency
-npm run verify:live -- --symbol BTCUSDT --seconds 20
-npm run verify:live -- --source binance-spot --symbol ETHUSDT
-
-# a deployed server: health, klines, WS subscription, book, trades, status
-npm run verify:live -- --server https://<your-app>.onrender.com --symbol BTCUSDT
-
-# record a live stream and replay it through the detectors
-npm run record -- --symbol BTCUSDT --seconds 120 --out recordings/btc.ndjson
-npm run replay -- recordings/btc.ndjson
-
-# manually
-curl "https://<app>/api/klines?source=binance-futures&symbol=BTCUSDT&tf=1m&limit=5"
-curl "https://<app>/api/perf"
-npx wscat -c wss://<app>/ws   # then: {"op":"sub","source":"binance-futures","symbol":"BTCUSDT"}
-```
-
-If Binance changes its WebSocket addresses, override `BINANCE_FUTURES_WS` / `BINANCE_FUTURES_REST` (in production only official `*.binance.com` / `*.binance.vision` hosts are accepted).
+Синтетические данные используются **только в тестах** (`tests/`), в production их нет.
+e2e проверяет: все вкладки на iPhone и десктопе без ошибок и горизонтальной прокрутки; события детекторов в
+журнале; перезапуск с пустым локальным кэшем во время «бана» REST биржи (418 на exchangeInfo) — события, heatmap, разрывы (включая простой) и точный стакан
+из архива восстанавливаются из Postgres; анонимный запрос к paper отклоняется (401).
 
 <a id="perf"></a>
-## 11. Performance report (measured)
+## 11. Измерения
 
-| Metric | Result | Where measured |
+| Метрика | Значение | Где |
 |---|---|---|
-| Engine throughput (book + classification + all detectors + heatmap) | **~88–96k msg/s** (110k messages in ~1.2 s), heap +17–21 MB | `tests/load.test.ts` |
-| Server event-loop lag with 1 instrument, 3 WS clients, recording on | p50 **0.17 ms**, p99 **1.0 ms**, max 4.7 ms | `tests/e2e/perf.e2e.ts` |
-| Server RSS (main + worker) | **~109 MB** under load, ~79 MB idle | same |
-| `/api/heatmap` query for 15 minutes | **~55 ms** | same |
-| Sequence gaps on a continuous stream | 0 | same |
-| Frontend bundle | 276 KB JS (93 KB gzip) + 6 KB CSS | `vite build` |
+| Render Free, 2 инструмента (BTC+ETH), запись в Supabase | RAM 245–253 МБ из 512; CPU 0,086–0,097 из 0,15 | метрики Render, 25.09.2026 |
+| Задержка биржа → сервер | 116–176 мс | `OFT_VERIFY` на Render |
+| Рост БД | ~31 МБ за первые ~40 мин с 2 инструментами (события до ужесточения детекторов) | Supabase |
+| Блок архива 5 мин | 420–480 КиБ (≈ 2900 diffs, 1000–1300 сделок) | логи Render |
+| Пропускная способность движка | ~90 тыс. сообщений/с | `tests/load.test.ts` |
+| Задержка event loop (1 инструмент, 3 клиента, запись) | p99 ≈ 1 мс | `tests/e2e/perf.e2e.ts` |
 
-UI measures: rendering only in the visible tab, rAF throttling (heatmap ≤ 10 FPS, DOM ≤ 10 FPS, footprint ≈ 8 FPS), coalescing of book/status in the Web Worker, ack-based backpressure, caps on candles (20k), trades (400k), heatmap columns (8k) and events (4k), and the heatmap drawn through a single ImageData at CSS resolution.
-
-Note: the numbers above were measured on a local test venue (10 diffs/s) and in the in-process load test. Real BTCUSDT carries more levels per diff; the ~90k msg/s engine capacity leaves a large margin, but the 0.1 CPU on Render Free is the main limit, so keep `MAX_SESSIONS=2`.
+CPU Free-плана — главное ограничение: третий постоянно записываемый инструмент не рекомендуется.
 
 <a id="notclaimed"></a>
-## 12. Features deliberately not claimed
+## 12. Что сознательно не заявляется
 
-- "Seeing" hidden/iceberg orders: only a probable estimate with a confidence score.
-- Proof of spoofing: only "Possible Spoofing (suspicion)".
-- MBO / queue position / individual orders: Binance publishes only aggregated levels.
-- Order-book history from before the server started recording: the exchange provides none.
-- CME (NQ, ES, GC, CL) data, and CFD XAUUSD/BRXUSD order books: no free public source exists.
-- Bybit: adapter interface only, not implemented in this release.
-- Real trading: no order-sending code exists, by design.
-- Server-side push notifications when the browser is closed: not implemented.
-- Persistent history on Render Free: the disk is ephemeral.
+- «Видеть» скрытые ордера: есть только предположение со score.
+- Доказательство спуфинга: только подозрение.
+- MBO, место в очереди, отдельные ордера: Binance публикует только агрегированные уровни.
+- История стакана до начала записи.
+- Данные CME/Nasdaq без платного фида и вашего разрешения; стакан CFD.
+- Реальная торговля.
+- Push-уведомления при закрытом браузере.
 
 <a id="split"></a>
-## 13. Moving to a separate repository
+## 13. Перенос в отдельный репозиторий
 
-The project is fully self-contained in the `orderflow-terminal/` folder and depends on nothing outside it:
+Проект самодостаточен в папке `orderflow-terminal/`:
 
 ```bash
 git subtree split --prefix=orderflow-terminal -b orderflow-terminal-only
-git push git@github.com:<you>/orderflow-terminal.git orderflow-terminal-only:main
+git push https://github.com/<you>/orderflow-terminal.git orderflow-terminal-only:main
 ```
+
+После переноса в Render: Settings → Repository — новый репозиторий, Root Directory — пусто.
