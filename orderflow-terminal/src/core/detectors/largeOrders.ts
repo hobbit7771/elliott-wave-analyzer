@@ -211,7 +211,7 @@ export class LargeOrderDetector {
           price: p,
           confidence: Math.round(40 + 60 * clamp01(tr.cancelled / Math.max(tr.peak, 1e-12))),
           explain: `Уровень ${fq(tr.peak)} на ${tr.side} ${fp(this.ctx, p)} (держался ${(life / 1000).toFixed(1)} с) снят: ${fq(tr.cancelled)} ушло без исполнения, ${fq(tr.executed)} исполнено (разделение приблизительное, L2 пакетами по 100 мс).`,
-          data: { peak: tr.peak, cancelled: tr.cancelled, executed: tr.executed, lifeMs: life },
+          data: { peak: tr.peak, cancelled: tr.cancelled, executed: tr.executed, lifeMs: life, threshold: tr.threshold },
         });
       }
     }

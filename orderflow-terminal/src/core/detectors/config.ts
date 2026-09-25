@@ -94,7 +94,7 @@ export const DEFAULT_DETECTOR_CONFIG: DetectorConfig = {
   iceberg: { minRefills: 3, minTradedToDisplayed: 1.5, minObservationMs: 4000, maxIdleMs: 90_000, maxCancelRatio: 0.6 },
   absorption: { windowMs: 10_000, volPercentile: 0.95, maxMoveAtr: 0.15, minMoveTicks: 2, minSamples: 60, cooldownMs: 15_000 },
   spoof: { maxLifeMs: 20_000, minCancelFrac: 0.8, approachFrac: 0.6, maxDistPct: 0.002, cooldownMs: 60_000 },
-  pulled: { maxDistPct: 0.003, cooldownMs: 20_000 },
+  pulled: { maxDistPct: 0.003, cooldownMs: 60_000 },
   cluster: { elevationMult: 2.5, minBuckets: 3, maxGapBuckets: 1, minHoldMs: 30_000, topPerSide: 3 },
   sweep: { windowMs: 1000, minRangeTicks: 5, minRangeAtr: 0.2, volPercentile: 0.95, cooldownMs: 3000 },
   stopRun: { lookbackBars: 30, reclaimMs: 60_000 },

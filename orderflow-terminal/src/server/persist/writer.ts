@@ -9,7 +9,27 @@ import { backoffDelay } from '../ingestion/wsClient.js';
 import type { ArchiveClient } from './archive.js';
 import type { GapRow, Repo } from './repo.js';
 
-export const ALGO_VERSION = 'oft-detectors-4';
+/**
+ * Which detector events go to the persistent journal. High-volume kinds need a stronger signal;
+ * rare kinds (iceberg, absorption, sweep, stop-run, spoofing, divergence, volume burst) are all kept.
+ */
+export function persistWorthy(ev: MarketEvent): boolean {
+  const d = (ev.data ?? {}) as { size?: number; threshold?: number; peak?: number };
+  switch (ev.kind) {
+    case 'large_order':
+      return ev.confidence >= 85 && !!d.threshold && (d.size ?? 0) >= 2 * d.threshold;
+    case 'liquidity_pulled':
+      return !!d.threshold && (d.peak ?? 0) >= 2 * d.threshold;
+    case 'cluster':
+    case 'imbalance':
+    case 'vacuum':
+      return ev.confidence >= 75;
+    default:
+      return true;
+  }
+}
+
+export const ALGO_VERSION = 'oft-detectors-5';
 
 export interface PersistStatus {
   enabled: boolean;
@@ -178,6 +198,13 @@ export class PersistWriter {
 
   onEvent(ev: MarketEvent): void {
     if (ev.kind === 'feed') return; // feed events go to gaps/coverage, not the detector journal
+    // history keeps significant events only (the live UI still gets all of them); once an event is
+    // stored, its later status changes are stored too so the history stays consistent
+    if (!this.stored.has(ev.id)) {
+      if (!persistWorthy(ev)) return;
+      this.stored.add(ev.id);
+      if (this.stored.size > 20_000) this.stored.delete(this.stored.values().next().value!);
+    }
     if (!this.detectedAt.has(ev.id)) this.detectedAt.set(ev.id, Date.now());
     if (this.detectedAt.size > 20_000) this.detectedAt.delete(this.detectedAt.keys().next().value!);
     this.push({ kind: 'event', t: ev.t, data: { ev, detectedAt: this.detectedAt.get(ev.id)!, algo: ALGO_VERSION } });
@@ -186,6 +213,8 @@ export class PersistWriter {
   onCandle(c: Candle, origin: 'live' | 'rest'): void {
     this.push({ kind: 'candle', t: c.t, data: { c, origin } });
   }
+
+  private stored = new Set<string>();
 
   private push(it: Item): void {
     if (!this.configured) return;

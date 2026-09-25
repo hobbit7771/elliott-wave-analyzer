@@ -193,3 +193,17 @@ describe('Retention and quota guard', () => {
     expect(policy).toEqual({ archive: true, heat10: false });
   });
 });
+
+describe('Journal persistence filter', () => {
+  const base = { t: 1, title: 'x', price: 100, explain: 'x', source: 'binance-futures' as const, symbol: 'TESTUSDT' };
+  it('keeps rare kinds and only strong high-volume ones', async () => {
+    const { persistWorthy } = await import('../src/server/persist/writer.js');
+    expect(persistWorthy({ ...base, id: 'a', kind: 'iceberg', confidence: 50 })).toBe(true);
+    expect(persistWorthy({ ...base, id: 'b', kind: 'large_order', confidence: 90, data: { size: 30, threshold: 10 } })).toBe(true);
+    expect(persistWorthy({ ...base, id: 'c', kind: 'large_order', confidence: 90, data: { size: 15, threshold: 10 } })).toBe(false);
+    expect(persistWorthy({ ...base, id: 'd', kind: 'large_order', confidence: 70, data: { size: 30, threshold: 10 } })).toBe(false);
+    expect(persistWorthy({ ...base, id: 'e', kind: 'liquidity_pulled', confidence: 100, data: { peak: 12, threshold: 10 } })).toBe(false);
+    expect(persistWorthy({ ...base, id: 'f', kind: 'cluster', confidence: 80 })).toBe(true);
+    expect(persistWorthy({ ...base, id: 'g', kind: 'cluster', confidence: 60 })).toBe(false);
+  });
+});

@@ -20,7 +20,7 @@ export function policyFromEnv(env = process.env): RetentionPolicy {
   return {
     heat10Ms: +(env.RET_HEAT10_MS ?? 2 * D),
     heat60Ms: +(env.RET_HEAT60_MS ?? 30 * D),
-    eventsMs: +(env.RET_EVENTS_MS ?? 60 * D),
+    eventsMs: +(env.RET_EVENTS_MS ?? 10 * D),
     candlesMs: +(env.RET_CANDLES_MS ?? 365 * D),
     archiveMs: +(env.RET_ARCHIVE_MS ?? 12 * H),
     // Supabase Free: 500 MB database / 1 GB storage (verify on supabase.com/pricing); keep headroom
@@ -78,6 +78,8 @@ export class RetentionService {
       // 2. quota guard: pause the heaviest detailed writes instead of silently exceeding the free plan
       const archivePaused = !!this.status.storage && this.status.storage.bytes > p.storageBudgetBytes;
       const heat10Paused = sz.dbBytes > p.dbBudgetBytes;
+      // over the DB budget: the detector journal is thinned first (events older than half their retention)
+      if (heat10Paused) this.status.lastPurge.eventsOverBudget = await this.repo.purge({ ...p, heat10Ms: p.heat10Ms, eventsMs: p.eventsMs / 2 }, now).then((r) => r.events);
       if (archivePaused !== this.status.archivePaused || heat10Paused !== this.status.heat10Paused) {
         this.status.archivePaused = archivePaused;
         this.status.heat10Paused = heat10Paused;
