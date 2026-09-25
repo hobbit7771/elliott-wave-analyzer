@@ -269,6 +269,28 @@ async function eventsHistory(source: string, symbol: string, key: string, from: 
   return [...m.values()].sort((a, b) => a.t - b.t).slice(-limit);
 }
 
+// Archive blocks are decoded in the main thread one at a time (a decoded block is tens of MB), and only the
+// extracted trades are kept (small LRU): concurrent history requests after a restart must not exhaust the heap.
+const blockTradeCache = new Map<string, Trade[]>();
+let decodeChain: Promise<unknown> = Promise.resolve();
+function serialDecode<T>(fn: () => Promise<T>): Promise<T> {
+  const run = decodeChain.then(fn, fn);
+  decodeChain = run.catch(() => {});
+  return run;
+}
+async function archivedTrades(m: { path: string; sha256: string }): Promise<Trade[]> {
+  const hit = blockTradeCache.get(m.path);
+  if (hit) {
+    blockTradeCache.delete(m.path);
+    blockTradeCache.set(m.path, hit);
+    return hit;
+  }
+  const trades = await serialDecode(async () => blockTrades(decodeBlock(await archive!.get(m.path), m.sha256)));
+  blockTradeCache.set(m.path, trades);
+  if (blockTradeCache.size > 24) blockTradeCache.delete(blockTradeCache.keys().next().value!);
+  return trades;
+}
+
 /** trades: local cache, plus WebSocket trades from Supabase archive blocks for older ranges (bounded) */
 async function tradesHistory(source: string, symbol: string, key: string, from: number, to: number, limit: number): Promise<{ trades: Trade[]; sources: string[] }> {
   const local = reader.trades(key, from, to, limit);
@@ -279,7 +301,7 @@ async function tradesHistory(source: string, symbol: string, key: string, from: 
   const extra: Trade[] = [];
   for (const m of ms) {
     try {
-      for (const t of blockTrades(decodeBlock(await archive.get(m.path), m.sha256))) if (t.t >= from && t.t < localFrom) extra.push(t);
+      for (const t of await archivedTrades(m)) if (t.t >= from && t.t < localFrom) extra.push(t);
     } catch (e) {
       log(`archive read ${m.path} failed: ${(e as Error).message}`);
     }
@@ -398,8 +420,11 @@ async function api(req: http.IncomingMessage, res: http.ServerResponse, u: URL):
     if (!archive) throw httpErr(503, 'archive storage not configured');
     const ms = await r.manifests(source, symbol, t, t);
     if (!ms.length) return json(res, 404, { error: 'no archived L2 block covers this time (outside retention or a recording gap)' });
-    const blk = decodeBlock(await archive.get(ms[0].path), ms[0].sha256);
-    const rep = replayBlock(blk, t, source === 'binance-futures');
+    const a = archive;
+    const { blk, rep } = await serialDecode(async () => {
+      const blk = decodeBlock(await a.get(ms[0].path), ms[0].sha256);
+      return { blk: { loTick: blk.loTick, hiTick: blk.hiTick, tick: blk.tick }, rep: replayBlock(blk, t, source === 'binance-futures') };
+    });
     const top = rep.book.top(num(u, 'levels', 50));
     return json(res, 200, { t, block: ms[0].path, continuous: rep.continuous, lastUpdateId: rep.lastUpdateId, band: [blk.loTick * blk.tick, blk.hiTick * blk.tick], ...top });
   }
