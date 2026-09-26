@@ -61,7 +61,7 @@ const HEAT_CAP = 8000;
 const EVENT_CAP = 4000;
 
 export class Store {
-  source: SourceId = 'binance-futures';
+  source: SourceId = 'bybit-linear';
   symbol = 'BTCUSDT';
   meta: InstrumentMeta | null = null;
   tf: Timeframe = '1m';

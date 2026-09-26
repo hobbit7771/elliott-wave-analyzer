@@ -569,19 +569,37 @@ export function createChartTab(): Tab {
     const evs = store.eventList().filter(eventVisible);
     const ms: SeriesMarker<Time>[] = [];
     const zs: Zone[] = [];
-    for (const e of evs.slice(-150)) {
+    // Order-flow events are seconds-scale: on higher time frames dozens land in one bar. Show one marker per
+    // bar, kind and direction (the strongest, with a count), raise the score floor with the bar size, and
+    // label only the strongest few; everything stays in the Signals tab.
+    const tfMs = isTick() ? 0 : TF_MS[store.tf as Exclude<Timeframe, 'tick'>];
+    const floor = tfMs >= 3600_000 ? 85 : tfMs >= 900_000 ? 75 : 0;
+    const groups = new Map<string, { e: MarketEvent; bt: number; n: number; bull: boolean | null }>();
+    for (const e of evs.slice(-400)) {
       const bt = barTime(e.t);
       if (bt === null) continue;
-      const color = KIND_COLOR[e.kind];
       if (e.kind === 'absorption' && e.priceHi !== undefined) {
-        zs.push({ t0: e.t, t1: e.endT ?? e.t + 15 * 60_000, lo: e.price, hi: e.priceHi, color, label: '' });
+        zs.push({ t0: e.t, t1: e.endT ?? e.t + 15 * 60_000, lo: e.price, hi: e.priceHi, color: KIND_COLOR[e.kind], label: '' });
       }
       // clusters, vacuums and large levels are drawn as curated lines below, not as markers
       if (e.kind === 'large_order' || e.kind === 'cluster' || e.kind === 'vacuum') continue;
+      if (e.confidence < floor) continue;
       const bull = isBullish(e);
-      // short text only for strong events; the rest are plain glyphs (details on hover / Signals tab)
-      const text = e.confidence >= 80 ? (layers.conf ? `${short(e)} ${e.confidence}` : short(e)) : '';
-      ms.push({ time: bt as UTCTimestamp, position: 'atPriceMiddle', price: e.price, shape: bull === null ? 'circle' : bull ? 'arrowUp' : 'arrowDown', color, text, size: 0.6, id: e.id });
+      const k = `${bt}|${e.kind}|${bull}`;
+      const g = groups.get(k);
+      if (!g) groups.set(k, { e, bt, n: 1, bull });
+      else {
+        g.n++;
+        if (e.confidence > g.e.confidence) g.e = e;
+      }
+    }
+    const kept = [...groups.values()].sort((a, b) => b.e.confidence - a.e.confidence).slice(0, 60);
+    const labelled = new Set(kept.filter((g) => g.e.confidence >= 80).slice(0, 12));
+    for (const g of kept) {
+      const e = g.e;
+      const tag = g.n > 1 ? `${short(e)}×${g.n}` : short(e);
+      const text = labelled.has(g) ? (layers.conf ? `${tag} ${e.confidence}` : tag) : '';
+      ms.push({ time: g.bt as UTCTimestamp, position: 'atPriceMiddle', price: e.price, shape: g.bull === null ? 'circle' : g.bull ? 'arrowUp' : 'arrowDown', color: KIND_COLOR[e.kind], text, size: 0.6, id: e.id });
     }
     if (layers.liq) {
       for (const l of store.liqs) {

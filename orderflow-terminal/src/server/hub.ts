@@ -3,7 +3,7 @@ import { Worker } from 'node:worker_threads';
 import type WebSocket from 'ws';
 import type { InstrumentMeta, SourceId } from '../core/types.js';
 import { type DetectorConfig, DEFAULT_DETECTOR_CONFIG, mergeConfig, type DeepPartial } from '../core/detectors/config.js';
-import { getAdapter } from './adapters/registry.js';
+import { getAdapter, isSource } from './adapters/registry.js';
 import { type HistoryReader, symKey } from './recorder.js';
 
 export interface HubOptions {
@@ -219,7 +219,10 @@ export class Hub {
       return;
     }
     if ((m.op === 'sub' || m.op === 'unsub') && typeof m.source === 'string' && typeof m.symbol === 'string') {
-      if (!/^[A-Z0-9]{2,30}$/.test(m.symbol) || !['binance-futures', 'binance-spot'].includes(m.source)) return;
+      if (!/^[A-Z0-9]{2,30}$/.test(m.symbol) || !isSource(m.source)) {
+        c.ws.send(JSON.stringify({ ch: 'error', d: { message: `unknown source ${String(m.source)}` } }));
+        return;
+      }
       const key = symKey(m.source, m.symbol);
       if (m.op === 'unsub') {
         this.sessions.get(key)?.subs.delete(c);

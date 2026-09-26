@@ -74,6 +74,8 @@ export const restHealth: Record<string, { ok: number; fail: number; lastStatus: 
 export async function getJson<T>(url: string, timeoutMs = 10_000): Promise<T> {
   const host = new URL(url).host;
   const h = (restHealth[host] ??= { ok: 0, fail: 0, lastStatus: 0, lastError: '', bannedUntil: 0, lastOkAt: 0 });
+  // Binance extends an IP ban for requests sent while it is active: send nothing to a banned host until it ends
+  if (Date.now() < h.bannedUntil) throw new HttpError(418, `${host} REST paused until ${new Date(h.bannedUntil).toISOString()} (IP ban / rate limit); request not sent`);
   const ac = new AbortController();
   const to = setTimeout(() => ac.abort(), timeoutMs);
   try {
@@ -86,6 +88,10 @@ export async function getJson<T>(url: string, timeoutMs = 10_000): Promise<T> {
       // Binance 418/429: IP ban / rate limit. "banned until <epoch ms>" is reported to the UI.
       const m = /banned until (\d{13})/.exec(body);
       if (m) h.bannedUntil = +m[1];
+      else if (r.status === 429 || r.status === 418) {
+        const ra = Number(r.headers.get('retry-after'));
+        h.bannedUntil = Date.now() + (Number.isFinite(ra) && ra > 0 ? ra * 1000 : 60_000);
+      }
       throw new HttpError(r.status, `${r.status} ${url.split('?')[0]} ${body.slice(0, 200)}`);
     }
     h.ok++;

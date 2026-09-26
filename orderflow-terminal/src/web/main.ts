@@ -26,7 +26,7 @@ const app = document.getElementById('app')!;
 
 // ---------- header ----------
 const sourceSel = el('select', { 'aria-label': 'Источник данных' });
-sourceSel.append(el('option', { value: 'binance-futures', text: 'Binance Futures' }), el('option', { value: 'binance-spot', text: 'Binance Spot' }), el('option', { value: 'bybit-linear', text: 'Bybit Perp' }));
+sourceSel.append(el('option', { value: 'bybit-linear', text: 'Bybit Perp' }), el('option', { value: 'binance-futures', text: 'Binance Futures' }), el('option', { value: 'binance-spot', text: 'Binance Spot' }));
 const symbolInput = el('input', { id: 'symbolInput', list: 'symbols', 'aria-label': 'Инструмент', autocomplete: 'off', spellcheck: 'false' });
 const symbolList = el('datalist', { id: 'symbols' });
 const tfGroup = el('div', { class: 'tf-group', role: 'group', 'aria-label': 'Timeframe' });
@@ -369,7 +369,7 @@ store.on('net', renderStatus);
 setInterval(renderStatus, 1000);
 
 // ---------- boot ----------
-const inst = loadPrefRaw<{ source: SourceId; symbol: string }>('instrument', { source: 'binance-futures', symbol: 'BTCUSDT' });
+const inst = loadPrefRaw<{ source: SourceId; symbol: string }>('instrument', { source: 'bybit-linear', symbol: 'BTCUSDT' });
 store.source = inst.source;
 sourceSel.value = inst.source;
 store.ticksPerBar = loadPrefRaw('ticks', 100);

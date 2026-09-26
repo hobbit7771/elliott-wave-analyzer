@@ -25,9 +25,9 @@ services:
       - key: DB_PATH
         value: data/orderflow.sqlite
       - key: MAX_SESSIONS
-        value: "2"
+        value: "3"
       - key: DEFAULT_SYMBOLS
-        value: binance-futures:BTCUSDT,binance-futures:ETHUSDT
+        value: bybit-linear:BTCUSDT,bybit-linear:ETHUSDT
       - key: BACKFILL_MINUTES
         value: "10"
       - key: SUPABASE_PROJECT_REF

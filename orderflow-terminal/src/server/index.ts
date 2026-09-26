@@ -9,7 +9,7 @@ import { gzipSync } from 'node:zlib';
 import { timingSafeEqual } from 'node:crypto';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { WebSocketServer } from 'ws';
-import type { HeatColumn, InstrumentMeta, MarketEvent, SourceId, Trade } from '../core/types.js';
+import type { Candle, HeatColumn, InstrumentMeta, MarketEvent, SourceId, Trade } from '../core/types.js';
 import { isTimeframe, candlesFromTrades, resampleCandles, TF_MS, type Timeframe } from '../core/candles.js';
 import { columnsToCsv, downsample } from '../core/heatmap.js';
 import { blockTrades, decodeBlock, replayBlock } from '../core/archiveCodec.js';
@@ -187,7 +187,7 @@ async function initSupabase(attempt = 0): Promise<void> {
     setInterval(verifyAll, 15 * 60_000);
     let list = await r.recordList();
     if (!list.length) {
-      for (const k of (process.env.DEFAULT_SYMBOLS ?? 'binance-futures:BTCUSDT,binance-futures:ETHUSDT').split(',').map((s) => s.trim()).filter(Boolean)) {
+      for (const k of (process.env.DEFAULT_SYMBOLS ?? 'bybit-linear:BTCUSDT,bybit-linear:ETHUSDT').split(',').map((s) => s.trim()).filter(Boolean)) {
         const [src, sym] = k.split(':');
         await r.setRecord(src, sym, true);
       }
@@ -209,7 +209,7 @@ async function initSupabase(attempt = 0): Promise<void> {
     supabaseState = { configured: true, connected: false, host: '', error: (e as Error).message };
     const wait = Math.min(300_000, 10_000 * 2 ** attempt);
     log(`Supabase unavailable (${supabaseState.error}); live data continues WITHOUT persistent history; retry in ${wait / 1000}s`);
-    if (!hub.pinned.length) startRecording((process.env.DEFAULT_SYMBOLS ?? 'binance-futures:BTCUSDT').split(',').map((s) => s.trim()).filter(Boolean));
+    if (!hub.pinned.length) startRecording((process.env.DEFAULT_SYMBOLS ?? 'bybit-linear:BTCUSDT').split(',').map((s) => s.trim()).filter(Boolean));
     setTimeout(() => void initSupabase(attempt + 1), wait);
   }
 }
@@ -440,10 +440,28 @@ async function api(req: http.IncomingMessage, res: http.ServerResponse, u: URL):
         // exchange REST unavailable (e.g. shared cloud IP banned): fall back to stored closed 1m candles
         if (!repo) throw e;
         const to = end ?? Date.now();
+        const tfx = tf as Exclude<Timeframe, 'tick'>;
         const stored = await repo.candles(source, symbol, to - Math.min(limit * barMs, 14 * 86_400_000), to);
-        if (!stored.length) throw e;
-        const candles = barMs === 60_000 ? stored : resampleCandles(stored, tf as Exclude<Timeframe, 'tick'>);
-        data = { candles: candles.slice(-limit), origin: 'stored-1m', tf, liveFrom, warning: `Exchange REST unavailable (${(e as Error).message.slice(0, 120)}); showing closed 1m candles stored in Supabase, resampled` };
+        let candles = barMs === 60_000 ? stored : resampleCandles(stored, tfx);
+        const origins = stored.length ? ['stored-1m'] : [];
+        // higher time frames: the exchange klines cached in Supabase by the level service (15m / 1d, up to a
+        // year) reach much further back than the recorded 1m candles; recorded 1m fill the bars after them
+        const base = tf === '1d' ? '1d' : barMs >= TF_MS['15m'] ? '15m' : null;
+        if (base) {
+          const cached = await repo.klines(source, symbol, base, to - limit * barMs, to).catch(() => []);
+          if (cached.length) {
+            // same bar from both: keep the more complete one (larger volume: fewer missing minutes)
+            const byT = new Map<number, Candle>();
+            for (const c of [...(base === tf ? cached : resampleCandles(cached, tfx)), ...candles]) {
+              const prev = byT.get(c.t);
+              if (!prev || c.v > prev.v) byT.set(c.t, c);
+            }
+            candles = [...byT.values()].sort((a, b) => a.t - b.t);
+            origins.unshift(`cached-${base}`);
+          }
+        }
+        if (!candles.length) throw e;
+        data = { candles: candles.slice(-limit), origin: origins.join('+'), tf, liveFrom, warning: `REST биржи недоступен (${(e as Error).message.slice(0, 120)}); показаны сохранённые свечи: ${origins.join(' + ')}` };
         return json(res, 200, data);
       }
       klineCache.set(ck, { t: Date.now(), data });

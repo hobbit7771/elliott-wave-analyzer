@@ -1,6 +1,5 @@
 // TEST-ONLY local stand-in for the Bybit v5 public WebSocket (same message layout as the documentation).
-import { WebSocketServer, type WebSocket } from 'ws';
-import type { AddressInfo } from 'node:net';
+import { FakeBybit } from './fixtures/fakeBybit.js';
 import { Session } from '../src/server/session.js';
 import { DEFAULT_DETECTOR_CONFIG } from '../src/core/detectors/config.js';
 import { TEST_META } from './fixtures/sim.js';
@@ -12,52 +11,6 @@ async function until(fn: () => boolean, ms = 8000): Promise<void> {
   while (!fn()) {
     if (Date.now() - t > ms) throw new Error('timeout');
     await wait(20);
-  }
-}
-
-class FakeBybit {
-  wss = new WebSocketServer({ port: 0, host: '127.0.0.1' });
-  books: WebSocket[] = [];
-  flows: WebSocket[] = [];
-  u = 1000;
-  snapshots = 0;
-  subscribes: string[] = [];
-  pings = 0;
-  constructor() {
-    this.wss.on('connection', (ws) => {
-      ws.on('message', (raw) => {
-        const m = JSON.parse(String(raw)) as { op: string; args?: string[] };
-        if (m.op === 'ping') {
-          this.pings++;
-          ws.send(JSON.stringify({ success: true, ret_msg: 'pong', op: 'ping' }));
-          return;
-        }
-        if (m.op !== 'subscribe') return;
-        this.subscribes.push(...(m.args ?? []));
-        ws.send(JSON.stringify({ success: true, op: 'subscribe' }));
-        if (m.args?.some((a) => a.startsWith('orderbook.'))) {
-          this.books.push(ws);
-          this.snapshots++;
-          ws.send(JSON.stringify({ topic: 'orderbook.200.TESTUSDT', type: 'snapshot', ts: Date.now(), data: { s: 'TESTUSDT', b: [['100.0', '3'], ['99.9', '5']], a: [['100.1', '4'], ['100.2', '6']], u: this.u, seq: 1 } }));
-        } else this.flows.push(ws);
-      });
-    });
-  }
-  get url(): string {
-    return `ws://127.0.0.1:${(this.wss.address() as AddressInfo).port}`;
-  }
-  delta(b: [string, string][], a: [string, string][], skip = 0): void {
-    this.u += 1 + skip;
-    const msg = JSON.stringify({ topic: 'orderbook.200.TESTUSDT', type: 'delta', ts: Date.now(), data: { s: 'TESTUSDT', b, a, u: this.u, seq: this.u } });
-    for (const ws of this.books) if (ws.readyState === 1) ws.send(msg);
-  }
-  trade(side: 'Buy' | 'Sell', p: string, v: string): void {
-    const msg = JSON.stringify({ topic: 'publicTrade.TESTUSDT', type: 'snapshot', ts: Date.now(), data: [{ T: Date.now(), s: 'TESTUSDT', S: side, v, p, L: 'PlusTick', i: 'x', BT: false }] });
-    for (const ws of this.flows) if (ws.readyState === 1) ws.send(msg);
-  }
-  close(): Promise<void> {
-    for (const c of this.wss.clients) c.terminate();
-    return new Promise((r) => this.wss.close(() => r()));
   }
 }
 
@@ -80,7 +33,7 @@ describe('Bybit adapter (format + session sync, local stand-in; not verified aga
 
   it('syncs from the stream snapshot, applies +1 deltas, and on a gap reconnects for a fresh snapshot', async () => {
     const venue = new FakeBybit();
-    await new Promise((r) => venue.wss.once('listening', r));
+    await venue.listen();
     process.env.BYBIT_WS = venue.url;
     const { BybitLinearAdapter } = await import('../src/server/adapters/bybit.js');
     const adapter = new BybitLinearAdapter();
