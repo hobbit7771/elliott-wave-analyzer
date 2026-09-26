@@ -746,20 +746,28 @@ export function createChartTab(): Tab {
       ['Level strength', `${s.levelStrength}/100 (${s.levelStatus})`],
       ['Setup quality', `${s.setupQuality}/100`],
       ['Distance to level', `${f2(s.distanceToLevelAtr)} ATR`],
-      ['Approach duration', `${s.approachBars} × ${Math.round((s.confirmedAt - s.t) / 60_000)}m`],
-      ['Volume decay', pct(s.volumeDecay)],
-      ['Volatility contraction', pct(s.volatilityContraction)],
-      ['Reaction volume', `${f2(s.reactionVolumeRatio)}× медианы подхода (z ${f2(s.reactionVolumeZ)})`],
-      ['Reaction strength', `${f2(s.reactionStrengthAtr)} ATR_D1`],
+      ...(Number.isFinite(s.volumeDecay)
+        ? ([
+            ['Approach duration', `${s.approachBars} × ${Math.round((s.confirmedAt - s.t) / 60_000)}m`],
+            ['Volume decay', pct(s.volumeDecay)],
+            ['Volatility contraction', pct(s.volatilityContraction)],
+            ['Reaction volume', `${f2(s.reactionVolumeRatio)}× медианы подхода (z ${f2(s.reactionVolumeZ)})`],
+            ['Reaction strength', `${f2(s.reactionStrengthAtr)} ATR_D1`],
+          ] as [string, string][])
+        : ([
+            ['Модель', s.trigger.split(':')[0]],
+            ['Ордер ждал', `${s.approachBars} × 15m`],
+            ['Стоп', `${f2(Math.abs(s.entry - s.sl))} (${f2(Math.abs(s.entry - s.sl) / Math.max(1e-12, s.entry) * 100)}% цены)`],
+          ] as [string, string][])),
       ['Trigger', s.trigger],
       ['Entry', fmtP(s.entry, dec())],
       ['Invalidation', fmtP(s.invalidation, dec())],
       ['SL reference', fmtP(s.sl, dec())],
-      ['Next strong level', s.nextLevel !== null ? fmtP(s.nextLevel, dec()) : 'нет (цель 2R)'],
+      ['Next strong level', s.nextLevel !== null ? fmtP(s.nextLevel, dec()) : 'нет'],
       ['Potential RR', f2(s.rr)],
       ['Reason codes', s.reasons.join(', ')],
       ['Segment', s.segment ?? 'LIVE'],
-      ['Result', s.outcome.status === 'open' ? `открыт, ${f2(s.outcome.r)}R` : `${s.outcome.status}, ${f2(s.outcome.r)}R (MFE ${f2(s.outcome.mfeR)}R, MAE ${f2(s.outcome.maeR)}R)`],
+      ['Result', s.outcome.status === 'open' ? `открыт, ${f2(s.outcome.r)}R` : `${s.outcome.status}, ${f2(s.outcome.r)}R после комиссий (MFE ${f2(s.outcome.mfeR)}R, MAE ${f2(s.outcome.maeR)}R)`],
     ];
     openDetail(
       `<b style="color:${s.direction === 'LONG' ? '#26a69a' : '#ef5350'}">✅ ${s.direction}</b> <span class="muted">качество ${s.setupQuality} · уровень ${s.levelStrength}</span>` +

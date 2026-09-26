@@ -1,9 +1,9 @@
-// Worker thread for the historical level/setup analysis (walk-forward backtest). It runs the same
-// LevelSetupEngine used live, off the main thread so the live feed and the WebSocket clients never wait.
+// Worker thread for the historical level/setup analysis (backtest). It runs the same
+// GerchikEngine used live, off the main thread so the live feed and the WebSocket clients never wait.
 import { parentPort } from 'node:worker_threads';
 import type { Candle } from '../core/types.js';
-import { walkForward, stats, groupStats, scoreBucket } from '../core/levelEngine/backtest.js';
-import { DEFAULT_SETUP_PARAMS } from '../core/levelEngine/setupEngine.js';
+import { runGerchik, stats, groupStats, scoreBucket } from '../core/levelEngine/backtest.js';
+import { SITE_GERCHIK_PARAMS, SITE_GERCHIK_CHOICE } from '../core/levelEngine/gerchik.js';
 
 export interface AnalysisRequest {
   id: number;
@@ -17,7 +17,7 @@ parentPort!.on('message', (req: AnalysisRequest) => {
   try {
     const first = req.bars[0]?.t ?? 0;
     const dailyBefore = req.daily.filter((d) => d.t + 86_400_000 <= first);
-    const wf = walkForward(req.meta, dailyBefore, req.bars, DEFAULT_SETUP_PARAMS);
+    const wf = runGerchik(req.meta, dailyBefore, req.bars, SITE_GERCHIK_PARAMS, SITE_GERCHIK_CHOICE);
     const setups = wf.setups;
     parentPort!.postMessage({
       id: req.id,

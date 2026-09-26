@@ -42,9 +42,14 @@ export interface GerchikParams {
   squeezeRangeAtr: number; // breakout: max bar range in ATR(D1)
   roomCheck: boolean; // skip when the next strong level is closer than the target
   breakevenR: number; // move the stop to entry after +this R (Infinity: off)
+  trailR: number; // after +trailR, trail the stop trailR behind the best close-to-date excursion (Infinity: off)
   cooldownBars: number; // per level after a trade
   maxOpen: number; // concurrent open trades per instrument
   maxHoldBars: number;
+  /** level sources: strong historical D1 levels, and/or fresh БСУ levels (highs / lows of the last bsuDays
+   *  closed daily candles that no later daily close has crossed) */
+  levelSource: 'd1' | 'recent' | 'both';
+  bsuDays: number;
   feeMaker: number;
   feeTaker: number;
   slippage: number; // on stop / market exits
@@ -73,13 +78,40 @@ export const DEFAULT_GERCHIK_PARAMS: GerchikParams = {
   squeezeRangeAtr: 0.12,
   roomCheck: true,
   breakevenR: Infinity,
+  trailR: Infinity,
   cooldownBars: 16,
   maxOpen: 1,
   maxHoldBars: 480,
+  levelSource: 'd1',
+  bsuDays: 3,
   feeMaker: 0.0002, // Bybit linear, base tier
   feeTaker: 0.00055,
   slippage: 0.0002,
 };
+
+/**
+ * The configuration the site runs for every coin. It was chosen once on 14 Bybit perpetuals (a year of 15m
+ * bars, Bybit fees included) from the rule families that held up best — strongest D1 levels only, trades
+ * only in the D1 trend, bounce and breakout-with-compression — and it is NOT re-tuned per coin: tuning per
+ * coin on one period did not carry over to the next (TRAIN→VALIDATION correlation ≈ 0 over 800 variants).
+ */
+export const SITE_GERCHIK_PARAMS: GerchikParams = {
+  ...DEFAULT_GERCHIK_PARAMS,
+  levelSource: 'd1',
+  minStrength: 70,
+  trend: 'strict',
+  trendSma: 50,
+  bounce: true,
+  falseBreak: false,
+  breakout: true,
+  stopAtr: 0.5,
+  rr: 3,
+  atrExhaust: Infinity,
+  roomCheck: true,
+  bpuWindow: 48,
+};
+export const SITE_GERCHIK_CHOICE =
+  'Фиксированные параметры по правилам Герчика (уровни D1 силой ≥ 70, только по тренду D1, отбой БСУ/БПУ и пробой с поджатием, стоп 0,5 ATR(D1), цель 3:1), выбраны один раз на 14 монетах Bybit; под монету не подгоняются. Комиссии Bybit включены в R.';
 
 type Model = 'BOUNCE' | 'FALSE_BREAK' | 'BREAKOUT';
 
@@ -132,10 +164,30 @@ export class GerchikEngine {
   ) {
     this.daily = [...dailyBefore];
     this.recomputeLevels();
+    this.recomputeRecent();
   }
 
   activeLevels(): DailyLevel[] {
-    return this.levels.filter((l) => (l.status === 'STRONG' || l.status === 'FLIPPED') && l.strength >= this.p.minStrength);
+    const d1 = this.p.levelSource === 'recent' ? [] : this.levels.filter((l) => (l.status === 'STRONG' || l.status === 'FLIPPED') && l.strength >= this.p.minStrength);
+    return this.p.levelSource === 'd1' ? d1 : [...d1, ...this.recent.filter((r) => !d1.some((l) => Math.abs(l.price - r.price) <= 0.1 * this.atrD))];
+  }
+
+  /** fresh БСУ levels: highs / lows of the last bsuDays closed daily candles not crossed by a later daily close */
+  private recent: DailyLevel[] = [];
+  private recomputeRecent(): void {
+    const d = this.daily;
+    const out: DailyLevel[] = [];
+    for (let k = Math.max(0, d.length - this.p.bsuDays); k < d.length; k++) {
+      const later = d.slice(k + 1);
+      for (const [price, role] of [
+        [d[k].h, 'resistance'],
+        [d[k].l, 'support'],
+      ] as const) {
+        if (later.some((x) => (role === 'resistance' ? x.c > price : x.c < price))) continue;
+        out.push({ id: `bsu:${d[k].t}:${role}`, price, zone: 0, role, status: 'STRONG', strength: 50, rejections: 1, cleanReactions: 0, sweepReclaims: 0, attempts: 1, volumeRel: 1, avgReactionAtr: 0, avgReactionDays: 0, chopScore: 0, lastTouch: d[k].t, breakdown: {}, why: `БСУ: ${role === 'resistance' ? 'максимум' : 'минимум'} дня ${new Date(d[k].t).toISOString().slice(0, 10)}` });
+      }
+    }
+    this.recent = out;
   }
 
   stateOf(levelId: string): LevelState {
@@ -171,6 +223,7 @@ export class GerchikEngine {
       if (this.curDayComplete) {
         this.daily.push(this.curDay);
         this.recomputeLevels();
+        this.recomputeRecent();
       }
       this.curDay = null;
     }
@@ -377,7 +430,7 @@ export class GerchikEngine {
 
   private openTrade(o: Pending, b: Candle, px: number): Setup | null {
     const p = this.p;
-    const lv = this.levels.find((l) => l.id === o.levelId);
+    const lv = this.activeLevels().find((l) => l.id === o.levelId) ?? this.levels.find((l) => l.id === o.levelId);
     const risk = Math.abs(px - o.sl);
     if (!(risk > 0)) return null;
     const tp = px + o.dir * p.rr * risk;
@@ -461,8 +514,8 @@ export class GerchikEngine {
       const hitSl = dir > 0 ? b.l <= stop : b.h >= stop;
       const hitTp = !fresh && (dir > 0 ? b.h >= s.tp : b.l <= s.tp);
       if (hitSl) {
-        const gross = (dir > 0 ? stop - s.entry : s.entry - stop) / risk; // −1, or 0 after breakeven
-        o.status = gross < -1e-9 ? 'loss' : 'timeout';
+        const gross = (dir > 0 ? stop - s.entry : s.entry - stop) / risk; // −1, 0 after breakeven, > 0 when trailed
+        o.status = gross < -1e-9 ? 'loss' : gross > 1e-9 ? 'win' : 'timeout';
         o.r = gross - this.costR(s, p.feeTaker, p.slippage);
         o.barsToInvalidation = barsIn;
         o.closedAt = b.t;
@@ -476,7 +529,12 @@ export class GerchikEngine {
         o.closedAt = b.t;
       } else {
         o.r = (dir > 0 ? b.c - s.entry : s.entry - b.c) / risk;
-        if (isFinite(p.breakevenR) && o.mfeR >= p.breakevenR) s._sl = s.entry; // stop to breakeven
+        // stop management uses excursions up to and including this closed bar; it applies from the next bar
+        if (isFinite(p.breakevenR) && o.mfeR >= p.breakevenR && (dir > 0 ? s._sl < s.entry : s._sl > s.entry)) s._sl = s.entry;
+        if (isFinite(p.trailR) && o.mfeR >= p.trailR) {
+          const trail = s.entry + dir * (o.mfeR - p.trailR) * risk;
+          if (dir > 0 ? trail > s._sl : trail < s._sl) s._sl = trail;
+        }
         still.push(s);
       }
     }

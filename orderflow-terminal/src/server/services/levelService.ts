@@ -3,13 +3,14 @@
 // Data: closed exchange klines (1d and 15m) are fetched from REST once and cached in Supabase (oft.klines),
 // afterwards only the tail is fetched — so a restart or a REST ban does not lose the history.
 // History: the walk-forward backtest runs in a worker thread (analysisWorker.ts).
-// Live: a LevelSetupEngine per instrument is warmed up on the last days of CLOSED 15m bars and then fed
+// Live: a GerchikEngine per instrument is warmed up on the last days of CLOSED 15m bars and then fed
 // every newly CLOSED 15m bar — the same engine class the backtest uses.
 import { Worker } from 'node:worker_threads';
 import type { Candle, SourceId } from '../../core/types.js';
 import type { MarketAdapter } from '../adapters/adapter.js';
 import type { Repo } from '../persist/repo.js';
-import { DEFAULT_SETUP_PARAMS, LevelSetupEngine, type Setup, type SetupParams } from '../../core/levelEngine/setupEngine.js';
+import type { Setup } from '../../core/levelEngine/setupEngine.js';
+import { GerchikEngine, SITE_GERCHIK_PARAMS, type GerchikParams } from '../../core/levelEngine/gerchik.js';
 import type { DailyLevel } from '../../core/levelEngine/dailyLevels.js';
 
 const M15 = 15 * 60_000;
@@ -20,7 +21,7 @@ export interface HistoryResult {
   computedAt: number;
   ms: number;
   coverage: { from: number; to: number; bars: number; days: number };
-  params: SetupParams;
+  params: GerchikParams | Record<string, unknown>;
   chosenBy: string;
   grid: unknown[];
   segments: unknown[];
@@ -36,8 +37,8 @@ interface Ctx {
   symbol: string;
   key: string;
   tick: number;
-  engine: LevelSetupEngine | null;
-  params: SetupParams;
+  engine: GerchikEngine | null;
+  params: GerchikParams;
   lastBarT: number;
   history: HistoryResult | null;
   status: string;
@@ -75,14 +76,13 @@ export class LevelService {
   async ensure(source: SourceId, symbol: string): Promise<void> {
     const key = `${source}:${symbol}`;
     if (this.ctx.has(key)) return;
-    const c: Ctx = { source, symbol, key, tick: 0, engine: null, params: DEFAULT_SETUP_PARAMS, lastBarT: 0, history: null, status: 'loading', error: '', live: [], price: NaN, running: false };
+    const c: Ctx = { source, symbol, key, tick: 0, engine: null, params: SITE_GERCHIK_PARAMS, lastBarT: 0, history: null, status: 'loading', error: '', live: [], price: NaN, running: false };
     this.ctx.set(key, c);
     const repo = this.deps.repo();
     const stored = repo ? await repo.getSetting<HistoryResult>('levelsetups:' + key).catch(() => undefined) : undefined;
-    if (stored) {
-      c.history = stored;
-      c.params = { ...DEFAULT_SETUP_PARAMS, ...stored.params };
-    }
+    // results of an older engine (or older site parameters) are shown until the recomputation replaces them
+    const current = stored && JSON.stringify(stored.params) === JSON.stringify(SITE_GERCHIK_PARAMS);
+    if (stored) c.history = stored;
     try {
       c.tick = await this.deps.tickOf(source, symbol);
       await this.startLive(c);
@@ -92,7 +92,7 @@ export class LevelService {
       this.deps.log(`[levels ${key}] live start failed: ${c.error}`);
     }
     // a stored result younger than 12 h is reused; otherwise recompute in the background
-    if (!stored || Date.now() - stored.computedAt > 12 * 3600_000) this.enqueue(key);
+    if (!stored || !current || Date.now() - stored.computedAt > 12 * 3600_000) this.enqueue(key);
   }
 
   forget(key: string): void {
@@ -146,7 +146,7 @@ export class LevelService {
     const warm = await this.loadKlines(c, '15m', now - 7 * DAY);
     if (daily.length < 60 || !warm.length) throw new Error(`not enough history (D1 ${daily.length}, 15m ${warm.length})`);
     const dailyBefore = daily.filter((d) => d.t + DAY <= warm[0].t);
-    const eng = new LevelSetupEngine({ symbol: c.symbol, exchange: c.source, tick: c.tick }, dailyBefore, c.params);
+    const eng = new GerchikEngine({ symbol: c.symbol, exchange: c.source, tick: c.tick }, dailyBefore, c.params);
     for (const b of warm) eng.step(b);
     c.engine = eng;
     c.lastBarT = warm[warm.length - 1].t;
@@ -213,12 +213,9 @@ export class LevelService {
       if (bars.length < 2000 || daily.length < 120) throw new Error(`not enough history for a backtest (15m ${bars.length}, D1 ${daily.length})`);
       const r = await this.analyze({ symbol: c.symbol, exchange: c.source, tick: c.tick || 0 }, daily, bars);
       c.history = r;
-      const paramsChanged = JSON.stringify(r.params) !== JSON.stringify(c.params);
-      c.params = { ...DEFAULT_SETUP_PARAMS, ...r.params };
       const repo = this.deps.repo();
       if (repo) await repo.setSetting('levelsetups:' + key, r).catch((e) => this.deps.log(`[levels ${key}] result save failed: ${(e as Error).message}`));
       this.deps.log(`OFT_LEVELS ${JSON.stringify({ key, ms: r.ms, bars: r.coverage.bars, setups: r.setups.length, overall: r.overall, segments: r.segments, chosenBy: r.chosenBy })}`);
-      if (paramsChanged && c.engine) await this.startLive(c).catch(() => {});
       c.status = c.engine ? 'live' : 'history only';
     } catch (e) {
       c.error = (e as Error).message.slice(0, 200);

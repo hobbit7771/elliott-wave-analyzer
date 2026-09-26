@@ -1,5 +1,5 @@
 // Levels: real-time watchlist of strong D1 levels (nearest support / resistance, distance, state) and the
-// honest walk-forward backtest of level setups for the current instrument.
+// honest backtest of level setups for the current instrument.
 import type { Tab } from '../main.js';
 import { store } from '../store.js';
 import { api, el, esc, fmtP, fmtDateTime, ownerToken, Painter } from '../util.js';
@@ -49,7 +49,7 @@ export function createLevelsTab(): Tab {
   const root = el('section', { id: 'tab-levels', role: 'tabpanel' });
   const addIn = el('input', { type: 'text', placeholder: 'например INJUSDT', 'aria-label': 'Добавить монету' });
   const addBtn = el('button', { text: 'Добавить' });
-  const runBtn = el('button', { text: 'Пересчитать историю', title: 'Только владелец: заново прогнать walk-forward для текущего инструмента' });
+  const runBtn = el('button', { text: 'Пересчитать историю', title: 'Только владелец: заново прогнать бэктест для текущего инструмента' });
   const note = el('span', { class: 'muted' });
   root.append(el('div', { class: 'toolbar' }, el('b', { text: 'Watchlist' }), addIn, addBtn, runBtn, note));
   const box = el('div', { class: 'scroll' });
@@ -94,8 +94,8 @@ export function createLevelsTab(): Tab {
     if (h) {
       const recent = [...h.setups].reverse().slice(0, 40);
       bt =
-        `<h3>Бэктест сетапов ${esc(store.symbol)} (walk-forward, без заглядывания в будущее)</h3>` +
-        `<p class="muted">История 15m: ${fmtDateTime(h.coverage.from)} — ${fmtDateTime(h.coverage.to)} (${h.coverage.bars} баров), до неё ${h.coverage.days} дневных свечей для уровней. Параметры: ${esc(h.chosenBy)}. Пересчитано ${fmtDateTime(h.computedAt)} за ${(h.ms / 1000).toFixed(1)} с. Результаты показаны как есть; TRAIN — выборка, на которой выбирались параметры, её результат оптимистичен; честная оценка — OOS.</p>` +
+        `<h3>Бэктест сетапов ${esc(store.symbol)} (свеча за свечой, без заглядывания в будущее)</h3>` +
+        `<p class="muted">История 15m: ${fmtDateTime(h.coverage.from)} — ${fmtDateTime(h.coverage.to)} (${h.coverage.bars} баров), до неё ${h.coverage.days} дневных свечей для уровней. ${esc(h.chosenBy)} Пересчитано ${fmtDateTime(h.computedAt)} за ${(h.ms / 1000).toFixed(1)} с. Результаты показаны как есть; TRAIN / VALIDATION / OOS — первые 6, следующие 3 и последние 3 месяца, чтобы было видно, насколько результат стабилен во времени.</p>` +
         `<table><thead>${STATS_HEAD}</thead><tbody>${h.segments.map((s) => statsRow(s.name, s.stats)).join('')}${statsRow('ВСЕГО', h.overall)}</tbody></table>` +
         `<h4>По направлению</h4><table><thead>${STATS_HEAD}</thead><tbody>${Object.entries(h.byDirection).map(([k, v]) => statsRow(k, v)).join('')}</tbody></table>` +
         `<h4>По SetupQuality</h4><table><thead>${STATS_HEAD}</thead><tbody>${Object.entries(h.byScore).map(([k, v]) => statsRow(k, v)).join('')}</tbody></table>` +
@@ -103,7 +103,7 @@ export function createLevelsTab(): Tab {
         `<h4>Последние сетапы</h4><table><thead><tr><th class="l">Время</th><th>Сторона</th><th>Уровень</th><th>Сила</th><th>Качество</th><th class="l">Результат</th><th>R</th><th class="l">Выборка</th></tr></thead><tbody>` +
         recent.map((s) => `<tr class="${s.direction === 'LONG' ? 'buy' : 'sell'}"><td class="l">${fmtDateTime(s.t)}</td><td>✅ ${s.direction}</td><td>${fmtP(s.level, 6).replace(/\.?0+$/, '')}</td><td>${s.levelStrength}</td><td>${s.setupQuality}</td><td class="l">${esc(s.outcome.status)}</td><td>${n2(s.outcome.r)}</td><td class="l">${esc(s.segment ?? '')}</td></tr>`).join('') +
         '</tbody></table>' +
-        `<details><summary>Параметры и сетка калибровки</summary><pre>${esc(JSON.stringify(h.params, null, 1))}</pre></details>`;
+        `<details><summary>Параметры</summary><pre>${esc(JSON.stringify(h.params, null, 1))}</pre></details>`;
     } else bt = `<p class="muted">Бэктест для ${esc(store.symbol)}: ${esc(hist?.status ?? 'загрузка…')}${hist?.error ? ' — ' + esc(hist.error) : ''}. Первый расчёт скачивает год 15m-свечей и занимает несколько минут.</p>`;
     box.innerHTML = `<div class="pad">${watch}<p class="muted">Цена — последняя сделка биржи (обновление раз в минуту); уровни — сильные D1 (статус STRONG/FLIPPED, сила ≥ порога). State — состояние автомата: WATCHING, APPROACHING, COMPRESSION, TOUCH, REJECTION, CONFIRMED.</p>${bt}</div>`;
     for (const a of box.querySelectorAll<HTMLAnchorElement>('a[data-open]'))
