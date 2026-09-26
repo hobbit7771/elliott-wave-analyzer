@@ -2,7 +2,7 @@
 import type { BookSnapshot, Candle, InstrumentMeta, Level, SourceId, Trade } from '../../core/types.js';
 import type { Timeframe } from '../../core/candles.js';
 import { decimalsOf } from '../../core/precision.js';
-import { type MarketAdapter, type NormalizedMsg, type StreamRoute, getJson } from './adapter.js';
+import { type MarketAdapter, type NormalizedMsg, type StreamRoute, type Ticker24, getJson } from './adapter.js';
 
 const TF_BINANCE: Partial<Record<Timeframe, string>> = {
   '1s': '1s',
@@ -119,6 +119,12 @@ abstract class BinanceBase implements MarketAdapter {
   async fetchPrices(): Promise<Record<string, number>> {
     const rows = await getJson<{ symbol: string; price: string }[]>(`${this.rest}${this.path.klines.replace('klines', 'ticker/price')}`);
     return Object.fromEntries(rows.map((r) => [r.symbol, +r.price]));
+  }
+
+  /** 24h stats of every symbol (coin picker); weight 40, so it is cached by the caller. */
+  async fetchTickers(): Promise<Ticker24[]> {
+    const rows = await getJson<{ symbol: string; lastPrice: string; priceChangePercent: string; quoteVolume: string }[]>(`${this.rest}${this.path.klines.replace('klines', 'ticker/24hr')}`);
+    return rows.map((r) => ({ symbol: r.symbol, last: +r.lastPrice, change: +r.priceChangePercent / 100, turnover: +r.quoteVolume }));
   }
 
   abstract streamRoutes(symbol: string): StreamRoute[];

@@ -320,6 +320,80 @@ symbolInput.onchange = () => selectSymbol(store.source, symbolInput.value);
 symbolInput.onkeydown = (e) => {
   if (e.key === 'Enter') selectSymbol(store.source, symbolInput.value);
 };
+
+// ---------- coin picker: every instrument of the source, searchable, most traded first ----------
+interface Ticker24 {
+  symbol: string;
+  last: number;
+  change: number;
+  turnover: number;
+}
+const picker = el('div', { class: 'picker', role: 'dialog', 'aria-label': 'Выбор монеты', hidden: '' });
+const pickSearch = el('input', { type: 'search', placeholder: 'Поиск: BTC, SOL, PEPE…', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Поиск монеты' });
+const pickClose = el('button', { text: '×', 'aria-label': 'Закрыть' });
+const pickInfo = el('span', { class: 'muted' });
+const pickList = el('div', { class: 'picker-list' });
+picker.append(el('div', { class: 'picker-head' }, pickSearch, pickClose), pickInfo, pickList);
+document.body.append(picker);
+let tickers = new Map<string, Ticker24>();
+let tickersAt = 0;
+async function loadTickers(): Promise<void> {
+  if (Date.now() - tickersAt < 60_000 && tickers.size) return;
+  try {
+    const r = await api<Ticker24[]>('/api/tickers', { source: store.source });
+    tickers = new Map(r.map((x) => [x.symbol, x]));
+    tickersAt = Date.now();
+  } catch {
+    /* the list still works without 24h stats */
+  }
+}
+function renderPicker(): void {
+  const q = pickSearch.value.trim().toUpperCase();
+  const rows = instruments
+    .filter((i) => !q || i.symbol.includes(q) || (i.base ?? '').includes(q))
+    .map((i) => ({ i, t: tickers.get(i.symbol) }))
+    .sort((a, b) => (b.t?.turnover ?? 0) - (a.t?.turnover ?? 0) || a.i.symbol.localeCompare(b.i.symbol));
+  pickInfo.textContent = `${rows.length} из ${instruments.length} инструментов · сортировка по обороту за 24 ч`;
+  pickList.replaceChildren(
+    ...rows.slice(0, 300).map(({ i, t }) => {
+      const row = el(
+        'button',
+        { class: 'picker-row' + (i.symbol === store.symbol ? ' on' : '') },
+        el('b', { text: i.symbol }),
+        el('span', { text: t ? fmtP(t.last, i.pricePrecision ?? 4).replace(/\.?0+$/, '') : '' }),
+        el('span', { class: t && t.change >= 0 ? 'up' : 'down', text: t ? `${t.change >= 0 ? '+' : ''}${(t.change * 100).toFixed(2)}%` : '' }),
+        el('span', { class: 'muted', text: t ? fmtQ(t.turnover) + ' $' : '' }),
+      );
+      row.onclick = () => {
+        closePicker();
+        selectSymbol(store.source, i.symbol);
+      };
+      return row;
+    }),
+  );
+}
+function openPicker(): void {
+  picker.hidden = false;
+  pickSearch.value = '';
+  renderPicker();
+  void loadTickers().then(renderPicker);
+  setTimeout(() => pickSearch.focus(), 0);
+}
+function closePicker(): void {
+  picker.hidden = true;
+}
+pickSearch.oninput = renderPicker;
+pickSearch.onkeydown = (e) => {
+  if (e.key === 'Enter') {
+    const first = pickList.querySelector<HTMLButtonElement>('.picker-row');
+    first?.click();
+  } else if (e.key === 'Escape') closePicker();
+};
+pickClose.onclick = closePicker;
+// the header field opens the picker (typing a symbol and Enter still works on desktop)
+symbolInput.readOnly = true;
+symbolInput.onclick = openPicker;
+symbolInput.onfocus = () => symbolInput.blur();
 ticksSel.onchange = () => {
   store.ticksPerBar = +ticksSel.value;
   savePref('ticks', store.ticksPerBar);

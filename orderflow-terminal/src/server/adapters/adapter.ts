@@ -54,12 +54,21 @@ export interface MarketAdapter {
   fetchAggTradesFromId?(symbol: string, fromId: number, limit: number): Promise<Trade[]>;
   fetchOpenInterest?(symbol: string): Promise<{ t: number; oi: number }>;
   fetchPrices?(): Promise<Record<string, number>>;
+  /** 24h stats for every instrument (for the coin picker): last price, 24h change (fraction), 24h quote turnover */
+  fetchTickers?(): Promise<Ticker24[]>;
   /**
    * WebSocket connections needed for one instrument. 'depth' carries order-book diffs (+ BBO),
    * 'flow' carries trades / mark price / liquidations, 'all' carries everything on one socket.
    */
   streamRoutes(symbol: string): StreamRoute[];
   parse(raw: string): NormalizedMsg[];
+}
+
+export interface Ticker24 {
+  symbol: string;
+  last: number;
+  change: number;
+  turnover: number;
 }
 
 export class HttpError extends Error {

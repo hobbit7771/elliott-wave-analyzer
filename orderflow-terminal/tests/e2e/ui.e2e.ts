@@ -88,6 +88,16 @@ for (const [name, viewport, mobile] of [
       await page.waitForFunction(() => /O \d/.test(document.querySelector('#tab-chart .legend')?.textContent ?? ''), null, { timeout: 15_000 });
       await page.screenshot({ path: `${OUT}/${name}-chart.png` });
 
+      // coin picker: every instrument, searchable; tapping a row selects it
+      await page.click('#symbolInput');
+      await page.waitForSelector('.picker-row', { timeout: 5000 });
+      await page.fill('.picker-head input', 'test');
+      expect(await page.textContent('.picker-list')).toContain('TESTUSDT');
+      await page.screenshot({ path: `${OUT}/${name}-picker.png` });
+      await page.click('.picker-row');
+      expect(await page.isHidden('.picker')).toBe(true);
+      expect(await page.inputValue('#symbolInput')).toBe('TESTUSDT');
+
       for (const tab of ['heatmap', 'dom', 'footprint', 'profile', 'signals', 'levels', 'paper', 'alerts', 'sources']) {
         await page.click(`nav.tabs button[data-tab="${tab}"]`);
         await wait(tab === 'heatmap' ? 2500 : 1200);
@@ -121,6 +131,7 @@ for (const [name, viewport, mobile] of [
       await page.click('#tab-paper button.buy');
       await page.waitForFunction(() => document.querySelector('#tab-paper table button[data-close]') !== null, null, { timeout: 5000 });
 
+      if (errors.length) console.log('SRVLOG ' + server.log.join('').split('\n').filter((l) => /HTTP 5/.test(l)).slice(-20).join('\n'));
       expect(errors, errors.join('\n')).toEqual([]);
       await page.context().close();
     });

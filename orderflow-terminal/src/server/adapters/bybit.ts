@@ -8,7 +8,7 @@
 // as a snapshot and replaces the book.
 import type { BookSnapshot, Candle, InstrumentMeta, Level, Trade } from '../../core/types.js';
 import type { Timeframe } from '../../core/candles.js';
-import { getJson, type MarketAdapter, type NormalizedMsg, type StreamRoute } from './adapter.js';
+import { getJson, type MarketAdapter, type NormalizedMsg, type StreamRoute, type Ticker24 } from './adapter.js';
 
 const TF: Partial<Record<Timeframe, string>> = { '1m': '1', '3m': '3', '5m': '5', '15m': '15', '30m': '30', '1h': '60', '4h': '240', '1d': 'D' };
 
@@ -101,6 +101,11 @@ export class BybitLinearAdapter implements MarketAdapter {
   async fetchPrices(): Promise<Record<string, number>> {
     const r = await this.get<{ list: { symbol: string; lastPrice: string }[] }>('/v5/market/tickers?category=linear');
     return Object.fromEntries(r.list.map((x) => [x.symbol, +x.lastPrice]));
+  }
+
+  async fetchTickers(): Promise<Ticker24[]> {
+    const r = await this.get<{ list: { symbol: string; lastPrice: string; price24hPcnt: string; turnover24h: string }[] }>('/v5/market/tickers?category=linear');
+    return r.list.map((x) => ({ symbol: x.symbol, last: +x.lastPrice, change: +x.price24hPcnt, turnover: +x.turnover24h }));
   }
 
   streamRoutes(symbol: string): StreamRoute[] {

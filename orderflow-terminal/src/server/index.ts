@@ -235,6 +235,7 @@ const lag = (ns: number): number => +Math.max(0, ns / 1e6 - 20).toFixed(2);
 loop.enable();
 
 const klineCache = new Map<string, { t: number; data: unknown }>();
+const tickerCache = new Map<string, { t: number; data: unknown }>();
 
 function json(res: http.ServerResponse, code: number, body: unknown, extra: Record<string, string> = {}): void {
   const s = JSON.stringify(body);
@@ -262,7 +263,8 @@ function params(u: URL): { source: SourceId; symbol: string; key: string } {
 const num = (u: URL, k: string, d: number): number => {
   const v = u.searchParams.get(k);
   const n = v === null ? NaN : Number(v);
-  return isFinite(n) ? n : d;
+  // integers only: times go into bigint columns (a client clock offset can make them fractional)
+  return isFinite(n) ? Math.round(n) : d;
 };
 
 async function readBody(req: http.IncomingMessage): Promise<unknown> {
@@ -417,6 +419,22 @@ async function api(req: http.IncomingMessage, res: http.ServerResponse, u: URL):
       const stored = repo ? await repo.listInstruments<InstrumentMeta>(source).catch(() => []) : [];
       if (!stored.length) throw e;
       return json(res, 200, stored, { 'x-oft-origin': 'stored' });
+    }
+  }
+  if (p === '/api/tickers') {
+    const source = u.searchParams.get('source') ?? 'bybit-linear';
+    if (!isSource(source)) return json(res, 400, { error: 'bad source' });
+    const hit = tickerCache.get(source);
+    if (hit && Date.now() - hit.t < 60_000) return json(res, 200, hit.data);
+    const ad = getAdapter(source);
+    if (!ad.fetchTickers) return json(res, 200, []);
+    try {
+      const data = await ad.fetchTickers();
+      tickerCache.set(source, { t: Date.now(), data });
+      return json(res, 200, data);
+    } catch (e) {
+      // the picker works without 24h stats: stale data, or an empty list with the reason in a header
+      return json(res, 200, hit?.data ?? [], { 'x-oft-warning': `tickers unavailable: ${(e as Error).message.slice(0, 120)}` });
     }
   }
   if (p === '/api/klines') {
@@ -795,6 +813,7 @@ const server = http.createServer((req, res) => {
   }
   h.catch((e: Error & { status?: number }) => {
     const code = e.status ?? (/\b451\b/.test(e.message) ? 451 : 502);
+    if (code >= 500) log(`HTTP ${code} ${u.pathname}: ${e.message.slice(0, 200)}`);
     if (!res.headersSent) json(res, code, { error: e.message });
     else res.end();
   });
