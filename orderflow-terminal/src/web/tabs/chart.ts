@@ -247,6 +247,8 @@ export function createChartTab(): Tab {
   let markers: ISeriesMarkersPluginApi<Time> | null = null;
   let zones: ZonesPrimitive | null = null;
   const lines = new Map<string, ISeriesApi<SeriesType>>();
+  /** time of the last point given to each indicator series */
+  const lastT = new Map<string, number>();
   let priceLines: IPriceLine[] = [];
   let builder = new CandleBuilder('1m');
   let seq = 0;
@@ -291,6 +293,7 @@ export function createChartTab(): Tab {
   function rebuild(): void {
     chart?.remove();
     lines.clear();
+    lastT.clear();
     priceLines = [];
     chart = createChart(host, {
       autoSize: true,
@@ -411,11 +414,14 @@ export function createChartTab(): Tab {
     if (!chart || !candleS) return;
     const cs = builder.candles;
     tickTimes = isTick() ? cs.map((c) => c.t) : [];
-    candleS.setData(cs.map((c, i) => ({ time: toTime(c, i) as UTCTimestamp, open: c.o, high: c.h, low: c.l, close: c.c })));
+    candleS.setData(clean('candles', cs.map((c, i) => ({ time: toTime(c, i) as UTCTimestamp, open: c.o, high: c.h, low: c.l, close: c.c })), (p) => p.close));
     const series = computeIndicators(cs);
     for (const [k, s] of lines) {
       const data = series[k];
-      if (data) s.setData(data as never);
+      if (!data) continue;
+      const d = clean(k, data);
+      s.setData(d as never);
+      lastT.set(k, d.length ? d[d.length - 1].time : -Infinity);
     }
     empty.textContent = cs.length ? '' : emptyText;
     refreshOverlays();
@@ -425,8 +431,33 @@ export function createChartTab(): Tab {
   let emptyText = 'Загрузка…';
 
   type Pt = { time: UTCTimestamp; value: number; color?: string };
-  function computeIndicators(cs: Candle[]): Record<string, Pt[]> {
-    const t = cs.map((c, i) => toTime(c, i) as UTCTimestamp);
+  /**
+   * lightweight-charts (production build) does not validate data: a non-finite time or a time that is not
+   * strictly ascending is accepted, and the render loop then throws "Value is null" on every frame. Keep only
+   * finite points in strictly ascending time (the later duplicate wins) and report anything dropped.
+   */
+  function clean<T extends { time: UTCTimestamp }>(name: string, pts: T[], val: (p: T) => number = (p) => (p as unknown as Pt).value): T[] {
+    const out: T[] = [];
+    let dropped = 0;
+    for (const p of pts) {
+      if (!Number.isFinite(p.time) || !Number.isFinite(val(p))) {
+        dropped++;
+        continue;
+      }
+      const last = out[out.length - 1];
+      if (last && p.time <= last.time) {
+        dropped++;
+        if (p.time === last.time) out[out.length - 1] = p;
+        continue;
+      }
+      out.push(p);
+    }
+    if (dropped) console.warn(`chart: ${name}: ${dropped} point(s) with a bad or non-ascending time dropped`);
+    return out;
+  }
+  /** `offset`: index of cs[0] in builder.candles (tick bars are timed by their index) */
+  function computeIndicators(cs: Candle[], offset = 0): Record<string, Pt[]> {
+    const t = cs.map((c, i) => toTime(c, i + offset) as UTCTimestamp);
     const line = (vals: number[]): Pt[] => vals.map((v, i) => ({ time: t[i], value: v })).filter((p) => isFinite(p.value));
     const close = cs.map((c) => c.c);
     const out: Record<string, Pt[]> = {};
@@ -475,10 +506,15 @@ export function createChartTab(): Tab {
     if (isTick() && opened) tickTimes.push(c.t);
     candleS.update({ time: toTime(c, i) as UTCTimestamp, open: c.o, high: c.h, low: c.l, close: c.c });
     // the last 1200 bars are enough for every indicator to converge (EMA200 residual < e^-10)
-    const series = computeIndicators(cs.length > 1200 ? cs.slice(-1200) : cs);
+    const from = Math.max(0, cs.length - 1200);
+    const series = computeIndicators(from ? cs.slice(from) : cs, from);
     for (const [k, s] of lines) {
       const d = series[k];
-      if (d && d.length) s.update(d[d.length - 1] as never);
+      const p = d?.[d.length - 1];
+      if (!p || !Number.isFinite(p.time) || !Number.isFinite(p.value)) continue;
+      if (p.time < (lastT.get(k) ?? -Infinity)) continue; // an older point would corrupt the series
+      s.update(p as never);
+      lastT.set(k, p.time);
     }
     if (opened) refreshOverlays();
     renderLegend(i);

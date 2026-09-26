@@ -531,8 +531,27 @@ export function createHeatmapTab(): Tab {
   }
 
   // ---------- data loading ----------
+  // one history request at a time: while dragging, only the latest wanted window is fetched afterwards
+  let histBusy = false;
+  let histAgain = false;
   async function ensureHistory(): Promise<void> {
     if (replay) return;
+    if (histBusy) {
+      histAgain = true;
+      return;
+    }
+    histBusy = true;
+    try {
+      await ensureHistoryOnce();
+    } finally {
+      histBusy = false;
+    }
+    if (histAgain) {
+      histAgain = false;
+      void ensureHistory();
+    }
+  }
+  async function ensureHistoryOnce(): Promise<void> {
     const t1 = endT();
     const t0 = t1 - p.span;
     if (store.heatFrom && t0 >= store.heatFrom - 2000) return;

@@ -156,8 +156,9 @@ export class PgRepo implements Repo {
   }
 
   async candles(source: string, symbol: string, from: number, to: number): Promise<(Candle & { origin: string })[]> {
-    const rows = await this.sql`select t,o,h,l,c,v,bv,n,origin from oft.candles_1m where source=${source} and symbol=${symbol} and t>=${from} and t<=${to} order by t limit 20000`;
-    return rows.map((r) => ({ t: n(r.t), o: n(r.o), h: n(r.h), l: n(r.l), c: n(r.c), v: n(r.v), bv: n(r.bv), n: r.n === null ? undefined : n(r.n), origin: String(r.origin) }));
+    // newest 20 000 when the range is longer (callers want the bars nearest `to`), returned oldest-first
+    const rows = await this.sql`select t,o,h,l,c,v,bv,n,origin from oft.candles_1m where source=${source} and symbol=${symbol} and t>=${from} and t<=${to} order by t desc limit 20000`;
+    return [...rows].reverse().map((r) => ({ t: n(r.t), o: n(r.o), h: n(r.h), l: n(r.l), c: n(r.c), v: n(r.v), bv: n(r.bv), n: r.n === null ? undefined : n(r.n), origin: String(r.origin) }));
   }
 
   async gaps(source: string, symbol: string, from: number, to: number): Promise<GapRow[]> {

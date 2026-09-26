@@ -196,8 +196,20 @@ export class HistoryReader {
         break;
       }
     }
-    const load = (r: number, a: number, b: number): HeatColumn[] =>
-      (this.db.prepare('SELECT data FROM heat WHERE sym=? AND res=? AND t>? AND t<=? ORDER BY t').all(key, r, a, b) as { data: Uint8Array }[]).map((x) => dec(x.data));
+    // decoded columns are large (full book band): never decode more than ~maxCols of them; longer ranges
+    // are thinned evenly in SQL before decoding
+    const load = (r: number, a: number, b: number): HeatColumn[] => {
+      const n = (this.db.prepare('SELECT COUNT(*) n FROM heat WHERE sym=? AND res=? AND t>? AND t<=?').get(key, r, a, b) as { n: number }).n;
+      if (!n) return [];
+      const stride = Math.max(1, Math.ceil(n / maxCols));
+      const rows =
+        stride === 1
+          ? this.db.prepare('SELECT data FROM heat WHERE sym=? AND res=? AND t>? AND t<=? ORDER BY t').all(key, r, a, b)
+          : this.db
+              .prepare('SELECT data FROM (SELECT data, t, ROW_NUMBER() OVER (ORDER BY t) rn FROM heat WHERE sym=? AND res=? AND t>? AND t<=?) WHERE (rn - 1) % ? = 0 ORDER BY t')
+              .all(key, r, a, b, stride);
+      return (rows as { data: Uint8Array }[]).map((x) => dec(x.data));
+    };
     let cols = load(res, from - 1, to);
     // the coarser tiers lag behind real time: fill the recent tail from finer tiers
     for (const finer of [10, 1].filter((f) => f < res)) {

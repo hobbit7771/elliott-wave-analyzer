@@ -72,6 +72,24 @@ describe('History recorder', () => {
     expect(r.cols).toHaveLength(25);
   });
 
+  it('never decodes more than ~maxCols columns for a long range (thinned evenly in SQL)', () => {
+    const db = openDb(':memory:');
+    const rec = new Recorder(db, 'x:A');
+    const rd = new HistoryReader(db);
+    const base = 1_700_000_040_000;
+    for (let s = 1; s <= 900; s++) rec.heat(col(base + s * 1000, s));
+    rec.flush(base + 901_000);
+    // 900 one-second columns for maxCols 400: the 1 s tier is chosen (span < 3 x maxCols) and thinned
+    const r = rd.heat('x:A', base, base + 901_000, 400);
+    expect(r.res).toBe(1);
+    expect(r.cols.length).toBeLessThanOrEqual(400);
+    expect(r.cols.length).toBeGreaterThanOrEqual(250);
+    // evenly spread over the whole range, oldest first
+    expect(r.cols[0].t).toBeLessThan(base + 20_000);
+    expect(r.cols.at(-1)!.t).toBeGreaterThan(base + 850_000);
+    for (let i = 1; i < r.cols.length; i++) expect(r.cols[i].t).toBeGreaterThan(r.cols[i - 1].t);
+  });
+
   it('clears one instrument\'s history', () => {
     const db = openDb(':memory:');
     const rec = new Recorder(db, 'x:A');

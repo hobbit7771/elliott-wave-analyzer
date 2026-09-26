@@ -292,6 +292,15 @@ function needRepo(): Repo {
 }
 
 /** heat columns: local 1 s cache for the recent part, Supabase 10 s / 60 s tiles for older ranges */
+// heatmap history reads decode large columns: run them one at a time so parallel requests (several tabs,
+// a drag through history) cannot stack their decoded columns in the heap at once
+let heatChain: Promise<unknown> = Promise.resolve();
+function serialHeat<T>(fn: () => Promise<T>): Promise<T> {
+  const run = heatChain.then(fn, fn);
+  heatChain = run.catch(() => {});
+  return run;
+}
+
 async function heatHistory(source: string, symbol: string, key: string, from: number, to: number, maxCols: number): Promise<{ cols: HeatColumn[]; res: number; tiers: string[] }> {
   const local = reader.heat(key, from, to, maxCols);
   const localFrom = local.cols.length ? local.cols[0].t : Infinity;
@@ -498,7 +507,7 @@ async function api(req: http.IncomingMessage, res: http.ServerResponse, u: URL):
     const to = num(u, 'to', Date.now());
     const from = num(u, 'from', to - 15 * 60_000);
     const maxCols = Math.min(4000, Math.max(50, num(u, 'maxCols', 1500)));
-    const r = await heatHistory(source, symbol, key, from, to, maxCols);
+    const r = await serialHeat(() => heatHistory(source, symbol, key, from, to, maxCols));
     const gaps = repo ? await repo.gaps(source, symbol, from, to).catch(() => []) : [];
     return json(res, 200, { ...r, coverage: reader.heatRange(key), gaps });
   }
@@ -541,7 +550,7 @@ async function api(req: http.IncomingMessage, res: http.ServerResponse, u: URL):
     const { source, symbol, key } = params(u);
     const to = num(u, 'to', Date.now());
     const from = num(u, 'from', to - 15 * 60_000);
-    const { cols } = await heatHistory(source, symbol, key, from, to, 3000);
+    const { cols } = await serialHeat(() => heatHistory(source, symbol, key, from, to, 3000));
     return sendText(res, columnsToCsv(cols), 'text/csv', `heatmap_${symbol}_${from}_${to}.csv`);
   }
   if (p === '/api/export/trades.csv') {
