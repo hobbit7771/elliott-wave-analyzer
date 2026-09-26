@@ -45,6 +45,7 @@ export interface MarketAdapter {
   /** aggTrades by id (fromId, up to 1000) — used to fill id gaps in the live trade stream */
   fetchAggTradesFromId?(symbol: string, fromId: number, limit: number): Promise<Trade[]>;
   fetchOpenInterest?(symbol: string): Promise<{ t: number; oi: number }>;
+  fetchPrices?(): Promise<Record<string, number>>;
   /**
    * WebSocket connections needed for one instrument. 'depth' carries order-book diffs (+ BBO),
    * 'flow' carries trades / mark price / liquidations, 'all' carries everything on one socket.

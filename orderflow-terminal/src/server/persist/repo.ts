@@ -50,6 +50,8 @@ export interface Repo {
   gaps(source: string, symbol: string, from: number, to: number): Promise<GapRow[]>;
   coverage(source: string, symbol: string): Promise<{ stream: string; t0: number; t1: number }[]>;
   putInstrument(meta: { source: string; symbol: string }): Promise<void>;
+  upsertKlines(source: string, symbol: string, tf: string, rows: Candle[]): Promise<void>;
+  klines(source: string, symbol: string, tf: string, from: number, to: number): Promise<Candle[]>;
   getInstrument<T>(source: string, symbol: string): Promise<T | undefined>;
   listInstruments<T>(source: string): Promise<T[]>;
   getSetting<T>(k: string): Promise<T | undefined>;
@@ -156,6 +158,26 @@ export class PgRepo implements Repo {
   async gaps(source: string, symbol: string, from: number, to: number): Promise<GapRow[]> {
     const rows = await this.sql`select * from oft.gaps where source=${source} and symbol=${symbol} and coalesce(t1, ${to}) >= ${from} and t0 <= ${to} order by t0 limit 1000`;
     return rows.map((r) => ({ source: String(r.source), symbol: String(r.symbol), stream: String(r.stream), t0: n(r.t0), t1: r.t1 === null ? null : n(r.t1), reason: String(r.reason) }));
+  }
+
+  async upsertKlines(source: string, symbol: string, tf: string, rows: Candle[]): Promise<void> {
+    for (let i = 0; i < rows.length; i += 2000) {
+      const vals = rows.slice(i, i + 2000).map((c) => ({ source, symbol, tf, t: c.t, o: c.o, h: c.h, l: c.l, c: c.c, v: c.v }));
+      await this.sql`insert into oft.klines ${this.sql(vals)} on conflict (source, symbol, tf, t) do update set o=excluded.o, h=excluded.h, l=excluded.l, c=excluded.c, v=excluded.v`;
+    }
+  }
+
+  async klines(source: string, symbol: string, tf: string, from: number, to: number): Promise<Candle[]> {
+    const out: Candle[] = [];
+    // paged: a year of 15m bars is ~35k rows
+    let cursor = from;
+    for (;;) {
+      const rows = await this.sql`select t,o,h,l,c,v from oft.klines where source=${source} and symbol=${symbol} and tf=${tf} and t>=${cursor} and t<=${to} order by t limit 10000`;
+      for (const r of rows) out.push({ t: n(r.t), o: n(r.o), h: n(r.h), l: n(r.l), c: n(r.c), v: n(r.v), bv: 0 });
+      if (rows.length < 10000) break;
+      cursor = n(rows[rows.length - 1].t) + 1;
+    }
+    return out;
   }
 
   async putInstrument(meta: { source: string; symbol: string }): Promise<void> {

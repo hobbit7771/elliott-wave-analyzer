@@ -54,7 +54,7 @@ export interface Liq {
   qty: number;
 }
 
-type Topic = 'meta' | 'status' | 'book' | 'trades' | 'heat' | 'events' | 'large' | 'clusters' | 'ice' | 'deriv' | 'net' | 'liq' | 'reset' | 'tf' | 'history';
+type Topic = 'setups' | 'meta' | 'status' | 'book' | 'trades' | 'heat' | 'events' | 'large' | 'clusters' | 'ice' | 'deriv' | 'net' | 'liq' | 'reset' | 'tf' | 'history';
 
 const TRADE_CAP = 400_000;
 const HEAT_CAP = 8000;
@@ -79,7 +79,9 @@ export class Store {
   clusters: { list: LiquidityCluster[]; vacuums: { side: BookSide; lo: number; hi: number; t: number }[] } = { list: [], vacuums: [] };
   ice: IceCandidate[] = [];
   /** static daily S/R levels (loaded by the chart tab, drawn by chart and heatmap) */
-  staticLevels: import('../core/staticLevels.js').StaticLevel[] = [];
+  staticLevels: { price: number; strength?: number; status?: string }[] = [];
+  /** level setups (historical walk-forward + live) for the current instrument */
+  setups: import('../core/levelEngine/setupEngine.js').Setup[] = [];
   deriv: Deriv = {};
   liqs: Liq[] = [];
   lastTrade: Trade | null = null;

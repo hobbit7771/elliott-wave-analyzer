@@ -91,9 +91,18 @@ h3 { margin: 12px 0 6px; font-size: 13px; color: #fff; }
 .layers { position: absolute; right: 8px; top: 8px; z-index: 6; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 6px; display: none; max-height: 70%; overflow: auto; }
 .layers.on { display: block; }
 .layers label { display: flex; padding: 2px 0; }
+.detail-panel { position: absolute; left: 8px; top: 8px; z-index: 7; width: min(380px, calc(100% - 16px)); max-height: calc(100% - 16px); overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.4); }
+.detail-panel table { width: 100%; margin-top: 6px; }
+.detail-panel td { padding: 2px 4px; vertical-align: top; }
+.detail-panel .close { float: right; padding: 0 8px; }
+.watch td, .watch th { white-space: nowrap; }
+.state-COMPRESSION, .state-TOUCH, .state-REJECTION { color: #ffd54f; font-weight: 600; }
+.state-CONFIRMED { color: #00e676; font-weight: 600; }
+.state-APPROACHING { color: #4ea1ff; }
 .empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); text-align: center; padding: 20px; pointer-events: none; }
 
 @media (max-width: 760px) {
+  .detail-panel { left: 0; right: 0; top: auto; bottom: 0; width: auto; max-height: 60%; border-radius: var(--radius) var(--radius) 0 0; }
   header.top { gap: 4px; padding: 4px 6px; }
   header.top .brand small { display: none; }
   header.top .brand { font-size: 12px; }

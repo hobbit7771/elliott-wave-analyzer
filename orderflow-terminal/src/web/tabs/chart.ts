@@ -21,13 +21,13 @@ import {
 } from 'lightweight-charts';
 import type { Tab } from '../main.js';
 import { store } from '../store.js';
-import { api, el, fmtQ, fmtP, fmtDateTime, loadPref, savePref, loadPrefRaw, KIND_COLOR, isBullish, ownerToken } from '../util.js';
+import { api, el, esc, fmtQ, fmtP, fmtDateTime, loadPref, savePref, loadPrefRaw, KIND_COLOR, isBullish, ownerToken } from '../util.js';
 import { LEVEL_COLORS, labelSlots, selectLevels, type LevelMark } from '../levels.js';
 import { DrawingsPrimitive, loadDrawings, saveDrawings, type Drawing, type DrawingType } from '../drawings.js';
 import { CandleBuilder, TF_MS, candleDelta, type Timeframe } from '../../core/candles.js';
 import { atr, cvd, ema, macd, rsi, vwap } from '../../core/indicators.js';
 import type { Candle, EventKind, MarketEvent } from '../../core/types.js';
-import type { StaticLevel } from '../../core/staticLevels.js';
+import type { Setup } from '../../core/levelEngine/setupEngine.js';
 
 const LAYERS = {
   volume: 'Объём',
@@ -45,7 +45,8 @@ const LAYERS = {
   iceberg: 'Предполагаемые айсберги и признаки пополнения',
   absorption: 'Зоны поглощения',
   clusters: 'Кластеры ликвидности',
-  static: 'Статические уровни D1 (до 4, синие)',
+  static: 'STRONG LEVELS — сильные уровни D1',
+  setups: 'LEVEL SETUPS — ✅ LONG / ✅ SHORT',
   sweep: 'Sweep и stop-run',
   imbalance: 'Дисбаланс',
   other: 'Прочее (дивергенция, всплеск, снятие, спуфинг?, вакуум)',
@@ -71,6 +72,7 @@ const DEFAULT_LAYERS: Record<LayerKey, boolean> = {
   absorption: true,
   clusters: true,
   static: true,
+  setups: true,
   sweep: true,
   imbalance: false,
   other: false,
@@ -87,6 +89,7 @@ const KIND_LAYER: Partial<Record<EventKind, LayerKey>> = {
   imbalance: 'imbalance',
   delta_divergence: 'other',
   volume_burst: 'other',
+  level_setup: 'setups',
   liquidity_pulled: 'other',
   spoofing: 'other',
   vacuum: 'other',
@@ -333,10 +336,10 @@ export function createChartTab(): Tab {
     ];
     for (const [k, color] of overlay) if (layers[k]) lines.set(k, chart.addSeries(LineSeries, { color, lineWidth: 1, lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false, lineStyle: k === 'vwap' ? LineStyle.Dashed : LineStyle.Solid }));
     let pane = 1;
-    if (layers.cvd) lines.set('cvd', chart.addSeries(LineSeries, { color: '#4ea1ff', lineWidth: 1, priceLineVisible: false, title: 'CVD' }, pane++));
+    if (layers.cvd) lines.set('cvd', chart.addSeries(LineSeries, { crosshairMarkerVisible: false, color: '#4ea1ff', lineWidth: 1, priceLineVisible: false, title: 'CVD' }, pane++));
     if (layers.delta) lines.set('delta', chart.addSeries(HistogramSeries, { priceLineVisible: false, title: 'Delta' }, pane++));
     if (layers.rsi) {
-      const r = chart.addSeries(LineSeries, { color: '#ce93d8', lineWidth: 1, priceLineVisible: false, title: 'RSI' }, pane++);
+      const r = chart.addSeries(LineSeries, { crosshairMarkerVisible: false, color: '#ce93d8', lineWidth: 1, priceLineVisible: false, title: 'RSI' }, pane++);
       r.createPriceLine({ price: 70, color: '#555', lineStyle: LineStyle.Dotted, lineWidth: 1, axisLabelVisible: false, title: '' });
       r.createPriceLine({ price: 30, color: '#555', lineStyle: LineStyle.Dotted, lineWidth: 1, axisLabelVisible: false, title: '' });
       lines.set('rsi', r);
@@ -344,10 +347,10 @@ export function createChartTab(): Tab {
     if (layers.macd) {
       const p = pane++;
       lines.set('macdH', chart.addSeries(HistogramSeries, { priceLineVisible: false, lastValueVisible: false }, p));
-      lines.set('macd', chart.addSeries(LineSeries, { color: '#4ea1ff', lineWidth: 1, priceLineVisible: false, title: 'MACD' }, p));
-      lines.set('macdS', chart.addSeries(LineSeries, { color: '#ff9800', lineWidth: 1, priceLineVisible: false, lastValueVisible: false }, p));
+      lines.set('macd', chart.addSeries(LineSeries, { crosshairMarkerVisible: false, color: '#4ea1ff', lineWidth: 1, priceLineVisible: false, title: 'MACD' }, p));
+      lines.set('macdS', chart.addSeries(LineSeries, { crosshairMarkerVisible: false, color: '#ff9800', lineWidth: 1, priceLineVisible: false, lastValueVisible: false }, p));
     }
-    if (layers.atr) lines.set('atr', chart.addSeries(LineSeries, { color: '#90a4ae', lineWidth: 1, priceLineVisible: false, title: 'ATR' }, pane++));
+    if (layers.atr) lines.set('atr', chart.addSeries(LineSeries, { crosshairMarkerVisible: false, color: '#90a4ae', lineWidth: 1, priceLineVisible: false, title: 'ATR' }, pane++));
     // price pane keeps most of the height; indicator panes share the rest (~30% in total)
     const panes = chart.panes();
     if (panes.length > 1) {
@@ -361,6 +364,20 @@ export function createChartTab(): Tab {
       renderLegend(idx);
     });
     chart.subscribeClick((param) => {
+      if (!toolSel.value && param.point && candleS) {
+        const hid = typeof param.hoveredObjectId === 'string' ? param.hoveredObjectId : '';
+        if (hid.startsWith('setup:')) {
+          const st = store.setups.find((x) => 'setup:' + x.id === hid);
+          if (st) return showSetup(st);
+        }
+        if (layers.static) {
+          const near = strongLv
+            .map((l) => ({ l, d: Math.abs((candleS!.priceToCoordinate(l.price) ?? -1e9) - param.point!.y) }))
+            .filter((x) => x.d <= 10)
+            .sort((a, b) => a.d - b.d)[0];
+          if (near) return showLevel(near.l);
+        }
+      }
       const tool = toolSel.value as DrawingType | '';
       if (!tool || !param.point || !candleS || param.time === undefined) return;
       const price = candleS.coordinateToPrice(param.point.y);
@@ -536,6 +553,13 @@ export function createChartTab(): Tab {
         if (bt !== null) ms.push({ time: bt as UTCTimestamp, position: 'atPriceMiddle', price: l.price, shape: 'square', color: l.side === 'sell' ? '#ef5350' : '#26a69a', text: '', size: 0.5 });
       }
     }
+    if (layers.setups)
+      for (const st of store.setups) {
+        const bt = barTime(st.t);
+        if (bt === null) continue;
+        const long = st.direction === 'LONG';
+        ms.push({ time: bt as UTCTimestamp, position: long ? 'belowBar' : 'aboveBar', shape: long ? 'arrowUp' : 'arrowDown', color: long ? '#00e676' : '#ff5252', text: long ? '✅ LONG' : '✅ SHORT', id: 'setup:' + st.id });
+      }
     ms.sort((a, b) => (a.time as number) - (b.time as number));
     markers.setMarkers(ms);
     const lv =
@@ -555,8 +579,19 @@ export function createChartTab(): Tab {
     zones.update(zs, lv);
     for (const pl of priceLines) candleS.removePriceLine(pl);
     priceLines = [];
-    // static daily levels: solid blue lines across the whole chart with a price tag
-    if (layers.static) for (const l of staticLv) priceLines.push(candleS.createPriceLine({ price: l.price, color: '#2962ff', lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: '' }));
+    // STRONG LEVELS (D1): colour by status, compact "D1 87" tag
+    if (layers.static)
+      for (const l of strongLv)
+        priceLines.push(
+          candleS.createPriceLine({
+            price: l.price,
+            color: levelColor(l),
+            lineWidth: l.status === 'STRONG' || l.status === 'FLIPPED' ? 2 : 1,
+            lineStyle: l.status === 'CHOPPED' ? LineStyle.Dashed : l.status === 'BROKEN' ? LineStyle.Dotted : LineStyle.Solid,
+            axisLabelVisible: true,
+            title: `D1 ${l.strength}`,
+          }),
+        );
     // important levels also get a compact tag on the price axis
     for (const l of lv) if (l.important) priceLines.push(candleS.createPriceLine({ price: l.price, color: LEVEL_COLORS.important, lineVisible: false, axisLabelVisible: true, title: '' }));
     if (layers.levels) {
@@ -593,27 +628,105 @@ export function createChartTab(): Tab {
     }
   }
 
-  let staticLv: StaticLevel[] = [];
-  let staticKey = '';
-  async function loadStatic(): Promise<void> {
+  type StrongLevel = { id: string; price: number; strength: number; status: string; state: string; role: string; confirmedRecently: boolean; breakdown: Record<string, number>; why: string; rejections: number; cleanReactions: number; sweepReclaims: number; volumeRel: number; avgReactionAtr: number; chopScore: number };
+  let strongLv: StrongLevel[] = [];
+  let strongKey = '';
+  const levelColor = (l: StrongLevel) =>
+    l.status === 'BROKEN' ? '#ff9800' : l.status === 'CHOPPED' ? '#8d8d8d' : l.status === 'FLIPPED' ? '#ffb300' : l.confirmedRecently ? '#00e676' : '#2962ff';
+  async function loadStrong(): Promise<void> {
     const key = store.key;
     try {
-      const r = await api<{ levels: StaticLevel[] }>('/api/levels/static', { source: store.source, symbol: store.symbol });
+      const [lv, st] = await Promise.all([
+        api<{ levels: StrongLevel[] } | null>('/api/levels/strong', { source: store.source, symbol: store.symbol }),
+        api<{ history: { setups: Setup[] } | null; live: Setup[] } | null>('/api/setups', { source: store.source, symbol: store.symbol }),
+      ]);
       if (key !== store.key) return;
-      staticLv = r.levels ?? [];
-      staticKey = key;
-      store.staticLevels = staticLv;
+      strongLv = lv?.levels ?? [];
+      strongKey = key;
+      store.staticLevels = strongLv.map((l) => ({ price: l.price, strength: l.strength, status: l.status }));
+      const all = [...(st?.history?.setups ?? []), ...(st?.live ?? [])];
+      store.setups = [...new Map(all.map((s) => [s.id, s])).values()].sort((a, b) => a.t - b.t);
+      store.emit('setups');
       refreshOverlays();
     } catch {
-      /* exchange REST unavailable and nothing stored yet: no static levels */
+      /* levels not available yet (history loading / exchange REST unavailable) */
     }
   }
-  setInterval(() => void loadStatic(), 30 * 60_000);
+  setInterval(() => void loadStrong(), 5 * 60_000);
+  store.on('setups', () => refreshOverlays());
+
+  // detail panel for a level or a setup (opened by tapping the line / the ✅ marker)
+  const detail = el('div', { class: 'detail-panel', style: 'display:none' });
+  fill.append(detail);
+  let detailLines: IPriceLine[] = [];
+  function closeDetail(): void {
+    detail.style.display = 'none';
+    for (const pl of detailLines) candleS?.removePriceLine(pl);
+    detailLines = [];
+  }
+  function openDetail(html: string): void {
+    detail.innerHTML = `<button class="close" aria-label="Закрыть">×</button>` + html;
+    detail.style.display = '';
+    (detail.querySelector('button.close') as HTMLButtonElement).onclick = closeDetail;
+  }
+  const f2 = (x: number, d = 2) => (Number.isFinite(x) ? x.toFixed(d) : '—');
+  const pct = (x: number) => (Number.isFinite(x) ? `${x >= 0 ? '+' : ''}${(x * 100).toFixed(0)}%` : '—');
+  function showLevel(l: StrongLevel): void {
+    closeDetail();
+    const br = Object.entries(l.breakdown)
+      .map(([k, v]) => `<tr><td class="l">${esc(k)}</td><td>${v > 0 ? '+' : ''}${v}</td></tr>`)
+      .join('');
+    openDetail(
+      `<b>D1 ${fmtP(l.price, dec())} — сила ${l.strength}/100</b><div class="muted">${esc(l.status)} · ${l.role === 'support' ? 'поддержка' : 'сопротивление'} · состояние ${esc(l.state)}${l.confirmedRecently ? ' · недавно CONFIRMED' : ''}</div>` +
+        `<p>${esc(l.why)}</p><table><thead><tr><th class="l">Компонент</th><th>Баллы</th></tr></thead><tbody>${br}</tbody></table>`,
+    );
+  }
+  function showSetup(s: Setup): void {
+    closeDetail();
+    const rows: [string, string][] = [
+      ['Symbol', s.symbol],
+      ['Exchange', s.exchange],
+      ['Time (UTC)', fmtDateTime(s.t)],
+      ['Direction', s.direction],
+      ['D1 level', fmtP(s.level, dec())],
+      ['Level strength', `${s.levelStrength}/100 (${s.levelStatus})`],
+      ['Setup quality', `${s.setupQuality}/100`],
+      ['Distance to level', `${f2(s.distanceToLevelAtr)} ATR`],
+      ['Approach duration', `${s.approachBars} × ${Math.round((s.confirmedAt - s.t) / 60_000)}m`],
+      ['Volume decay', pct(s.volumeDecay)],
+      ['Volatility contraction', pct(s.volatilityContraction)],
+      ['Reaction volume', `${f2(s.reactionVolumeRatio)}× медианы подхода (z ${f2(s.reactionVolumeZ)})`],
+      ['Reaction strength', `${f2(s.reactionStrengthAtr)} ATR_D1`],
+      ['Trigger', s.trigger],
+      ['Entry', fmtP(s.entry, dec())],
+      ['Invalidation', fmtP(s.invalidation, dec())],
+      ['SL reference', fmtP(s.sl, dec())],
+      ['Next strong level', s.nextLevel !== null ? fmtP(s.nextLevel, dec()) : 'нет (цель 2R)'],
+      ['Potential RR', f2(s.rr)],
+      ['Reason codes', s.reasons.join(', ')],
+      ['Segment', s.segment ?? 'LIVE'],
+      ['Result', s.outcome.status === 'open' ? `открыт, ${f2(s.outcome.r)}R` : `${s.outcome.status}, ${f2(s.outcome.r)}R (MFE ${f2(s.outcome.mfeR)}R, MAE ${f2(s.outcome.maeR)}R)`],
+    ];
+    openDetail(
+      `<b style="color:${s.direction === 'LONG' ? '#26a69a' : '#ef5350'}">✅ ${s.direction}</b> <span class="muted">качество ${s.setupQuality} · уровень ${s.levelStrength}</span>` +
+        `<table><tbody>${rows.map(([k, v]) => `<tr><td class="l">${esc(k)}</td><td class="l">${esc(v)}</td></tr>`).join('')}</tbody></table>` +
+        `<p class="muted">Уровень D1: ${esc(s.levelWhy)}</p><p class="muted">Историческая разметка: сигнал построен движком свеча за свечой только по данным до его времени; результат — то, что произошло дальше. Не торговая рекомендация.</p>`,
+    );
+    if (candleS) {
+      detailLines = [
+        candleS.createPriceLine({ price: s.entry, color: '#e0e0e0', lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: 'Entry' }),
+        candleS.createPriceLine({ price: s.sl, color: '#ef5350', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: 'SL' }),
+        candleS.createPriceLine({ price: s.tp, color: '#26a69a', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: 'TP' }),
+      ];
+    }
+  }
 
   async function load(): Promise<void> {
-    if (staticKey !== store.key) {
-      staticLv = [];
-      void loadStatic();
+    if (strongKey !== store.key) {
+      strongLv = [];
+      store.setups = [];
+      closeDetail();
+      void loadStrong();
     }
     const key = `${store.key}|${store.tf}|${store.ticksPerBar}`;
     loadedKey = key;

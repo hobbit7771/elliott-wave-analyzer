@@ -88,7 +88,7 @@ for (const [name, viewport, mobile] of [
       await page.waitForFunction(() => /O \d/.test(document.querySelector('#tab-chart .legend')?.textContent ?? ''), null, { timeout: 15_000 });
       await page.screenshot({ path: `${OUT}/${name}-chart.png` });
 
-      for (const tab of ['heatmap', 'dom', 'footprint', 'profile', 'signals', 'paper', 'alerts', 'sources']) {
+      for (const tab of ['heatmap', 'dom', 'footprint', 'profile', 'signals', 'levels', 'paper', 'alerts', 'sources']) {
         await page.click(`nav.tabs button[data-tab="${tab}"]`);
         await wait(tab === 'heatmap' ? 2500 : 1200);
         expect(await page.isVisible(`#tab-${tab}`)).toBe(true);
@@ -195,6 +195,10 @@ describe('History survives a restart (Supabase is the source of truth)', () => {
     const anon = await fetch(`${BASE}/api/paper/order`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     expect(anon.status).toBe(401);
     venue.banned.clear();
+    const wl = (await (await fetch(`${BASE}/api/watchlist`)).json()) as { keys: string[]; rows: unknown[] };
+    expect(wl.keys).toContain('binance-futures:TESTUSDT');
+    const su = await fetch(`${BASE}/api/setups?${q()}`);
+    expect(su.status).toBe(200);
     const st = (await (await fetch(`${BASE}/api/levels/static?${q()}`)).json()) as { levels: unknown[]; days: number };
     expect(Array.isArray(st.levels)).toBe(true);
     expect(st.levels.length).toBeLessThanOrEqual(4);

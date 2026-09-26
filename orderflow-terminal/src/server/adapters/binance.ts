@@ -113,6 +113,12 @@ abstract class BinanceBase implements MarketAdapter {
     return rows.map((r) => ({ t: r.T, price: +r.p, qty: +r.q, side: r.m ? -1 : 1, id: r.a }));
   }
 
+  /** Last traded price of every symbol in one request (weight 2) — used by the level watchlist. */
+  async fetchPrices(): Promise<Record<string, number>> {
+    const rows = await getJson<{ symbol: string; price: string }[]>(`${this.rest}${this.path.klines.replace('klines', 'ticker/price')}`);
+    return Object.fromEntries(rows.map((r) => [r.symbol, +r.price]));
+  }
+
   abstract streamRoutes(symbol: string): StreamRoute[];
 
   async fetchAggTradesFromId(symbol: string, fromId: number, limit: number): Promise<Trade[]> {

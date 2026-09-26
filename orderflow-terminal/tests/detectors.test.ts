@@ -127,14 +127,27 @@ describe('Imbalance / burst / divergence', () => {
     expect(Number(im[0].data?.obi)).toBeGreaterThan(0.6);
   });
 
-  it('reports a volume burst against the 1s volume distribution', () => {
+  it('reports a volume burst relative to the instrument rolling normal (ratio and z-score)', () => {
     const h = harness();
-    baseline(h, 150_000);
+    baseline(h, 700_000);
+    expect(h.events.filter((e) => e.kind === 'volume_burst')).toHaveLength(0);
     h.step([[100.1, 30, 1, false]], 1000);
-    h.step([[100.1, 0.1, 1, false]], 100);
+    baseline(h, 25_000); // trades keep flowing, the burst bucket closes
     const b = h.events.filter((e) => e.kind === 'volume_burst');
     expect(b).toHaveLength(1);
     expect(b[0].side).toBe('buy');
+    expect(Number(b[0].data?.ratio)).toBeGreaterThanOrEqual(1.5);
+    expect(Number(b[0].data?.z)).toBeGreaterThanOrEqual(2);
+    expect(b[0].explain).toMatch(/volumeRatio/);
+  });
+
+  it('volume thresholds are relative: the same absolute volume is no burst on a busier instrument', async () => {
+    const { relativeVolume, isSpike } = await import('../src/core/volumeStats.js');
+    const p = { ratioMin: 1.5, zMin: 2, mode: 'and' as const };
+    const quiet = Array.from({ length: 100 }, (_, i) => 10 + (i % 5));
+    const busy = Array.from({ length: 100 }, (_, i) => 100 + (i % 20) * 5);
+    expect(isSpike(relativeVolume(40, quiet), p)).toBe(true);
+    expect(isSpike(relativeVolume(40, busy), p)).toBe(false);
   });
 
   it('detects bearish delta divergence (new high, CVD lower high)', () => {

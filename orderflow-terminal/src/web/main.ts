@@ -9,6 +9,7 @@ import { createDomTab } from './tabs/dom.js';
 import { createFootprintTab } from './tabs/footprint.js';
 import { createProfileTab } from './tabs/profile.js';
 import { createSignalsTab } from './tabs/signals.js';
+import { createLevelsTab } from './tabs/levels.js';
 import { createPaperTab } from './tabs/paper.js';
 import { createAlertsTab, alerts } from './tabs/alerts.js';
 import { createSourcesTab } from './tabs/sources.js';
@@ -81,7 +82,7 @@ const nav = el('nav', { class: 'tabs', role: 'tablist' });
 const main = el('main');
 app.append(header, statusbar, noteBar, nav, main);
 
-const tabs: Tab[] = [createChartTab(), createHeatmapTab(), createDomTab(), createFootprintTab(), createProfileTab(), createSignalsTab(), createPaperTab(), createAlertsTab(), createSourcesTab()];
+const tabs: Tab[] = [createChartTab(), createHeatmapTab(), createDomTab(), createFootprintTab(), createProfileTab(), createSignalsTab(), createLevelsTab(), createPaperTab(), createAlertsTab(), createSourcesTab()];
 let active: Tab | null = null;
 for (const t of tabs) {
   t.root.classList.add('tab');
@@ -189,6 +190,14 @@ worker.onmessage = (e: MessageEvent) => {
         if (store.liqs.length > 500) store.liqs.shift();
         touched.add('liq');
         break;
+      case 'setup': {
+        const s = m.d as import('../core/levelEngine/setupEngine.js').Setup;
+        if (s.symbol === store.symbol && !store.setups.some((x) => x.id === s.id)) {
+          store.setups.push(s);
+          store.emit('setups');
+        }
+        break;
+      }
       case 'alert': {
         const a = m.d as { event: MarketEvent; sound: boolean; notify: boolean; ruleId: number; t: number };
         alerts.onServerAlert(a);
@@ -262,7 +271,7 @@ function selectSymbol(source: SourceId, symbol: string): void {
   symbol = symbol.trim().toUpperCase();
   if (!/^[A-Z0-9]{2,30}$/.test(symbol)) return;
   if (instruments.length && !instruments.some((i) => i.symbol === symbol)) {
-    sb.msg.textContent = `${symbol} is not listed on ${source}`;
+    sb.msg.textContent = `${symbol} нет в списке инструментов ${source}`;
     return;
   }
   store.source = source;
@@ -277,6 +286,12 @@ function selectSymbol(source: SourceId, symbol: string): void {
   store.emit('meta');
   void loadHistory();
 }
+
+// the Levels tab opens a watchlist coin on the chart
+(window as unknown as { oftOpen: (s: string, y: string) => void }).oftOpen = (source, symbol) => {
+  if (source === store.source) selectSymbol(source as SourceId, symbol);
+  location.hash = '#chart';
+};
 
 function setTf(tf: Timeframe): void {
   store.tf = tf;

@@ -5,6 +5,7 @@ const opts = {
   entryPoints: {
     'server/index': 'src/server/index.ts',
     'server/worker': 'src/server/worker.ts',
+    'server/analysisWorker': 'src/server/analysisWorker.ts',
     'tools/record': 'src/tools/record.ts',
     'tools/replay': 'src/tools/replay.ts',
     'tools/verify-live': 'src/tools/verify-live.ts',

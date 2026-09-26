@@ -110,6 +110,7 @@ export type EventKind =
   | 'volume_burst'
   | 'vacuum'
   | 'spread_expansion'
+  | 'level_setup'
   | 'feed';
 
 export interface MarketEvent {

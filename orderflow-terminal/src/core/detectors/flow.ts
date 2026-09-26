@@ -2,6 +2,7 @@
 // delta divergence and spread expansion.
 import type { Candle, Trade } from '../types.js';
 import { RingSamples, clamp01 } from '../stats.js';
+import { relativeVolume, isSpike } from '../volumeStats.js';
 import { type DetectorContext, fp, fq, moveUnit } from './context.js';
 
 interface WinTrade {
@@ -81,15 +82,37 @@ export class FlowDetectors {
   }
 
   private closeSecond(t: number): void {
-    const v = this.curSecVol;
+    this.sec1.push(this.curSecVol);
+    // accumulate into the burst bucket
     const bc = this.ctx.cfg.burst;
-    if (this.sec1.size >= bc.minSamples && this.ctx.gateOpen) {
-      const p = this.sec1.percentile(bc.percentile);
-      const med = this.sec1.percentile(0.5);
-      if (v >= p && v >= bc.minMultOfMedian * med && med > 0) {
-        const buy = this.curSecDelta >= 0;
+    const b = Math.floor((t - 1) / bc.bucketMs);
+    if (b !== this.bucket) {
+      if (this.bucket) this.closeBucket((this.bucket + 1) * bc.bucketMs);
+      this.bucket = b;
+      this.bucketVol = 0;
+      this.bucketDelta = 0;
+    }
+    this.bucketVol += this.curSecVol;
+    this.bucketDelta += this.curSecDelta;
+  }
+
+  private bucket = 0;
+  private bucketVol = 0;
+  private bucketDelta = 0;
+  private buckets: number[] = [];
+  private lastBurst = -Infinity;
+
+  /** Volume burst: this bucket vs the rolling normal of the instrument (ratio to median and z-score). */
+  private closeBucket(t: number): void {
+    const bc = this.ctx.cfg.burst;
+    const v = this.bucketVol;
+    if (this.buckets.length >= bc.minSamples && this.ctx.gateOpen && t - this.lastBurst >= bc.cooldownMs) {
+      const r = relativeVolume(v, this.buckets);
+      if (isSpike(r, bc) && r.median > 0) {
+        this.lastBurst = t;
+        const buy = this.bucketDelta >= 0;
         const last = this.win[this.win.length - 1];
-        const conf = Math.round(100 * clamp01(0.5 + 0.25 * Math.log2(v / p) + 0.25 * clamp01(Math.abs(this.curSecDelta) / v)));
+        const conf = Math.round(100 * clamp01(0.4 + 0.15 * Math.log2(Math.max(1, r.ratio)) + 0.1 * Math.max(0, r.z - bc.zMin) + 0.2 * clamp01(Math.abs(this.bucketDelta) / Math.max(v, 1e-12))));
         if (conf >= this.ctx.cfg.minConfidence)
           this.ctx.emit({
             id: `burst-${t}`,
@@ -99,12 +122,13 @@ export class FlowDetectors {
             side: buy ? 'buy' : 'sell',
             price: last ? last.p : NaN,
             confidence: conf,
-            explain: `${fq(v)} за 1 с = ${(v / med).toFixed(1)}× медианной секунды и выше P${(bc.percentile * 100).toFixed(1)} (${fq(p)}); delta ${fq(this.curSecDelta)}.`,
-            data: { volume: v, median: med, delta: this.curSecDelta },
+            explain: `${fq(v)} за ${bc.bucketMs / 1000} с: volumeRatio ${r.ratio.toFixed(2)} (к скользящей медиане ${fq(r.median)} за ${this.buckets.length} интервалов), volumeZScore ${r.z.toFixed(2)}; порог: ratio ≥ ${bc.ratioMin} ${bc.mode === 'and' ? 'и' : 'или'} z ≥ ${bc.zMin}; delta ${fq(this.bucketDelta)}.`,
+            data: { volume: v, median: r.median, ratio: r.ratio, z: r.z, delta: this.bucketDelta },
           });
       }
     }
-    this.sec1.push(v);
+    this.buckets.push(v);
+    if (this.buckets.length > bc.window) this.buckets.shift();
   }
 
   private checkSweep(tr: Trade): void {

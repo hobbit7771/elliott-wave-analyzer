@@ -71,10 +71,15 @@ export interface DetectorConfig {
     maxDistanceBuckets: number;
     cooldownMs: number;
   };
+  /** volume burst: bucket volume vs the instrument's rolling normal (never absolute volume) */
   burst: {
-    percentile: number;
-    minMultOfMedian: number;
+    bucketMs: number;       // volume is summed per bucket
+    window: number;         // rolling window of buckets for median / mean / std
+    ratioMin: number;       // volumeRatio = bucket / rolling median
+    zMin: number;           // volumeZScore = (bucket − mean) / std
+    mode: 'or' | 'and';     // or: either condition, and: both
     minSamples: number;
+    cooldownMs: number;
   };
   divergence: {
     lookbackBars: number;
@@ -100,7 +105,7 @@ export const DEFAULT_DETECTOR_CONFIG: DetectorConfig = {
   stopRun: { lookbackBars: 30, reclaimMs: 60_000 },
   imbalance: { threshold: 0.6, minMs: 3000, levels: 10 },
   vacuum: { factor: 0.15, minBuckets: 5, maxDistanceBuckets: 60, cooldownMs: 60_000 },
-  burst: { percentile: 0.995, minMultOfMedian: 5, minSamples: 120 },
+  burst: { bucketMs: 10_000, window: 360, ratioMin: 1.5, zMin: 2, mode: 'and', minSamples: 60, cooldownMs: 30_000 },
   divergence: { lookbackBars: 10 },
   spread: { mult: 4, minTicks: 3, minMs: 1000 },
 };

@@ -24,6 +24,7 @@ import { archiveClient, archiveConfigFromEnv, type ArchiveClient } from './persi
 import { PaperService, type PaperState, type BookView } from './services/paper.js';
 import { AlertService, DEFAULT_RULES, type AlertRule } from './services/alerts.js';
 import { staticLevels } from '../core/staticLevels.js';
+import { LevelService } from './services/levelService.js';
 import { RetentionService, policyFromEnv } from './services/retention.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -115,6 +116,39 @@ const hub: Hub = new Hub({
   },
 });
 
+// ---------- strong D1 levels, level setups (history + live) and the watchlist ----------
+const levels = new LevelService({
+  adapter: (src) => getAdapter(src),
+  repo: () => repo,
+  log,
+  workerPath: resolve(here, 'analysisWorker.js'),
+  tickOf: async (src, sym) => (await getAdapter(src).listInstruments().catch(() => [])).find((m) => m.symbol === sym)?.tickSize ?? (await repo?.getInstrument<InstrumentMeta>(src, sym).catch(() => undefined))?.tickSize ?? 0,
+  onLiveSetup: (s) => {
+    log(`OFT_SETUP ${JSON.stringify({ id: s.id, dir: s.direction, level: s.level, entry: s.entry, sl: s.sl, tp: s.tp, strength: s.levelStrength, quality: s.setupQuality })}`);
+    hub.broadcastAll('setup', s);
+    const ev: MarketEvent = {
+      id: 'setup-' + s.id,
+      t: s.t,
+      kind: 'level_setup',
+      title: `✅ ${s.direction} от D1 уровня ${s.level}`,
+      side: s.direction === 'LONG' ? 'buy' : 'sell',
+      price: s.entry,
+      confidence: s.setupQuality,
+      explain: `Уровень D1 ${s.level} (сила ${s.levelStrength}), качество сетапа ${s.setupQuality}; вход ${s.entry}, инвалидация ${s.invalidation}, SL ${s.sl}, цель ${s.tp} (RR ${s.rr.toFixed(2)}); ${s.reasons.join(', ')}.`,
+      source: s.exchange as SourceId,
+      symbol: s.symbol,
+      data: { setup: s.id },
+    };
+    alerts?.onEvent(ev);
+    void repo?.upsertEvents([{ ev, detectedAt: Date.now(), algo: 'oft-levels-1' }]).catch(() => {});
+  },
+});
+setInterval(() => void levels.tick().catch((e) => log(`levels tick failed: ${(e as Error).message}`)), 60_000).unref();
+async function watchlistKeys(): Promise<string[]> {
+  const w = repo ? await repo.getSetting<string[]>('watchlist').catch(() => undefined) : undefined;
+  return w ?? hub.pinned;
+}
+
 async function initSupabase(attempt = 0): Promise<void> {
   if (!dbCfg) {
     supabaseState = { configured: false, connected: false, host: '', error: 'SUPABASE_PROJECT_REF / OFT_DB_PASSWORD not set: history is NOT persisted' };
@@ -158,6 +192,13 @@ async function initSupabase(attempt = 0): Promise<void> {
       list = await r.recordList();
     }
     startRecording(list.filter((x) => x.enabled).map((x) => symKey(x.source, x.symbol)));
+    // strong levels / setups for the watchlist (defaults to the recorded instruments)
+    setTimeout(async () => {
+      for (const k of await watchlistKeys()) {
+        const [src, sym] = k.split(':');
+        if (isSource(src) && sym) await levels.ensure(src, sym).catch((e) => log(`levels ${k}: ${(e as Error).message}`));
+      }
+    }, 30_000);
     // static daily levels for the recorded instruments are computed up front (and kept in Supabase)
     setTimeout(() => {
       for (const x of list.filter((y) => y.enabled)) if (isSource(x.source)) void staticLevelsFor(x.source, x.symbol, symKey(x.source, x.symbol)).catch((e) => log(`static levels ${x.symbol}: ${(e as Error).message.slice(0, 120)}`));
@@ -404,6 +445,38 @@ async function api(req: http.IncomingMessage, res: http.ServerResponse, u: URL):
     const trades = reader.trades(key, to - span, to, tf === 'tick' ? limit * ticksPerBar : 400_000);
     const candles = candlesFromTrades(trades, tf, ticksPerBar).slice(-limit);
     return json(res, 200, { candles, origin: 'recorded-trades', tf, coverage: reader.tradeRange(key), note: 'aggTrade messages: one message can aggregate several fills at the same price' });
+  }
+  if (p === '/api/levels/strong') {
+    const { source, symbol, key } = params(u);
+    if (!levels.levels(key)) await levels.ensure(source, symbol);
+    return json(res, 200, levels.levels(key));
+  }
+  if (p === '/api/setups') {
+    const { source, symbol, key } = params(u);
+    if (!levels.setups(key)) await levels.ensure(source, symbol);
+    return json(res, 200, levels.setups(key));
+  }
+  if (p === '/api/setups/run' && m === 'POST') {
+    requireOwner(req);
+    const { source, symbol, key } = params(u);
+    await levels.ensure(source, symbol);
+    levels.enqueue(key);
+    return json(res, 200, { queued: key });
+  }
+  if (p === '/api/watchlist') {
+    if (m === 'PUT') {
+      requireOwner(req);
+      const b = (await readBody(req)) as { keys?: string[] };
+      const keys = (b.keys ?? []).filter((k) => /^[a-z-]+:[A-Z0-9]{2,20}$/.test(k) && isSource(k.split(':')[0])).slice(0, 12);
+      await needRepo().setSetting('watchlist', keys);
+      for (const k of keys) {
+        const [src, sym] = k.split(':');
+        void levels.ensure(src as SourceId, sym).catch(() => {});
+      }
+      return json(res, 200, { keys });
+    }
+    const keys = await watchlistKeys();
+    return json(res, 200, { keys, rows: keys.map((k) => levels.watchRow(k) ?? { key: k, status: 'loading' }) });
   }
   if (p === '/api/levels/static') {
     const { source, symbol, key } = params(u);

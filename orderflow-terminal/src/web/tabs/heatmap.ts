@@ -405,15 +405,15 @@ export function createHeatmapTab(): Tab {
     for (const l of store.staticLevels) {
       const y = Math.round(yOf(l.price)) + 0.5;
       if (y < 0 || y > H) continue;
-      ctx.strokeStyle = '#2962ff';
-      ctx.lineWidth = 2;
+      ctx.strokeStyle = l.status === 'BROKEN' ? '#ff9800' : l.status === 'CHOPPED' ? '#8d8d8d' : l.status === 'FLIPPED' ? '#ffb300' : '#2962ff';
+      ctx.lineWidth = l.status === 'STRONG' || l.status === 'FLIPPED' || !l.status ? 2 : 1;
       ctx.beginPath();
       ctx.moveTo(0, y);
       ctx.lineTo(W, y);
       ctx.stroke();
       ctx.lineWidth = 1;
       ctx.fillStyle = '#82a8ff';
-      ctx.fillText('D1', 4, y - 3);
+      ctx.fillText(l.strength !== undefined ? `D1 ${l.strength}` : 'D1', 4, y - 3);
     }
     // curated levels: thin lines, small labels on the right, important ones purple
     if (p.large && !replay && p.maxLevels > 0) {

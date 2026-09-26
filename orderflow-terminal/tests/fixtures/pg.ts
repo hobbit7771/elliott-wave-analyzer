@@ -111,6 +111,15 @@ export async function startPg(): Promise<{ sql: postgres.Sql; port: number; stop
     .filter((l) => !/anon|authenticated|storage\.buckets|values \('oft-archive'|on conflict \(id\) do nothing/.test(l))
     .join('\n');
   await db.exec(ddl);
+  // later migrations: roles of the Supabase project (anon, authenticated, oft_app) do not exist here
+  for (const f of ['0003_oft_klines.sql']) {
+    await db.exec(
+      readFileSync('supabase/migrations/' + f, 'utf8')
+        .split('\n')
+        .filter((l) => !/anon|authenticated|oft_app/.test(l))
+        .join('\n'),
+    );
+  }
   const srv = serveWire(db);
   await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
   const port = (srv.address() as net.AddressInfo).port;
