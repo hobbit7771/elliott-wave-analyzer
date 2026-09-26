@@ -300,8 +300,9 @@ async function heatHistory(source: string, symbol: string, key: string, from: nu
   if (repo && from < localFrom - 15_000) {
     const span = Math.min(to, localFrom) - from;
     const res = span / 10_000 <= maxCols * 2 ? 10 : 60;
-    let older = await repo.heat(source, symbol, res, from, Math.min(to, localFrom - 1), 20_000);
-    if (!older.length && res === 10) older = await repo.heat(source, symbol, 60, from, Math.min(to, localFrom - 1), 20_000);
+    const cap = Math.min(1500, maxCols);
+    let older = await repo.heat(source, symbol, res, from, Math.min(to, localFrom - 1), cap);
+    if (!older.length && res === 10) older = await repo.heat(source, symbol, 60, from, Math.min(to, localFrom - 1), cap);
     if (older.length) {
       tiers.push(`supabase:${older[0].dt >= 30_000 ? 60 : 10}s`);
       cols = older.concat(cols);
@@ -750,7 +751,21 @@ const BUILD = (process.env.RENDER_GIT_COMMIT ?? '').slice(0, 12) || String(Date.
 
 const server = http.createServer((req, res) => {
   const u = new URL(req.url ?? '/', 'http://localhost');
-  const h = u.pathname.startsWith('/api/') ? api(req, res, u) : serveStatic(req, res, u);
+  const isApi = u.pathname.startsWith('/api/');
+  const heap0 = isApi ? process.memoryUsage().heapUsed : 0;
+  const t0 = Date.now();
+  const h = isApi ? api(req, res, u) : serveStatic(req, res, u);
+  // evidence for memory / latency problems: heavy API requests are logged (path only, no secrets)
+  if (isApi)
+    void h.then(
+      () => logHeavy(),
+      () => logHeavy(),
+    );
+  function logHeavy(): void {
+    const dMb = (process.memoryUsage().heapUsed - heap0) / 1048576;
+    const ms = Date.now() - t0;
+    if (dMb > 25 || ms > 3000) log(`OFT_REQ ${JSON.stringify({ path: u.pathname, q: u.searchParams.toString().slice(0, 160), ms, heapDeltaMb: Math.round(dMb) })}`);
+  }
   h.catch((e: Error & { status?: number }) => {
     const code = e.status ?? (/\b451\b/.test(e.message) ? 451 : 502);
     if (!res.headersSent) json(res, code, { error: e.message });

@@ -44,6 +44,7 @@ export interface Repo {
   deleteManifest(path: string): Promise<void>;
   pendingManifests(olderThanMs: number): Promise<ArchiveManifest[]>;
   manifests(source: string, symbol: string, from: number, to: number): Promise<ArchiveManifest[]>;
+  /** at most `limit` tiles, evenly thinned over the range */
   heat(source: string, symbol: string, res: number, from: number, to: number, limit: number): Promise<HeatColumn[]>;
   events(source: string, symbol: string, from: number, to: number, limit: number, asOf?: number): Promise<MarketEvent[]>;
   candles(source: string, symbol: string, from: number, to: number): Promise<(Candle & { origin: string })[]>;
@@ -134,7 +135,11 @@ export class PgRepo implements Repo {
   }
 
   async heat(source: string, symbol: string, res: number, from: number, to: number, limit: number): Promise<HeatColumn[]> {
-    const rows = await this.sql`select data from oft.heat_tiles where source=${source} and symbol=${symbol} and res_s=${res} and t>=${from} and t<=${to} order by t limit ${limit}`;
+    // a decoded tile is ~10 KB in memory: thin out in SQL so a long range never loads thousands of tiles
+    const [{ n: cnt, t0 }] = await this.sql`select count(*)::int as n, min(t) as t0 from oft.heat_tiles where source=${source} and symbol=${symbol} and res_s=${res} and t>=${from} and t<=${to}`;
+    if (!cnt) return [];
+    const stride = Math.max(1, Math.ceil(Number(cnt) / Math.max(1, limit)));
+    const rows = await this.sql`select data from oft.heat_tiles where source=${source} and symbol=${symbol} and res_s=${res} and t>=${from} and t<=${to} and ((t - ${n(t0)}) / ${res * 1000}) % ${stride} = 0 order by t limit ${limit}`;
     return rows.map((r) => dec(r.data as Uint8Array));
   }
 
