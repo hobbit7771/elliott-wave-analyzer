@@ -15,6 +15,10 @@ export interface WsClientOptions {
   maxLifetimeMs?: number;
   /** injectable for tests */
   factory?: (url: string) => WebSocket;
+  /** text message sent right after the socket opens (e.g. Bybit subscribe) */
+  sendOnOpen?: string;
+  /** application-level text ping (e.g. Bybit {"op":"ping"}) */
+  appPing?: { everyMs: number; payload: string };
   onOpen?: () => void;
   onMessage?: (data: string) => void;
   onClose?: (code: number, reason: string, willReconnect: boolean) => void;
@@ -35,6 +39,7 @@ export class ReconnectingWs {
   private timer: NodeJS.Timeout | null = null;
   private watchdog: NodeJS.Timeout | null = null;
   private pinger: NodeJS.Timeout | null = null;
+  private appPinger: NodeJS.Timeout | null = null;
   private lifetime: NodeJS.Timeout | null = null;
   private stopped = false;
   lastMessageAt = 0;
@@ -74,6 +79,11 @@ export class ReconnectingWs {
       this.armWatchdog();
       if (this.o.pingMs) this.pinger = setInterval(() => ws.readyState === WebSocket.OPEN && ws.ping(), this.o.pingMs);
       if (this.o.maxLifetimeMs) this.lifetime = setTimeout(() => ws.terminate(), this.o.maxLifetimeMs);
+      if (this.o.appPing) {
+        const ap = this.o.appPing;
+        this.appPinger = setInterval(() => ws.readyState === WebSocket.OPEN && ws.send(ap.payload), ap.everyMs);
+      }
+      if (this.o.sendOnOpen) ws.send(this.o.sendOnOpen);
       this.o.onOpen?.();
     });
     ws.on('message', (data: WebSocket.RawData) => {
@@ -140,7 +150,8 @@ export class ReconnectingWs {
   private clearTimers(): void {
     for (const t of [this.timer, this.watchdog, this.lifetime]) if (t) clearTimeout(t);
     if (this.pinger) clearInterval(this.pinger);
+    if (this.appPinger) clearInterval(this.appPinger);
     if (this.watchdog) clearInterval(this.watchdog);
-    this.timer = this.watchdog = this.pinger = this.lifetime = null;
+    this.timer = this.watchdog = this.pinger = this.appPinger = this.lifetime = null;
   }
 }

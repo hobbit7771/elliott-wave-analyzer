@@ -43,6 +43,8 @@ if (PROD) {
     BINANCE_FUTURES_WS_BASE: /(^|\.)binance\.com$/,
     BINANCE_SPOT_REST: /(^|\.)binance\.(com|vision)$/,
     BINANCE_SPOT_WS: /(^|\.)binance\.(com|vision)$/,
+    BYBIT_REST: /(^|\.)bybit\.com$/,
+    BYBIT_WS: /(^|\.)bybit\.com$/,
     DATABENTO_LIVE_GATEWAY: /(^|\.)databento\.com$/,
     OFT_ARCHIVE_URL: /(^|\.)supabase\.co$/,
     OFT_DB_URL: /(^|\.)supabase\.(co|com)$/,

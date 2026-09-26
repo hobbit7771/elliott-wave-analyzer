@@ -1,6 +1,7 @@
 import type { SourceId } from '../../core/types.js';
 import type { MarketAdapter } from './adapter.js';
 import { BinanceFuturesAdapter, BinanceSpotAdapter } from './binance.js';
+import { BybitLinearAdapter } from './bybit.js';
 
 const adapters = new Map<SourceId, MarketAdapter>();
 
@@ -9,13 +10,14 @@ export function getAdapter(id: SourceId): MarketAdapter {
   if (!a) {
     if (id === 'binance-futures') a = new BinanceFuturesAdapter();
     else if (id === 'binance-spot') a = new BinanceSpotAdapter();
+    else if (id === 'bybit-linear') a = new BybitLinearAdapter();
     else throw new Error(`unknown source ${id}`);
     adapters.set(id, a);
   }
   return a;
 }
 
-export const SOURCES: SourceId[] = ['binance-futures', 'binance-spot'];
+export const SOURCES: SourceId[] = ['binance-futures', 'binance-spot', 'bybit-linear'];
 
 export function isSource(s: string): s is SourceId {
   return (SOURCES as string[]).includes(s);
@@ -26,12 +28,6 @@ export function isSource(s: string): s is SourceId {
  * They are shown in the "Data sources" panel only — never as selectable instruments.
  */
 export const UNAVAILABLE_SOURCES = [
-  {
-    id: 'bybit',
-    name: 'Bybit (линейные бессрочные контракты)',
-    status: 'не реализован',
-    reason: 'Интерфейс адаптера (MarketAdapter) готов; публичные потоки orderbook.200 и publicTrade бесплатны, но адаптер в этом выпуске не написан.',
-  },
   {
     id: 'databento-glbx',
     name: 'CME Globex через Databento (GLBX.MDP3: NQ, ES, GC, CL)',

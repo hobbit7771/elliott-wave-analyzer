@@ -1,7 +1,7 @@
 // Live session for one instrument: per-route WebSocket ingestion, snapshot sync / resync, per-stream
 // freshness and signal gating, trade-id continuity, ID-aware BBO cross-check, local + Supabase recording,
 // live verification against the exchange REST API, publishing. Runs inside a worker thread (worker.ts).
-import type { Candle, ConnState, FeedStatus, HeatColumn, InstrumentMeta, MarketEvent, Trade } from '../core/types.js';
+import type { BookSnapshot, Candle, ConnState, FeedStatus, HeatColumn, InstrumentMeta, MarketEvent, Trade } from '../core/types.js';
 import { MarketEngine } from '../core/engine.js';
 import { autoHeatStep } from '../core/heatmap.js';
 import type { DetectorConfig } from '../core/detectors/config.js';
@@ -140,6 +140,8 @@ export class Session {
       this.status.streams[r.route] = st;
       const ws: ReconnectingWs = new ReconnectingWs({
         url: r.url,
+        sendOnOpen: r.subscribe,
+        appPing: r.appPing,
         silenceMs: 20_000,
         pingMs: 60_000,
         maxLifetimeMs: 23 * 3600_000,
@@ -151,7 +153,8 @@ export class Session {
             this.engine.beginSync();
             // flow state from before the reconnect is not continuous with the new stream
             this.engine.resetTransient();
-            this.scheduleResync(400);
+            // venues that push the snapshot on the stream (Bybit) need no REST snapshot
+            if (!this.adapter.snapshotViaStream) this.scheduleResync(400);
           }
           this.updateGate();
         },
@@ -261,30 +264,36 @@ export class Session {
           if (step !== this.engine.opts.heatStep) this.engine.setHeatStep(step);
         }
       }
-      const r = this.engine.onSnapshot(snap);
-      this.status.resyncs++;
-      if (!r.ok) {
-        this.resyncAttempt++;
-        this.log(`[${this.key}] snapshot not bridged: ${r.reason}`);
-        this.scheduleResync(backoffDelay(this.resyncAttempt, 500, 10_000));
-        return;
-      }
-      this.resyncAttempt = 0;
-      this.status.synced = true;
-      this.lastDiffWall = Date.now();
-      this.bookHistory = [];
-      this.pendingBbo = [];
-      this.o.persist?.onSynced(this.engine.book, this.engine.book.lastT || Date.now());
-      this.setState('connected', 'book synced');
-      this.updateGate();
-      if (this.status.resyncs > 1) this.feedEvent('Ресинхронизация', `Локальный стакан восстановлен по REST-снимку #${snap.lastUpdateId} после разрыва/переподключения.`);
-      this.bookDirty = true;
+      this.applySnapshot(snap, 'REST');
     } catch (e) {
       this.resyncAttempt++;
       this.log(`[${this.key}] snapshot failed: ${(e as Error).message}`);
       this.setState('syncing', `snapshot failed: ${(e as Error).message.slice(0, 120)}`);
       this.scheduleResync(backoffDelay(this.resyncAttempt, 1000, 30_000));
     }
+  }
+
+  /** One path for every snapshot, from REST (Binance) or from the depth stream (Bybit). */
+  private applySnapshot(snap: BookSnapshot, origin: 'REST' | 'stream'): void {
+    const r = this.engine.onSnapshot(snap);
+    this.status.resyncs++;
+    if (!r.ok) {
+      this.resyncAttempt++;
+      this.log(`[${this.key}] snapshot not bridged: ${r.reason}`);
+      if (origin === 'REST') this.scheduleResync(backoffDelay(this.resyncAttempt, 500, 10_000));
+      else this.depthSocket()?.restart();
+      return;
+    }
+    this.resyncAttempt = 0;
+    this.status.synced = true;
+    this.lastDiffWall = Date.now();
+    this.bookHistory = [];
+    this.pendingBbo = [];
+    this.o.persist?.onSynced(this.engine.book, this.engine.book.lastT || Date.now());
+    this.setState('connected', 'book synced');
+    this.updateGate();
+    if (this.status.resyncs > 1) this.feedEvent('Ресинхронизация', `Локальный стакан восстановлен по ${origin === 'REST' ? 'REST-снимку' : 'снимку из потока'} #${snap.lastUpdateId} после разрыва/переподключения.`);
+    this.bookDirty = true;
   }
 
   private onGap(reason: string): void {
@@ -294,7 +303,9 @@ export class Session {
     this.setState('gap', reason);
     this.updateGate();
     this.feedEvent('Разрыв данных', `Нарушена последовательность стакана (${reason}). Новые сигналы заблокированы до ресинхронизации.`);
-    this.scheduleResync(50);
+    // stream-snapshot venues resend a snapshot only on a new connection
+    if (this.adapter.snapshotViaStream) this.depthSocket()?.restart();
+    else this.scheduleResync(50);
   }
 
   /** Signals require: synced + fresh depth AND a live trades stream (detectors join both). */
@@ -337,6 +348,12 @@ export class Session {
           }
           break;
         }
+        case 'snapshot':
+          this.status.depthUpdates++;
+          this.lastDiffWall = now;
+          this.engine.beginSync();
+          this.applySnapshot(m.snap, 'stream');
+          break;
         case 'trade':
           this.status.trades++;
           this.noteLatency(now, m.eventTime);

@@ -23,12 +23,16 @@ export type NormalizedMsg =
   | { kind: 'trade'; tr: Trade; eventTime: number }
   | { kind: 'bbo'; t: number; u?: number; bid: number; bidQty: number; ask: number; askQty: number; eventTime: number }
   | { kind: 'mark'; t: number; mark: number; index: number; funding: number; nextFunding: number; eventTime: number }
+  | { kind: 'snapshot'; snap: BookSnapshot; eventTime: number }
   | { kind: 'liq'; t: number; side: 'buy' | 'sell'; price: number; qty: number; eventTime: number }
   | { kind: 'ignore' };
 
 export interface StreamRoute {
   route: 'depth' | 'flow' | 'all';
   url: string;
+  /** subscription message sent on open (venues that subscribe after connecting) */
+  subscribe?: string;
+  appPing?: { everyMs: number; payload: string };
 }
 
 export interface MarketAdapter {
@@ -36,6 +40,8 @@ export interface MarketAdapter {
   name: string;
   venue: string;
   syncMode: SyncMode;
+  /** the order-book snapshot arrives on the depth stream itself (no REST snapshot); a gap forces a reconnect */
+  snapshotViaStream?: boolean;
   caps: Capabilities;
   limitations: string[];
   listInstruments(): Promise<InstrumentMeta[]>;

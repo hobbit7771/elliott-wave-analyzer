@@ -1,7 +1,7 @@
 // Normalized market-data model shared by server, client and tests.
 // All timestamps are UTC epoch milliseconds.
 
-export type SourceId = 'binance-futures' | 'binance-spot';
+export type SourceId = 'binance-futures' | 'binance-spot' | 'bybit-linear';
 
 /** Aggressor side of a trade: +1 = buyer lifted the ask, -1 = seller hit the bid. */
 export type AggSide = 1 | -1;
