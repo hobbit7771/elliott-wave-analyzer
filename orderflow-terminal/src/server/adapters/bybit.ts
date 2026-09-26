@@ -36,6 +36,7 @@ export class BybitLinearAdapter implements MarketAdapter {
     liquidations: true,
     nativeIntervals: ['1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d'] as Timeframe[],
     snapshotDepth: 200,
+    klineOpenIsPrevClose: true, // verified live: REST O(t) = C(t-1), and H/L include it
   };
   limitations = [
     'Стакан Bybit в публичном потоке — 200 уровней на сторону (orderbook.200, пакеты по 100 мс); глубже биржа бесплатно не отдаёт.',

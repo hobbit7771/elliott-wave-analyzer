@@ -16,6 +16,8 @@ export interface Capabilities {
   nativeIntervals: Timeframe[];
   /** max levels of the REST depth snapshot we request */
   snapshotDepth: number;
+  /** REST klines open at the previous bar's close (Bybit), not at the bar's first trade */
+  klineOpenIsPrevClose?: boolean;
 }
 
 export type NormalizedMsg =

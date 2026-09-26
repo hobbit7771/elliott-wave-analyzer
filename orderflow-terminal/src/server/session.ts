@@ -493,11 +493,18 @@ export class Session {
       }
       const vc = this.status.verify.candles;
       const k = await this.adapter.fetchKlines(this.meta.symbol, '1m', 6);
+      const prevClose = new Map([...this.liveBars].map(([t, b]) => [t + 60_000, b.c]));
       for (const c of k.slice(0, -1)) {
         this.o.persist?.onCandle(c, 'rest');
         this.o.recorder?.candle1m(c);
-        const l = this.liveBars.get(c.t);
+        let l = this.liveBars.get(c.t);
         if (!l || c.t <= this.firstLiveBar) continue; // first bar only partially observed
+        if (this.adapter.caps.klineOpenIsPrevClose) {
+          // the venue opens a bar at the previous close: compare like with like
+          const pc = prevClose.get(c.t);
+          if (pc === undefined) continue;
+          l = { ...l, o: pc, h: Math.max(l.h, pc), l: Math.min(l.l, pc) };
+        }
         vc.compared++;
         const same = l.o === c.o && l.h === c.h && l.l === c.l && l.c === c.c;
         if (same) vc.ohlcMatches++;
