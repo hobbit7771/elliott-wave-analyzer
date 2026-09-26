@@ -94,6 +94,8 @@ abstract class BinanceBase implements MarketAdapter {
   async fetchSnapshot(symbol: string): Promise<BookSnapshot> {
     const r = await getJson<{ lastUpdateId: number; E?: number; T?: number; bids: [string, string][]; asks: [string, string][] }>(
       `${this.rest}${this.path.depth}?symbol=${symbol}&limit=${this.caps.snapshotDepth}`,
+      10_000,
+      20_000, // the book cannot sync without it: probe a banned host every 20 s
     );
     const conv = (l: [string, string][]): Level[] => l.map(([p, q]) => [parseFloat(p), parseFloat(q)]);
     return { lastUpdateId: r.lastUpdateId, t: r.T ?? r.E ?? Date.now(), bids: conv(r.bids), asks: conv(r.asks) };

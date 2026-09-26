@@ -71,11 +71,21 @@ export class HttpError extends Error {
 /** REST health per host (exchanges ban shared cloud IPs; this is shown in diagnostics, never hidden). */
 export const restHealth: Record<string, { ok: number; fail: number; lastStatus: number; lastError: string; bannedUntil: number; lastOkAt: number }> = {};
 
-export async function getJson<T>(url: string, timeoutMs = 10_000): Promise<T> {
+const lastProbe: Record<string, number> = {};
+
+/**
+ * `probeMs`: while the host reports a ban, send at most one request per this interval (default 5 min).
+ * Binance extends an IP ban for requests made during it, so a banned host is left alone — but Render has more
+ * than one outbound address (requests kept succeeding during earlier bans), so rare probes still get through;
+ * the order-book snapshot, without which nothing syncs, probes more often.
+ */
+export async function getJson<T>(url: string, timeoutMs = 10_000, probeMs = 300_000): Promise<T> {
   const host = new URL(url).host;
   const h = (restHealth[host] ??= { ok: 0, fail: 0, lastStatus: 0, lastError: '', bannedUntil: 0, lastOkAt: 0 });
-  // Binance extends an IP ban for requests sent while it is active: send nothing to a banned host until it ends
-  if (Date.now() < h.bannedUntil) throw new HttpError(418, `${host} REST paused until ${new Date(h.bannedUntil).toISOString()} (IP ban / rate limit); request not sent`);
+  if (Date.now() < h.bannedUntil) {
+    if (Date.now() - (lastProbe[host] ?? 0) < probeMs) throw new HttpError(418, `${host} REST paused until ${new Date(h.bannedUntil).toISOString()} (IP ban / rate limit); request not sent`);
+    lastProbe[host] = Date.now();
+  }
   const ac = new AbortController();
   const to = setTimeout(() => ac.abort(), timeoutMs);
   try {
@@ -87,6 +97,7 @@ export async function getJson<T>(url: string, timeoutMs = 10_000): Promise<T> {
       h.lastError = `${r.status} ${body.slice(0, 160)}`;
       // Binance 418/429: IP ban / rate limit. "banned until <epoch ms>" is reported to the UI.
       const m = /banned until (\d{13})/.exec(body);
+      if (m || r.status === 429 || r.status === 418) lastProbe[host] = Date.now(); // the next probe waits a full interval
       if (m) h.bannedUntil = +m[1];
       else if (r.status === 429 || r.status === 418) {
         const ra = Number(r.headers.get('retry-after'));
@@ -96,6 +107,7 @@ export async function getJson<T>(url: string, timeoutMs = 10_000): Promise<T> {
     }
     h.ok++;
     h.lastOkAt = Date.now();
+    h.bannedUntil = 0; // this request got through (another outbound address, or the ban was lifted)
     return (await r.json()) as T;
   } catch (e) {
     if (!(e instanceof HttpError)) {

@@ -18,6 +18,12 @@ describe('REST ban guard', () => {
     await expect(getJson(url)).rejects.toThrow(/paused until/);
     expect(hits).toBe(1);
     expect(restHealth[new URL(url).host].bannedUntil).toBe(until);
+    // a critical request may probe after its own interval (Render has several outbound addresses)
+    await new Promise((r) => setTimeout(r, 60));
+    await expect(getJson(url, 5000, 50)).rejects.toThrow(/418/);
+    expect(hits).toBe(2);
+    await expect(getJson(url, 5000, 50)).rejects.toThrow(/paused until/);
+    expect(hits).toBe(2);
     srv.close();
   });
 
