@@ -11,6 +11,7 @@ import type { MarketAdapter } from '../adapters/adapter.js';
 import type { Repo } from '../persist/repo.js';
 import type { Setup, WorkingOrder } from '../../core/levelEngine/setupEngine.js';
 import { SiteEngine, SITE_PARAMS, type SiteParams } from '../../core/levelEngine/siteEngine.js';
+import type { Funding } from '../../core/levelEngine/trend.js';
 import type { DailyLevel } from '../../core/levelEngine/dailyLevels.js';
 
 const M15 = 15 * 60_000;
@@ -59,6 +60,8 @@ export class LevelService {
   readonly historyDays = +(process.env.LEVELS_HISTORY_DAYS ?? 365);
   /** market-factor (BTC) closed daily candles per source, refreshed once a day */
   private market = new Map<SourceId, { day: number; d: Candle[] }>();
+  /** funding settlements per instrument, refreshed at most every 4 h (funding filter of the trend model) */
+  private funding = new Map<string, { at: number; f: Funding[] }>();
 
   constructor(
     private deps: {
@@ -152,6 +155,22 @@ export class LevelService {
     return d.length ? d : hit?.d ?? [];
   }
 
+  /** The coin's funding settlements for the last `days` days (empty if the source has none or REST fails). */
+  private async loadFunding(c: Ctx, days = 30): Promise<Funding[]> {
+    const hit = this.funding.get(c.key);
+    if (hit && Date.now() - hit.at < 4 * 3600_000 && (hit.f[0]?.t ?? Infinity) <= Date.now() - (days - 1) * DAY) return hit.f;
+    const ad = this.deps.adapter(c.source);
+    if (!ad.fetchFunding) return [];
+    try {
+      const f = await ad.fetchFunding(c.symbol, Date.now() - days * DAY);
+      this.funding.set(c.key, { at: Date.now(), f });
+      return f;
+    } catch (e) {
+      this.deps.log(`[levels ${c.key}] funding fetch failed: ${(e as Error).message.slice(0, 120)}`);
+      return hit?.f ?? [];
+    }
+  }
+
   // ---------------- live ----------------
 
   private async startLive(c: Ctx): Promise<void> {
@@ -160,7 +179,7 @@ export class LevelService {
     const warm = await this.loadKlines(c, '15m', now - 7 * DAY);
     if (daily.length < 60 || !warm.length) throw new Error(`not enough history (D1 ${daily.length}, 15m ${warm.length})`);
     const dailyBefore = daily.filter((d) => d.t + DAY <= warm[0].t);
-    const eng = new SiteEngine({ symbol: c.symbol, exchange: c.source, tick: c.tick }, dailyBefore, c.params, await this.loadMarket(c.source));
+    const eng = new SiteEngine({ symbol: c.symbol, exchange: c.source, tick: c.tick }, dailyBefore, c.params, await this.loadMarket(c.source), await this.loadFunding(c));
     for (const b of warm) eng.step(b);
     c.engine = eng;
     c.lastBarT = warm[warm.length - 1].t;
@@ -187,6 +206,7 @@ export class LevelService {
       }
       if (Date.now() < c.lastBarT + 2 * M15) continue; // no new closed bar yet
       c.engine.setMarket(await this.loadMarket(c.source)); // cached: reloads once per UTC day
+      c.engine.setFunding(await this.loadFunding(c)); // cached: reloads every 4 h
       try {
         const rows = await this.deps.adapter(c.source).fetchKlines(c.symbol, '15m', 20);
         const closed = rows.filter((r) => r.t > c.lastBarT && r.t + M15 <= Date.now());
@@ -226,7 +246,7 @@ export class LevelService {
       const bars = await this.loadKlines(c, '15m', now - this.historyDays * DAY);
       const daily = await this.loadKlines(c, '1d', now - (this.historyDays + 400) * DAY);
       if (bars.length < 2000 || daily.length < 120) throw new Error(`not enough history for a backtest (15m ${bars.length}, D1 ${daily.length})`);
-      const r = await this.analyze({ symbol: c.symbol, exchange: c.source, tick: c.tick || 0 }, daily, bars, await this.loadMarket(c.source));
+      const r = await this.analyze({ symbol: c.symbol, exchange: c.source, tick: c.tick || 0 }, daily, bars, await this.loadMarket(c.source), await this.loadFunding(c, this.historyDays + 10));
       c.history = r;
       const repo = this.deps.repo();
       if (repo) await repo.setSetting('levelsetups:' + key, r).catch((e) => this.deps.log(`[levels ${key}] result save failed: ${(e as Error).message}`));
@@ -242,7 +262,7 @@ export class LevelService {
     }
   }
 
-  private analyze(meta: { symbol: string; exchange: string; tick: number }, daily: Candle[], bars: Candle[], market: Candle[]): Promise<HistoryResult> {
+  private analyze(meta: { symbol: string; exchange: string; tick: number }, daily: Candle[], bars: Candle[], market: Candle[], funding: Funding[]): Promise<HistoryResult> {
     if (!this.worker) {
       this.worker = new Worker(this.deps.workerPath, { resourceLimits: { maxOldGenerationSizeMb: +(process.env.ANALYSIS_HEAP_MB ?? 160) } });
       this.worker.on('message', (m: { id: number; ok: boolean; result?: HistoryResult; error?: string }) => {
@@ -259,7 +279,7 @@ export class LevelService {
     const id = ++this.reqId;
     return new Promise((resolve, reject) => {
       this.pending.set(id, (m) => (m.ok && m.result ? resolve(m.result) : reject(new Error(m.error ?? 'analysis failed'))));
-      this.worker!.postMessage({ id, meta, daily, bars, market });
+      this.worker!.postMessage({ id, meta, daily, bars, market, funding });
     });
   }
 
@@ -272,6 +292,7 @@ export class LevelService {
     error: string;
     price: number;
     orders: WorkingOrder[];
+    trendSkipped: string;
     positions: { id: string; model: string; direction: string; t: number; entry: number; stop: number; r: number }[];
   } | null {
     const c = this.ctx.get(key);
@@ -285,6 +306,7 @@ export class LevelService {
       atrD: eng?.atrDaily ?? NaN,
       levels: (eng?.levels ?? []).map((l) => ({ ...l, state: eng!.stateOf(l.id), confirmedRecently: recent.some((s) => s.levelId === l.id) })),
       orders: eng?.workingOrders() ?? [],
+      trendSkipped: eng?.tr.skipped ?? '',
       positions: (eng?.openPositions() ?? []).map((p) => ({ id: p.setup.id, model: p.setup.reasons[1] ?? '', direction: p.setup.direction, t: p.setup.t, entry: p.setup.entry, stop: p.stop, r: p.setup.outcome.r })),
     };
   }

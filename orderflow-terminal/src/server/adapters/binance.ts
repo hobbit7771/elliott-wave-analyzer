@@ -220,6 +220,18 @@ export class BinanceFuturesAdapter extends BinanceBase {
     const r = await getJson<{ openInterest: string; time: number }>(`${this.rest}/fapi/v1/openInterest?symbol=${symbol}`);
     return { t: r.time, oi: +r.openInterest };
   }
+
+  async fetchFunding(symbol: string, from: number): Promise<{ t: number; rate: number }[]> {
+    const out = new Map<number, number>();
+    let start = from;
+    for (let page = 0; page < 5; page++) {
+      const rows = await getJson<{ fundingTime: number; fundingRate: string }[]>(`${this.rest}/fapi/v1/fundingRate?symbol=${symbol}&startTime=${start}&limit=1000`);
+      for (const x of rows) out.set(x.fundingTime, +x.fundingRate);
+      if (rows.length < 1000) break;
+      start = Math.max(...rows.map((x) => x.fundingTime)) + 1;
+    }
+    return [...out].sort((a, b) => a[0] - b[0]).map(([t, rate]) => ({ t, rate }));
+  }
 }
 
 export class BinanceSpotAdapter extends BinanceBase {

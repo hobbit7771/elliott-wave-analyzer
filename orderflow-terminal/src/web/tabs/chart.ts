@@ -698,6 +698,7 @@ export function createChartTab(): Tab {
   type EnginePos = { id: string; model: string; direction: string; t: number; entry: number; stop: number; r: number };
   let engOrders: EngineOrder[] = [];
   let engPositions: EnginePos[] = [];
+  let trendSkipped = '';
   const MODEL_SHORT: Record<string, string> = { TREND_BREAKOUT: 'тренд', BOUNCE: 'отбой', BREAKOUT: 'пробой', FALSE_BREAK: 'ложный пробой', HOLY_GRAIL: 'Holy Grail' };
   let strongKey = '';
   const levelColor = (l: StrongLevel) =>
@@ -706,13 +707,14 @@ export function createChartTab(): Tab {
     const key = store.key;
     try {
       const [lv, st] = await Promise.all([
-        api<{ levels: StrongLevel[]; orders?: EngineOrder[]; positions?: EnginePos[] } | null>('/api/levels/strong', { source: store.source, symbol: store.symbol }),
+        api<{ levels: StrongLevel[]; orders?: EngineOrder[]; positions?: EnginePos[]; trendSkipped?: string } | null>('/api/levels/strong', { source: store.source, symbol: store.symbol }),
         api<{ history: { setups: Setup[] } | null; live: Setup[] } | null>('/api/setups', { source: store.source, symbol: store.symbol }),
       ]);
       if (key !== store.key) return;
       strongLv = lv?.levels ?? [];
       engOrders = lv?.orders ?? [];
       engPositions = lv?.positions ?? [];
+      trendSkipped = lv?.trendSkipped ?? '';
       strongKey = key;
       store.staticLevels = strongLv.map((l) => ({ price: l.price, strength: l.strength, status: l.status }));
       const all = [...(st?.history?.setups ?? []), ...(st?.live ?? [])];
@@ -749,7 +751,8 @@ export function createChartTab(): Tab {
     const fmtR = (x: Setup) => (x.outcome.status === 'open' ? `открыт ${f2(x.outcome.r)}R` : `${x.outcome.r >= 0 ? '+' : ''}${f2(x.outcome.r)}R`);
     const now =
       engOrders.map((o) => `<tr><td class="l">⏳ ${o.dir > 0 ? 'BUY' : 'SELL'} ${o.kind === 'limit' ? 'лимит' : 'стоп'} ${esc(fmtP(o.price, dec()))}</td><td class="l">${esc(MODEL_SHORT[o.model] ?? o.model)}</td><td class="l muted">SL ${esc(fmtP(o.sl, dec()))}</td></tr>`).join('') +
-      engPositions.map((p) => `<tr><td class="l">● ${p.direction} от ${esc(fmtP(p.entry, dec()))}</td><td class="l">${esc(MODEL_SHORT[p.model] ?? p.model)}</td><td class="l muted">SL ${esc(fmtP(p.stop, dec()))} · ${f2(p.r)}R</td></tr>`).join('');
+      engPositions.map((p) => `<tr><td class="l">● ${p.direction} от ${esc(fmtP(p.entry, dec()))}</td><td class="l">${esc(MODEL_SHORT[p.model] ?? p.model)}</td><td class="l muted">SL ${esc(fmtP(p.stop, dec()))} · ${f2(p.r)}R</td></tr>`).join('') +
+      (trendSkipped ? `<tr><td class="l muted" colspan="3">тренд: ордер на пробой сегодня не выставлен — ${esc(trendSkipped)}</td></tr>` : '');
     signalsPanel.innerHTML =
       `<button class="close" aria-label="Закрыть">×</button><b>Входы движка ${esc(store.symbol)}</b> <span class="muted">${year} за год — модели строгие, ≈ ${(year / 12).toFixed(1)} в месяц</span>` +
       `<p class="muted" style="margin:6px 0 2px">Сейчас</p><table><tbody>${now || '<tr><td class="l muted">движок ничего не ждёт: цена далеко от сильных уровней и канала</td></tr>'}</tbody></table>` +

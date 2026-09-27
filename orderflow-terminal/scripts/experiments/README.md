@@ -32,4 +32,8 @@ the next 6 months). `trend15.ts` checks the 15m TrendEngine against the daily si
 Research ideas (27.09.2026): `ens.py` — multi-lookback Donchian ensemble with a 25 % volatility target
 (Zarattini, Pagani, Barbon 2025); `xs.py` — cross-sectional momentum (Liu, Tsyvinski, Wu); `vt.py`, `vt3.py`, `vt4.py` —
 midline exits, portfolio volatility management (Moreira, Muir 2017) with a paired block bootstrap, and a multiplier
-fixed at entry. `dbt.py` gained the `('mid', n)` trailing exit.
+fixed at entry. `dbt.py` gained the `('mid', n)` trailing exit and real funding (`fund=`).
+Round 2: `r2.py` — volatility squeeze, close/volume confirmation, SMA200 regime, shorts; `fpred.py`, `fpred2.py` —
+does funding / open interest predict returns (needs `fund/SYM.json` = [[utc day, daily funding × 1e6]] and
+`oi/SYM.json` = [[utc day, open interest]] from Bybit's public API); `ftr.py`, `ftr2.py` — the funding filter on the
+trend model and the trades it removes; `site_funding.ts` — the 15m site engine with and without it (`DATA=all`).

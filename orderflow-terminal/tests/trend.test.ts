@@ -1,6 +1,6 @@
 // TEST-ONLY synthetic market for the trend (Donchian breakout) model on 15m bars.
 import type { Candle } from '../src/core/types.js';
-import { SITE_TREND_PARAMS, TrendEngine, dailyTrend } from '../src/core/levelEngine/trend.js';
+import { SITE_TREND_PARAMS, TrendEngine, dailyTrend, fundingPerDay7, type Funding } from '../src/core/levelEngine/trend.js';
 
 const DAY = 86_400_000;
 const M15 = 15 * 60_000;
@@ -47,5 +47,22 @@ describe('trend model (Donchian breakout)', () => {
     const t = T0 + 60 * DAY;
     for (const b of day(t, 100, { 11: [100.8, 102, 100.7, 101.8], 50: [101, 101, 97, 97.5] })) eng.step(b);
     expect(eng.setups).toHaveLength(0);
+  });
+
+  it('no breakout order while funding shows crowded longs; normal funding does not block it', () => {
+    const t = T0 + 60 * DAY;
+    // 3 settlements a day for the 7 days before t
+    const fund = (rate: number): Funding[] => Array.from({ length: 21 }, (_, k) => ({ t: t - 7 * DAY + k * 8 * 3600_000, rate }));
+    expect(fundingPerDay7(fund(0.0003), t)).toBeCloseTo(0.0009, 9);
+    expect(fundingPerDay7(fund(0.0003).slice(-6), t)).toBeNaN(); // fewer than 4 days of data: filter off
+    const hot = new TrendEngine(meta, flat(60), SITE_TREND_PARAMS, up(80), fund(0.0003)); // 0.09 %/day > 0.05
+    const bars = day(t, 100, { 11: [100.8, 102, 100.7, 101.8] });
+    for (const b of bars) hot.step(b);
+    expect(hot.setups).toHaveLength(0);
+    expect(hot.skipped).toMatch(/фандинг/);
+    const normal = new TrendEngine(meta, flat(60), SITE_TREND_PARAMS, up(80), fund(0.0001)); // 0.03 %/day
+    for (const b of bars) normal.step(b);
+    expect(normal.setups).toHaveLength(1);
+    expect(normal.skipped).toBe('');
   });
 });

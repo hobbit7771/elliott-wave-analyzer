@@ -56,6 +56,8 @@ export interface MarketAdapter {
   fetchPrices?(): Promise<Record<string, number>>;
   /** 24h stats for every instrument (for the coin picker): last price, 24h change (fraction), 24h quote turnover */
   fetchTickers?(): Promise<Ticker24[]>;
+  /** perpetual funding settlements since `from` (ms), oldest first; rate is a fraction per settlement */
+  fetchFunding?(symbol: string, from: number): Promise<{ t: number; rate: number }[]>;
   /**
    * WebSocket connections needed for one instrument. 'depth' carries order-book diffs (+ BBO),
    * 'flow' carries trades / mark price / liquidations, 'all' carries everything on one socket.

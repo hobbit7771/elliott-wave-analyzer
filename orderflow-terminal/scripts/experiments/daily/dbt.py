@@ -23,7 +23,7 @@ def adx(df,n=14):
 
 class Trade:
     __slots__=('sym','d','entry','stop','t0','t1','exit','r','why')
-def simulate(df, signals, sym, max_hold, trail=None):
+def simulate(df, signals, sym, max_hold, trail=None, fund=None):
     """signals: list of dict(day_index_created, dir, entry_stop, stop, target, valid_days, why). Executes on later days.
     trail: None or ('chandelier', k, n) or ('donchian', n) exits. Returns trades and a daily R pnl series (MTM)."""
     o,h,l,c=df.o.values,df.h.values,df.l.values,df.c.values; A=atr(df).values
@@ -39,7 +39,7 @@ def simulate(df, signals, sym, max_hold, trail=None):
         j,px=filled; stop=s['stop']; risk=(px-stop)*d
         if risk<=0: continue
         tgt=s.get('target'); cost=(FEE_T+FEE_T+SLIP)*px/risk
-        prev=px; k=j; exitpx=None
+        prev=px; k=j; exitpx=None; fsum=0
         while k<n:
             # stop first (on the entry day too: conservative)
             if (d>0 and l[k]<=stop) or (d<0 and h[k]>=stop):
@@ -50,7 +50,9 @@ def simulate(df, signals, sym, max_hold, trail=None):
             if k-j+1>=max_hold:
                 exitpx=c[k]; pnl[k]+=(c[k]-prev)*d/risk; cost-=SLIP*px/risk; break
             pnl[k]+=(c[k]-prev)*d/risk; prev=c[k]
-            if d>0: pnl[k]-=FUND_LONG*px/risk
+            fr=FUND_LONG if fund is None else fund[k]
+            pnl[k]-=d*fr*px/risk
+            fsum=(fsum if k>j else 0)+d*fr*px/risk
             # trailing exits computed on the CLOSED day k, active from k+1
             if trail:
                 if trail[0]=='chandelier':
@@ -68,7 +70,7 @@ def simulate(df, signals, sym, max_hold, trail=None):
         # costs booked on the exit day
         pnl[k]-=cost
         t=Trade(); t.sym=sym; t.d=d; t.entry=px; t.stop=s['stop']; t.t0=df.index[j]; t.t1=df.index[k]; t.exit=exitpx
-        t.r=(exitpx-px)*d/risk-cost-(FUND_LONG*px/risk*(k-j) if d>0 else 0); t.why=s['why']; trades.append(t)
+        t.r=(exitpx-px)*d/risk-cost-(fsum if k>j else 0) if fund is not None else (exitpx-px)*d/risk-cost-(FUND_LONG*px/risk*(k-j) if d>0 else 0); t.why=s['why']; trades.append(t)
         busy_until=k
     return trades, pd.Series(pnl,index=df.index)
 

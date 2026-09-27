@@ -6,6 +6,7 @@ import { DEFAULT_SETUP_PARAMS, LevelSetupEngine, type Setup, type SetupParams } 
 import { median } from '../volumeStats.js';
 import type { GerchikParams } from './gerchik.js';
 import { SiteEngine, type SiteParams } from './siteEngine.js';
+import type { Funding } from './trend.js';
 
 export interface Stats {
   total: number;
@@ -126,12 +127,12 @@ export function walkForward(meta: { symbol: string; exchange: string; tick: numb
  * The site engine (trend breakout + Gerchik levels) with FIXED parameters over the whole history (no per-coin tuning): the result is split into
  * TRAIN / VALIDATION / OUT-OF-SAMPLE by time only to show how stable it is across periods.
  */
-export function runSite(meta: { symbol: string; exchange: string; tick: number }, dailyBefore: readonly Candle[], bars: readonly Candle[], p: SiteParams, chosenBy: string, market: readonly Candle[] = []): WalkForwardResult {
+export function runSite(meta: { symbol: string; exchange: string; tick: number }, dailyBefore: readonly Candle[], bars: readonly Candle[], p: SiteParams, chosenBy: string, market: readonly Candle[] = [], funding: readonly Funding[] = []): WalkForwardResult {
   const t0 = bars[0]?.t ?? 0;
   const tN = bars[bars.length - 1]?.t ?? 0;
   const trainEnd = t0 + (tN - t0) * 0.5;
   const valEnd = t0 + (tN - t0) * 0.75;
-  const eng = new SiteEngine(meta, dailyBefore, p, market);
+  const eng = new SiteEngine(meta, dailyBefore, p, market, funding);
   for (const b of bars) eng.step(b);
   const setups = eng.setups;
   for (const s of setups) s.segment = s.t < trainEnd ? 'TRAIN' : s.t < valEnd ? 'VALIDATION' : 'OOS';

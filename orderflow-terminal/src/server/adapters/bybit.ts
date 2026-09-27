@@ -98,6 +98,18 @@ export class BybitLinearAdapter implements MarketAdapter {
     return { t: +r.list[0].timestamp, oi: +r.list[0].openInterest };
   }
 
+  async fetchFunding(symbol: string, from: number): Promise<{ t: number; rate: number }[]> {
+    const out = new Map<number, number>();
+    let end = Date.now();
+    for (let page = 0; page < 10 && end > from; page++) {
+      const r = await this.get<{ list: { fundingRate: string; fundingRateTimestamp: string }[] }>(`/v5/market/funding/history?category=linear&symbol=${symbol}&limit=200&endTime=${end}`);
+      if (!r.list.length) break;
+      for (const x of r.list) out.set(+x.fundingRateTimestamp, +x.fundingRate);
+      end = Math.min(...r.list.map((x) => +x.fundingRateTimestamp)) - 1;
+    }
+    return [...out].filter(([t]) => t >= from).sort((a, b) => a[0] - b[0]).map(([t, rate]) => ({ t, rate }));
+  }
+
   async fetchPrices(): Promise<Record<string, number>> {
     const r = await this.get<{ list: { symbol: string; lastPrice: string }[] }>('/v5/market/tickers?category=linear');
     return Object.fromEntries(r.list.map((x) => [x.symbol, +x.lastPrice]));

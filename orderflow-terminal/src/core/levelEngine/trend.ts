@@ -11,7 +11,9 @@
 // Rules: at the start of each UTC day, if the last close is below the highest high of the last nIn closed days,
 // a buy stop at that high is valid for the day. Initial stop = entry − stopAtr × ATR(20, D1); the stop trails to
 // the lowest low of the last nOut closed days (updated at each day close). Skip when BTC's D1 trend is down
-// (close below a falling SMA50). Stop first when a bar reaches both; Bybit fees, stop slippage and an estimate of
+// (close below a falling SMA50), and skip when the coin's perpetual funding over the last 7 days averaged more
+// than maxFundingPerDay (crowded longs: on 17 coins 2021–2026 such breakouts lost −0.24R on average against
+// +0.53R for the rest, and the cross-section of funding predicts lower returns). Stop first when a bar reaches both; Bybit fees, stop slippage and an estimate of
 // perpetual funding for longs are charged in R.
 import type { Candle } from '../types.js';
 import type { DailyLevel } from './dailyLevels.js';
@@ -29,6 +31,14 @@ export interface TrendParams {
   feeTaker: number;
   slippage: number;
   fundingPerDay: number; // charged to longs (estimate: 0.01 % per 8 h)
+  /** skip longs (shorts: below −value) when the mean daily funding of the last 7 days exceeds it; 0 = off */
+  maxFundingPerDay: number;
+}
+
+/** One perpetual funding settlement: time (ms) and rate (fraction, per settlement). */
+export interface Funding {
+  t: number;
+  rate: number;
 }
 
 export const SITE_TREND_PARAMS: TrendParams = {
@@ -43,7 +53,21 @@ export const SITE_TREND_PARAMS: TrendParams = {
   feeTaker: 0.00055,
   slippage: 0.0002,
   fundingPerDay: 0.0003,
+  maxFundingPerDay: 0.0005,
 };
+
+/** Mean funding per day over the 7 days before `day` (settlements in [day − 7 d, day)); NaN with < 4 days of data. */
+export function fundingPerDay7(f: readonly Funding[], day: number): number {
+  let sum = 0;
+  let n = 0;
+  const days = new Set<number>();
+  for (const x of f) if (x.t >= day - 7 * DAY && x.t < day) {
+    sum += x.rate;
+    n++;
+    days.add(Math.floor(x.t / DAY));
+  }
+  return n && days.size >= 4 ? sum / 7 : NaN;
+}
 
 const DAY = 86_400_000;
 const NO_FEAT: Feat = { dist: NaN, volDecay: NaN, volSlope: 0, contraction: NaN, impulse: NaN, candleRangeAtr: NaN, approachVelocity: 0, pullbackDepth: NaN, barsToLevel: NaN };
@@ -73,21 +97,32 @@ export class TrendEngine {
   private open: Open | null = null;
   /** closed daily candles of the market factor (BTC); only candles before the current day are used */
   private market: Candle[] = [];
+  /** funding settlements of this coin (empty = the funding filter is off) */
+  private funding: Funding[] = [];
+  /** why no order was placed today (shown in the entries panel) */
+  skipped = '';
 
   constructor(
     readonly meta: { symbol: string; exchange: string; tick: number },
     dailyBefore: readonly Candle[],
     readonly p: TrendParams = SITE_TREND_PARAMS,
     market: readonly Candle[] = [],
+    funding: readonly Funding[] = [],
   ) {
     this.daily = [...dailyBefore];
     this.market = [...market];
+    this.funding = [...funding];
     this.recompute();
   }
 
   /** Live: replace the market-factor daily candles (BTC) when a new day has closed. */
   setMarket(d: readonly Candle[]): void {
     this.market = [...d];
+  }
+
+  /** Live: replace the coin's funding history (refreshed a few times a day). */
+  setFunding(f: readonly Funding[]): void {
+    this.funding = [...f];
   }
 
   get atrDaily(): number {
@@ -183,15 +218,27 @@ export class TrendEngine {
     const d = this.daily;
     const day = Math.floor(b.t / DAY) * DAY;
     this.order = null;
+    this.skipped = '';
     if (this.open) return;
     const w = d.slice(-p.nIn);
     const last = d[d.length - 1];
     const mt = p.marketFilter ? this.marketTrend(day) : 0;
     for (const dir of [1, -1] as const) {
       if (dir < 0 && p.longOnly) continue;
-      if (p.marketFilter && mt === -dir) continue;
+      if (p.marketFilter && mt === -dir) {
+        this.skipped = 'тренд BTC против';
+        continue;
+      }
+      if (p.maxFundingPerDay > 0 && this.funding.length) {
+        const f = fundingPerDay7(this.funding, day);
+        if (dir > 0 ? f > p.maxFundingPerDay : f < -p.maxFundingPerDay) {
+          this.skipped = `фандинг ${(f * 100).toFixed(3)} %/день за 7 дней — перегрев ${dir > 0 ? 'лонгов' : 'шортов'}`;
+          continue;
+        }
+      }
       const ch = dir > 0 ? Math.max(...w.map((x) => x.h)) : Math.min(...w.map((x) => x.l));
       if (dir > 0 ? last.c >= ch : last.c <= ch) continue; // already beyond: no fresh breakout order
+      this.skipped = '';
       this.order = { price: ch, stop: ch - dir * p.stopAtr * this.atr20, expires: day + DAY, dir, createdAt: b.t - 1, channel: ch };
       return;
     }
@@ -224,7 +271,7 @@ export class TrendEngine {
       reactionStrengthAtr: NaN,
       sweep: false,
       microBos: false,
-      trigger: `Тренд (пробой канала Дончиана): пробой ${p.nIn}-дневного ${o.dir > 0 ? 'максимума' : 'минимума'}, стоп ${p.stopAtr} ATR(20), выход по ${p.nOut}-дневному ${o.dir > 0 ? 'минимуму' : 'максимуму'}${p.marketFilter ? ', тренд BTC не против' : ''}`,
+      trigger: `Тренд (пробой канала Дончиана): пробой ${p.nIn}-дневного ${o.dir > 0 ? 'максимума' : 'минимума'}, стоп ${p.stopAtr} ATR(20), выход по ${p.nOut}-дневному ${o.dir > 0 ? 'минимуму' : 'максимуму'}${p.marketFilter ? ', тренд BTC не против' : ''}${p.maxFundingPerDay > 0 && this.funding.length ? `, фандинг за 7 дней ≤ ${(p.maxFundingPerDay * 100).toFixed(2)} %/день` : ''}`,
       entry: px,
       invalidation: sl,
       sl,
