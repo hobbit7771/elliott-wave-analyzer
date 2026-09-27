@@ -37,3 +37,7 @@ Round 2: `r2.py` — volatility squeeze, close/volume confirmation, SMA200 regim
 does funding / open interest predict returns (needs `fund/SYM.json` = [[utc day, daily funding × 1e6]] and
 `oi/SYM.json` = [[utc day, open interest]] from Bybit's public API); `ftr.py`, `ftr2.py` — the funding filter on the
 trend model and the trades it removes; `site_funding.ts` — the 15m site engine with and without it (`DATA=all`).
+Round 3 (machine learning): `mlds.py` builds the daily feature panel (`panel.pkl`); `mlwf.py H` — walk-forward (monthly
+retrain, purge gap H) of Ridge / logistic / LightGBM / ExtraTrees and a rank ensemble, cross-sectional IC; `mltrade.py H` —
+portfolios from the predictions with costs and funding; `meta.py` — meta-labeling of the trend model's trades;
+`pyr.py` — Turtle pyramiding. Needs `pip install scikit-learn lightgbm`.
