@@ -16,3 +16,7 @@ DATA=/path/to/data CFG='{"stopAtr":0.5,"models":"BK"}' node /tmp/eval.mjs   # on
 
 Every run is bar by bar on closed 15m bars (orders fill only on later bars, stop first when a bar touches
 both, Bybit fees in R). Segments: TRAIN = first 50 % of the year, VALIDATION = next 25 %, OOS = last 25 %.
+
+Raschke (Street Smarts) setups: `rasch.ts` (each setup with the book rules; `CFG` overrides, `SETUPS` selects),
+`rgrid.ts` (full grid of exits / filters for one setup; `SETUP`, `SPACE`, `OUT`), `analyze_raschke.py`
+(TRAIN vs VALIDATION per setup), `combo.ts` (Gerchik + Holy Grail side by side), `site.ts` (the site engine).

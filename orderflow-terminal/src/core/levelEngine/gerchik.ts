@@ -18,6 +18,7 @@
 import type { Candle } from '../types.js';
 import { analyzeDailyLevels, DEFAULT_DAILY_LEVEL_PARAMS, type DailyLevel, type DailyLevelParams } from './dailyLevels.js';
 import type { Feat, LevelState, Setup, SetupOutcome } from './setupEngine.js';
+import { adx } from './raschke.js';
 
 export interface GerchikParams {
   model: 'gerchik';
@@ -34,6 +35,7 @@ export interface GerchikParams {
   cancelStops: number; // cancel a pending order when price runs this many S away from it
   trend: 'none' | 'd1' | 'strict';
   trendSma: number; // D1 SMA length for the trend
+  adxMin: number; // Raschke: trade only when D1 ADX(14) ≥ this and the trade direction's DI is on top (0: off)
   atrExhaust: number; // skip when today's move in the trade direction ≥ this × ATR (Infinity: off)
   fbMaxDepth: number; // false breakout: max pierce beyond the level, in S
   fbReturnBars: number; // bars allowed to close back inside
@@ -70,6 +72,7 @@ export const DEFAULT_GERCHIK_PARAMS: GerchikParams = {
   cancelStops: 2,
   trend: 'd1',
   trendSma: 20,
+  adxMin: 0,
   atrExhaust: 0.75,
   fbMaxDepth: 1,
   fbReturnBars: 2,
@@ -109,6 +112,7 @@ export const SITE_GERCHIK_PARAMS: GerchikParams = {
   atrExhaust: Infinity,
   roomCheck: true,
   bpuWindow: 48,
+  adxMin: 20, // Raschke's trend-strength condition, chosen on TRAIN (first 6 months) over 0 / 20 / 25 / 30
 };
 export const SITE_GERCHIK_CHOICE =
   'Фиксированные параметры по правилам Герчика (уровни D1 силой ≥ 70, только по тренду D1, отбой БСУ/БПУ и пробой с поджатием, стоп 0,5 ATR(D1), цель 3:1), выбраны один раз на 14 монетах Bybit; под монету не подгоняются. Комиссии Bybit включены в R.';
@@ -275,9 +279,24 @@ export class GerchikEngine {
   }
 
   private trendAllows(dir: 1 | -1): boolean {
+    if (this.p.adxMin > 0) {
+      const a = this.dAdx();
+      if (!(a.adx >= this.p.adxMin && (dir > 0 ? a.pdi > a.mdi : a.mdi > a.pdi))) return false;
+    }
     if (this.p.trend === 'none') return true;
     const t = this.trend();
     return this.p.trend === 'strict' ? t === dir : t !== -dir;
+  }
+
+  /** D1 ADX(14) / DI of the closed daily candles, memoised per daily candle count. */
+  private adxMemo = { n: -1, adx: NaN, pdi: NaN, mdi: NaN };
+  private dAdx(): { adx: number; pdi: number; mdi: number } {
+    if (this.adxMemo.n !== this.daily.length) {
+      const r = adx(this.daily.slice(-120), 14);
+      const k = r.adx.length - 1;
+      this.adxMemo = { n: this.daily.length, adx: r.adx[k], pdi: r.pdi[k], mdi: r.mdi[k] };
+    }
+    return this.adxMemo;
   }
 
   /** "ATR exhausted": today already moved ≥ atrExhaust × ATR in the trade direction. */

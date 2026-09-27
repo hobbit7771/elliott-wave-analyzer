@@ -4,7 +4,8 @@
 import type { Candle } from '../types.js';
 import { DEFAULT_SETUP_PARAMS, LevelSetupEngine, type Setup, type SetupParams } from './setupEngine.js';
 import { median } from '../volumeStats.js';
-import { GerchikEngine, type GerchikParams } from './gerchik.js';
+import type { GerchikParams } from './gerchik.js';
+import { SiteEngine, type SiteParams } from './siteEngine.js';
 
 export interface Stats {
   total: number;
@@ -72,7 +73,7 @@ export function runHistory(meta: { symbol: string; exchange: string; tick: numbe
 }
 
 export interface WalkForwardResult {
-  params: SetupParams | GerchikParams;
+  params: SetupParams | GerchikParams | SiteParams;
   chosenBy: string;
   grid: { params: Partial<SetupParams>; train: Stats }[];
   segments: { name: 'TRAIN' | 'VALIDATION' | 'OOS'; from: number; to: number; stats: Stats }[];
@@ -122,15 +123,15 @@ export function walkForward(meta: { symbol: string; exchange: string; tick: numb
 }
 
 /**
- * Gerchik engine with FIXED parameters over the whole history (no per-coin tuning): the result is split into
+ * The site engine (Gerchik levels + Raschke Holy Grail) with FIXED parameters over the whole history (no per-coin tuning): the result is split into
  * TRAIN / VALIDATION / OUT-OF-SAMPLE by time only to show how stable it is across periods.
  */
-export function runGerchik(meta: { symbol: string; exchange: string; tick: number }, dailyBefore: readonly Candle[], bars: readonly Candle[], p: GerchikParams, chosenBy: string): WalkForwardResult {
+export function runSite(meta: { symbol: string; exchange: string; tick: number }, dailyBefore: readonly Candle[], bars: readonly Candle[], p: SiteParams, chosenBy: string): WalkForwardResult {
   const t0 = bars[0]?.t ?? 0;
   const tN = bars[bars.length - 1]?.t ?? 0;
   const trainEnd = t0 + (tN - t0) * 0.5;
   const valEnd = t0 + (tN - t0) * 0.75;
-  const eng = new GerchikEngine(meta, dailyBefore, p);
+  const eng = new SiteEngine(meta, dailyBefore, p);
   for (const b of bars) eng.step(b);
   const setups = eng.setups;
   for (const s of setups) s.segment = s.t < trainEnd ? 'TRAIN' : s.t < valEnd ? 'VALIDATION' : 'OOS';

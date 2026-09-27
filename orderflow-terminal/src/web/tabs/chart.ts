@@ -742,8 +742,12 @@ export function createChartTab(): Tab {
       ['Exchange', s.exchange],
       ['Time (UTC)', fmtDateTime(s.t)],
       ['Direction', s.direction],
-      ['D1 level', fmtP(s.level, dec())],
-      ['Level strength', `${s.levelStrength}/100 (${s.levelStatus})`],
+      ...((s.reasons[0] === 'RASCHKE'
+        ? [['Опорная цена', `${fmtP(s.level, dec())} (${s.reasons[1] === 'HOLY_GRAIL' ? 'EMA20 D1' : 'уровень сетапа'})`]]
+        : [
+            ['D1 level', fmtP(s.level, dec())],
+            ['Level strength', `${s.levelStrength}/100 (${s.levelStatus})`],
+          ]) as [string, string][]),
       ['Setup quality', `${s.setupQuality}/100`],
       ['Distance to level', `${f2(s.distanceToLevelAtr)} ATR`],
       ...(Number.isFinite(s.volumeDecay)
@@ -770,9 +774,9 @@ export function createChartTab(): Tab {
       ['Result', s.outcome.status === 'open' ? `открыт, ${f2(s.outcome.r)}R` : `${s.outcome.status}, ${f2(s.outcome.r)}R после комиссий (MFE ${f2(s.outcome.mfeR)}R, MAE ${f2(s.outcome.maeR)}R)`],
     ];
     openDetail(
-      `<b style="color:${s.direction === 'LONG' ? '#26a69a' : '#ef5350'}">✅ ${s.direction}</b> <span class="muted">качество ${s.setupQuality} · уровень ${s.levelStrength}</span>` +
+      `<b style="color:${s.direction === 'LONG' ? '#26a69a' : '#ef5350'}">✅ ${s.direction}</b> <span class="muted">${s.reasons[0] === 'RASCHKE' ? esc(s.trigger.split(':')[0]) : `качество ${s.setupQuality} · уровень ${s.levelStrength}`}</span>` +
         `<table><tbody>${rows.map(([k, v]) => `<tr><td class="l">${esc(k)}</td><td class="l">${esc(v)}</td></tr>`).join('')}</tbody></table>` +
-        `<p class="muted">Уровень D1: ${esc(s.levelWhy)}</p><p class="muted">Историческая разметка: сигнал построен движком свеча за свечой только по данным до его времени; результат — то, что произошло дальше. Не торговая рекомендация.</p>`,
+        `<p class="muted">${s.reasons[0] === 'RASCHKE' ? '' : 'Уровень D1: '}${esc(s.levelWhy)}</p><p class="muted">Историческая разметка: сигнал построен движком свеча за свечой только по данным до его времени; результат — то, что произошло дальше. Не торговая рекомендация.</p>`,
     );
     if (candleS) {
       detailLines = [

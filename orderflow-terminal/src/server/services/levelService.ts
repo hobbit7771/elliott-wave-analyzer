@@ -3,14 +3,14 @@
 // Data: closed exchange klines (1d and 15m) are fetched from REST once and cached in Supabase (oft.klines),
 // afterwards only the tail is fetched — so a restart or a REST ban does not lose the history.
 // History: the walk-forward backtest runs in a worker thread (analysisWorker.ts).
-// Live: a GerchikEngine per instrument is warmed up on the last days of CLOSED 15m bars and then fed
+// Live: a SiteEngine (Gerchik levels + Raschke Holy Grail) per instrument is warmed up on the last days of CLOSED 15m bars and then fed
 // every newly CLOSED 15m bar — the same engine class the backtest uses.
 import { Worker } from 'node:worker_threads';
 import type { Candle, SourceId } from '../../core/types.js';
 import type { MarketAdapter } from '../adapters/adapter.js';
 import type { Repo } from '../persist/repo.js';
 import type { Setup } from '../../core/levelEngine/setupEngine.js';
-import { GerchikEngine, SITE_GERCHIK_PARAMS, type GerchikParams } from '../../core/levelEngine/gerchik.js';
+import { SiteEngine, SITE_PARAMS, type SiteParams } from '../../core/levelEngine/siteEngine.js';
 import type { DailyLevel } from '../../core/levelEngine/dailyLevels.js';
 
 const M15 = 15 * 60_000;
@@ -21,7 +21,7 @@ export interface HistoryResult {
   computedAt: number;
   ms: number;
   coverage: { from: number; to: number; bars: number; days: number };
-  params: GerchikParams | Record<string, unknown>;
+  params: SiteParams | Record<string, unknown>;
   chosenBy: string;
   grid: unknown[];
   segments: unknown[];
@@ -29,6 +29,7 @@ export interface HistoryResult {
   byDirection: unknown;
   byScore: unknown;
   byRegime: unknown;
+  byModel?: unknown;
   setups: Setup[];
 }
 
@@ -37,8 +38,8 @@ interface Ctx {
   symbol: string;
   key: string;
   tick: number;
-  engine: GerchikEngine | null;
-  params: GerchikParams;
+  engine: SiteEngine | null;
+  params: SiteParams;
   lastBarT: number;
   history: HistoryResult | null;
   status: string;
@@ -76,12 +77,12 @@ export class LevelService {
   async ensure(source: SourceId, symbol: string): Promise<void> {
     const key = `${source}:${symbol}`;
     if (this.ctx.has(key)) return;
-    const c: Ctx = { source, symbol, key, tick: 0, engine: null, params: SITE_GERCHIK_PARAMS, lastBarT: 0, history: null, status: 'loading', error: '', live: [], price: NaN, running: false };
+    const c: Ctx = { source, symbol, key, tick: 0, engine: null, params: SITE_PARAMS, lastBarT: 0, history: null, status: 'loading', error: '', live: [], price: NaN, running: false };
     this.ctx.set(key, c);
     const repo = this.deps.repo();
     const stored = repo ? await repo.getSetting<HistoryResult>('levelsetups:' + key).catch(() => undefined) : undefined;
     // results of an older engine (or older site parameters) are shown until the recomputation replaces them
-    const current = stored && JSON.stringify(stored.params) === JSON.stringify(SITE_GERCHIK_PARAMS);
+    const current = stored && JSON.stringify(stored.params) === JSON.stringify(SITE_PARAMS);
     if (stored) c.history = stored;
     try {
       c.tick = await this.deps.tickOf(source, symbol);
@@ -146,7 +147,7 @@ export class LevelService {
     const warm = await this.loadKlines(c, '15m', now - 7 * DAY);
     if (daily.length < 60 || !warm.length) throw new Error(`not enough history (D1 ${daily.length}, 15m ${warm.length})`);
     const dailyBefore = daily.filter((d) => d.t + DAY <= warm[0].t);
-    const eng = new GerchikEngine({ symbol: c.symbol, exchange: c.source, tick: c.tick }, dailyBefore, c.params);
+    const eng = new SiteEngine({ symbol: c.symbol, exchange: c.source, tick: c.tick }, dailyBefore, c.params);
     for (const b of warm) eng.step(b);
     c.engine = eng;
     c.lastBarT = warm[warm.length - 1].t;

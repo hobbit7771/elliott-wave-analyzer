@@ -1,9 +1,9 @@
 // Worker thread for the historical level/setup analysis (backtest). It runs the same
-// GerchikEngine used live, off the main thread so the live feed and the WebSocket clients never wait.
+// SiteEngine used live, off the main thread so the live feed and the WebSocket clients never wait.
 import { parentPort } from 'node:worker_threads';
 import type { Candle } from '../core/types.js';
-import { runGerchik, stats, groupStats, scoreBucket } from '../core/levelEngine/backtest.js';
-import { SITE_GERCHIK_PARAMS, SITE_GERCHIK_CHOICE } from '../core/levelEngine/gerchik.js';
+import { runSite, stats, groupStats, scoreBucket } from '../core/levelEngine/backtest.js';
+import { SITE_PARAMS, SITE_CHOICE } from '../core/levelEngine/siteEngine.js';
 
 export interface AnalysisRequest {
   id: number;
@@ -17,7 +17,7 @@ parentPort!.on('message', (req: AnalysisRequest) => {
   try {
     const first = req.bars[0]?.t ?? 0;
     const dailyBefore = req.daily.filter((d) => d.t + 86_400_000 <= first);
-    const wf = runGerchik(req.meta, dailyBefore, req.bars, SITE_GERCHIK_PARAMS, SITE_GERCHIK_CHOICE);
+    const wf = runSite(req.meta, dailyBefore, req.bars, SITE_PARAMS, SITE_CHOICE);
     const setups = wf.setups;
     parentPort!.postMessage({
       id: req.id,
@@ -33,6 +33,7 @@ parentPort!.on('message', (req: AnalysisRequest) => {
         segments: wf.segments,
         overall: stats(setups),
         byDirection: groupStats(setups, (s) => s.direction),
+        byModel: groupStats(setups, (s) => s.reasons[1] ?? '?'),
         byScore: groupStats(setups, scoreBucket),
         byRegime: groupStats(setups, (s) => s.regime),
         setups,

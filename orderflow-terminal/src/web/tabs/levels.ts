@@ -43,6 +43,17 @@ const pc = (x: number) => (Number.isFinite(x) ? (x * 100).toFixed(0) + '%' : '�
 function statsRow(name: string, s: St): string {
   return `<tr><td class="l">${esc(name)}</td><td>${s.total}</td><td>${s.long}/${s.short}</td><td>${s.closed}</td><td>${pc(s.winRate)}</td><td>${n2(s.avgR)}</td><td>${n2(s.medianR)}</td><td>${s.profitFactor === null ? '∞' : n2(s.profitFactor)}</td><td>${s.maxLosingStreak}</td><td>${n2(s.avgMfeR)}</td><td>${n2(s.avgMaeR)}</td></tr>`;
 }
+const MODEL_NAME: Record<string, string> = {
+  BOUNCE: 'Отбой от уровня (Герчик, БСУ/БПУ)',
+  BREAKOUT: 'Пробой с поджатием (Герчик)',
+  FALSE_BREAK: 'Ложный пробой (Герчик)',
+  HOLY_GRAIL: 'Holy Grail (Рашке)',
+  TURTLE_SOUP: 'Turtle Soup (Рашке)',
+  TURTLE_SOUP_PLUS_ONE: 'Turtle Soup +1 (Рашке)',
+  EIGHTY_TWENTY: '80-20 (Рашке)',
+  MOMENTUM_PINBALL: 'Momentum Pinball (Рашке)',
+  ID_NR4: 'ID/NR4 (Рашке)',
+};
 const STATS_HEAD = '<tr><th class="l">Выборка</th><th>Сетапов</th><th>L/S</th><th>Закрыто</th><th>Win</th><th>Avg R</th><th>Median R</th><th>PF</th><th>Макс. серия −</th><th>MFE R</th><th>MAE R</th></tr>';
 
 export function createLevelsTab(): Tab {
@@ -88,7 +99,7 @@ export function createLevelsTab(): Tab {
       '</tbody></table>';
     let bt = '';
     const h = hist?.history as
-      | { coverage: { from: number; to: number; bars: number; days: number }; chosenBy: string; params: Record<string, unknown>; segments: { name: string; stats: St }[]; overall: St; byDirection: Record<string, St>; byScore: Record<string, St>; byRegime: Record<string, St>; setups: { t: number; direction: string; level: number; levelStrength: number; setupQuality: number; outcome: { status: string; r: number }; segment?: string }[]; computedAt: number; ms: number }
+      | { coverage: { from: number; to: number; bars: number; days: number }; chosenBy: string; params: Record<string, unknown>; segments: { name: string; stats: St }[]; overall: St; byDirection: Record<string, St>; byModel?: Record<string, St>; byScore: Record<string, St>; byRegime: Record<string, St>; setups: { t: number; direction: string; level: number; levelStrength: number; setupQuality: number; outcome: { status: string; r: number }; segment?: string }[]; computedAt: number; ms: number }
       | null
       | undefined;
     if (h) {
@@ -97,6 +108,7 @@ export function createLevelsTab(): Tab {
         `<h3>Бэктест сетапов ${esc(store.symbol)} (свеча за свечой, без заглядывания в будущее)</h3>` +
         `<p class="muted">История 15m: ${fmtDateTime(h.coverage.from)} — ${fmtDateTime(h.coverage.to)} (${h.coverage.bars} баров), до неё ${h.coverage.days} дневных свечей для уровней. ${esc(h.chosenBy)} Пересчитано ${fmtDateTime(h.computedAt)} за ${(h.ms / 1000).toFixed(1)} с. Результаты показаны как есть; TRAIN / VALIDATION / OOS — первые 6, следующие 3 и последние 3 месяца, чтобы было видно, насколько результат стабилен во времени.</p>` +
         `<table><thead>${STATS_HEAD}</thead><tbody>${h.segments.map((s) => statsRow(s.name, s.stats)).join('')}${statsRow('ВСЕГО', h.overall)}</tbody></table>` +
+        (h.byModel ? `<h4>По модели</h4><table><thead>${STATS_HEAD}</thead><tbody>${Object.entries(h.byModel).map(([k, v]) => statsRow(MODEL_NAME[k] ?? k, v)).join('')}</tbody></table>` : '') +
         `<h4>По направлению</h4><table><thead>${STATS_HEAD}</thead><tbody>${Object.entries(h.byDirection).map(([k, v]) => statsRow(k, v)).join('')}</tbody></table>` +
         `<h4>По SetupQuality</h4><table><thead>${STATS_HEAD}</thead><tbody>${Object.entries(h.byScore).map(([k, v]) => statsRow(k, v)).join('')}</tbody></table>` +
         `<h4>По режиму рынка (D1)</h4><table><thead>${STATS_HEAD}</thead><tbody>${Object.entries(h.byRegime).map(([k, v]) => statsRow(k, v)).join('')}</tbody></table>` +
