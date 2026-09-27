@@ -57,6 +57,9 @@ def simulate(df, signals, sym, max_hold, trail=None):
                     hh=h[j:k+1].max() if d>0 else l[j:k+1].min()
                     ts=hh-d*trail[1]*A[k]
                     stop=max(stop,ts) if d>0 else min(stop,ts)
+                elif trail[0]=='mid':
+                    w=trail[1]; ts=(h[max(0,k-w+1):k+1].max()+l[max(0,k-w+1):k+1].min())/2
+                    stop=max(stop,ts) if d>0 else min(stop,ts)
                 elif trail[0]=='donchian':
                     w=trail[1]; ts=l[max(0,k-w+1):k+1].min() if d>0 else h[max(0,k-w+1):k+1].max()
                     stop=max(stop,ts) if d>0 else min(stop,ts)

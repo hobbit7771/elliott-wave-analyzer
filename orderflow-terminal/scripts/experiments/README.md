@@ -29,3 +29,7 @@ metrics, stationary block bootstrap and the deflated Sharpe ratio; `run_fixed.py
 without tuning; `wf.py` + `wf_eval.py` — 112 Donchian variants and a rolling walk-forward (train 2 years, trade
 the next 6 months). `trend15.ts` checks the 15m TrendEngine against the daily simulator on the same year;
 `gd.ts` runs the Gerchik engine on daily bars (5 years); `site.ts` — the site engine on the 15m year.
+Research ideas (27.09.2026): `ens.py` — multi-lookback Donchian ensemble with a 25 % volatility target
+(Zarattini, Pagani, Barbon 2025); `xs.py` — cross-sectional momentum (Liu, Tsyvinski, Wu); `vt.py`, `vt3.py`, `vt4.py` —
+midline exits, portfolio volatility management (Moreira, Muir 2017) with a paired block bootstrap, and a multiplier
+fixed at entry. `dbt.py` gained the `('mid', n)` trailing exit.
