@@ -9,7 +9,7 @@ import { Worker } from 'node:worker_threads';
 import type { Candle, SourceId } from '../../core/types.js';
 import type { MarketAdapter } from '../adapters/adapter.js';
 import type { Repo } from '../persist/repo.js';
-import type { Setup } from '../../core/levelEngine/setupEngine.js';
+import type { Setup, WorkingOrder } from '../../core/levelEngine/setupEngine.js';
 import { SiteEngine, SITE_PARAMS, type SiteParams } from '../../core/levelEngine/siteEngine.js';
 import type { DailyLevel } from '../../core/levelEngine/dailyLevels.js';
 
@@ -265,7 +265,15 @@ export class LevelService {
 
   // ---------------- views ----------------
 
-  levels(key: string): { levels: (DailyLevel & { state: string; confirmedRecently: boolean })[]; atrD: number; status: string; error: string; price: number } | null {
+  levels(key: string): {
+    levels: (DailyLevel & { state: string; confirmedRecently: boolean })[];
+    atrD: number;
+    status: string;
+    error: string;
+    price: number;
+    orders: WorkingOrder[];
+    positions: { id: string; model: string; direction: string; t: number; entry: number; stop: number; r: number }[];
+  } | null {
     const c = this.ctx.get(key);
     if (!c) return null;
     const eng = c.engine;
@@ -276,6 +284,8 @@ export class LevelService {
       price: c.price,
       atrD: eng?.atrDaily ?? NaN,
       levels: (eng?.levels ?? []).map((l) => ({ ...l, state: eng!.stateOf(l.id), confirmedRecently: recent.some((s) => s.levelId === l.id) })),
+      orders: eng?.workingOrders() ?? [],
+      positions: (eng?.openPositions() ?? []).map((p) => ({ id: p.setup.id, model: p.setup.reasons[1] ?? '', direction: p.setup.direction, t: p.setup.t, entry: p.setup.entry, stop: p.stop, r: p.setup.outcome.r })),
     };
   }
 

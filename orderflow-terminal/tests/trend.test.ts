@@ -24,12 +24,16 @@ describe('trend model (Donchian breakout)', () => {
     const t = T0 + 60 * DAY;
     const bars = day(t, 100, { 10: [100, 100.9, 99.9, 100.8], 11: [100.8, 102, 100.7, 101.8] });
     const fills: number[] = [];
-    bars.forEach((b, k) => eng.step(b).length && fills.push(k));
+    eng.step(bars[0]);
+    // at the start of the day the engine holds a buy stop at the 20-day high
+    expect(eng.workingOrders()).toEqual([expect.objectContaining({ model: 'TREND_BREAKOUT', dir: 1, kind: 'stop', price: 101 })]);
+    bars.slice(1).forEach((b, k) => eng.step(b).length && fills.push(k + 1));
     expect(fills).toEqual([11]); // 100.9 did not reach the channel high 101
     const s = eng.setups[0];
     expect(s.direction).toBe('LONG');
     expect(s.entry).toBeCloseTo(101, 6);
     expect(s.sl).toBeCloseTo(101 - 3 * 2, 1); // ATR(20) of the flat days = 2
+    expect(eng.openPositions()).toEqual([expect.objectContaining({ stop: s.sl })]);
     // the entry day closes; the stop trails to the lowest low of the last 10 closed days (99)
     for (const b of day(t + DAY, 101.5, { 30: [101.5, 101.6, 98.9, 99.2] })) eng.step(b);
     expect(s.outcome.status).toBe('loss');

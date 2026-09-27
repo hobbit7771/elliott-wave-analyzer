@@ -4,7 +4,7 @@
 //  2) LEVELS — Gerchik's entries at strong D1 levels with Raschke's trend-strength condition (ADX ≥ 20).
 import type { Candle } from '../types.js';
 import type { DailyLevel } from './dailyLevels.js';
-import type { LevelState, Setup } from './setupEngine.js';
+import type { LevelState, OpenPosition, Setup, WorkingOrder } from './setupEngine.js';
 import { GerchikEngine, SITE_GERCHIK_PARAMS, type GerchikParams } from './gerchik.js';
 import { SITE_TREND_PARAMS, TrendEngine, type TrendParams } from './trend.js';
 
@@ -43,6 +43,12 @@ export class SiteEngine {
   }
   stateOf(levelId: string): LevelState {
     return this.g.stateOf(levelId);
+  }
+  workingOrders(): WorkingOrder[] {
+    return [...this.tr.workingOrders(), ...this.g.workingOrders()];
+  }
+  openPositions(): OpenPosition[] {
+    return [...this.tr.openPositions(), ...this.g.openPositions()];
   }
   step(b: Candle): Setup[] {
     return [...this.g.step(b), ...this.tr.step(b)];

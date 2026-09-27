@@ -216,7 +216,8 @@ export function createChartTab(): Tab {
   };
   const barState = el('span', { class: 'badge' });
   const originNote = el('span', { class: 'muted' });
-  root.append(el('div', { class: 'toolbar' }, layersBtn, el('label', {}, 'Мин. score', confInput), levelsSel, toolSel, clearDraw, fitBtn, liveBtn, barState, originNote));
+  const signalsBtn = el('button', { text: 'Входы', title: 'Входы движка: последние сигналы, ожидающие ордера и открытые позиции' });
+  root.append(el('div', { class: 'toolbar' }, signalsBtn, layersBtn, el('label', {}, 'Мин. score', confInput), levelsSel, toolSel, clearDraw, fitBtn, liveBtn, barState, originNote));
   const fill = el('div', { class: 'fill' });
   const host = el('div', { class: 'chart-host' });
   const legend = el('div', { class: 'legend' });
@@ -646,6 +647,15 @@ export function createChartTab(): Tab {
             title: `D1 ${l.strength}`,
           }),
         );
+    // what the engine is doing right now: working orders (⏳) and open positions (●)
+    if (layers.setups) {
+      for (const o of engOrders)
+        priceLines.push(candleS.createPriceLine({ price: o.price, color: o.dir > 0 ? '#00e676' : '#ff5252', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: `⏳ ${o.dir > 0 ? 'BUY' : 'SELL'} ${o.kind === 'limit' ? 'LMT' : 'STOP'} · ${MODEL_SHORT[o.model] ?? o.model}` }));
+      for (const p of engPositions) {
+        priceLines.push(candleS.createPriceLine({ price: p.entry, color: p.direction === 'LONG' ? '#00e676' : '#ff5252', lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: `● ${p.direction} · ${MODEL_SHORT[p.model] ?? p.model}` }));
+        priceLines.push(candleS.createPriceLine({ price: p.stop, color: '#ef5350', lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: 'SL' }));
+      }
+    }
     // important levels also get a compact tag on the price axis
     for (const l of lv) if (l.important) priceLines.push(candleS.createPriceLine({ price: l.price, color: LEVEL_COLORS.important, lineVisible: false, axisLabelVisible: true, title: '' }));
     if (layers.levels) {
@@ -684,6 +694,11 @@ export function createChartTab(): Tab {
 
   type StrongLevel = { id: string; price: number; strength: number; status: string; state: string; role: string; confirmedRecently: boolean; breakdown: Record<string, number>; why: string; rejections: number; cleanReactions: number; sweepReclaims: number; volumeRel: number; avgReactionAtr: number; chopScore: number };
   let strongLv: StrongLevel[] = [];
+  type EngineOrder = { model: string; dir: 1 | -1; kind: 'limit' | 'stop'; price: number; sl: number; why: string };
+  type EnginePos = { id: string; model: string; direction: string; t: number; entry: number; stop: number; r: number };
+  let engOrders: EngineOrder[] = [];
+  let engPositions: EnginePos[] = [];
+  const MODEL_SHORT: Record<string, string> = { TREND_BREAKOUT: 'тренд', BOUNCE: 'отбой', BREAKOUT: 'пробой', FALSE_BREAK: 'ложный пробой', HOLY_GRAIL: 'Holy Grail' };
   let strongKey = '';
   const levelColor = (l: StrongLevel) =>
     l.status === 'BROKEN' ? '#ff9800' : l.status === 'CHOPPED' ? '#8d8d8d' : l.status === 'FLIPPED' ? '#ffb300' : l.confirmedRecently ? '#00e676' : '#2962ff';
@@ -691,17 +706,21 @@ export function createChartTab(): Tab {
     const key = store.key;
     try {
       const [lv, st] = await Promise.all([
-        api<{ levels: StrongLevel[] } | null>('/api/levels/strong', { source: store.source, symbol: store.symbol }),
+        api<{ levels: StrongLevel[]; orders?: EngineOrder[]; positions?: EnginePos[] } | null>('/api/levels/strong', { source: store.source, symbol: store.symbol }),
         api<{ history: { setups: Setup[] } | null; live: Setup[] } | null>('/api/setups', { source: store.source, symbol: store.symbol }),
       ]);
       if (key !== store.key) return;
       strongLv = lv?.levels ?? [];
+      engOrders = lv?.orders ?? [];
+      engPositions = lv?.positions ?? [];
       strongKey = key;
       store.staticLevels = strongLv.map((l) => ({ price: l.price, strength: l.strength, status: l.status }));
       const all = [...(st?.history?.setups ?? []), ...(st?.live ?? [])];
       store.setups = [...new Map(all.map((s) => [s.id, s])).values()].sort((a, b) => a.t - b.t);
       store.emit('setups');
       refreshOverlays();
+      if (signalsPanel.style.display !== 'none') renderSignals();
+      tryFocus();
     } catch {
       /* levels not available yet (history loading / exchange REST unavailable) */
     }
@@ -712,6 +731,70 @@ export function createChartTab(): Tab {
   // detail panel for a level or a setup (opened by tapping the line / the ✅ marker)
   const detail = el('div', { class: 'detail-panel', style: 'display:none' });
   fill.append(detail);
+
+  // signals panel: the engine's last signals (any age), its working orders and open positions. Signals are
+  // rare by design (≈ 1–2 a month per coin), so most of them are older than the candles loaded on a short
+  // time frame; tapping one switches to a time frame that covers it and opens its card.
+  const signalsPanel = el('div', { class: 'detail-panel signals-panel', style: 'display:none' });
+  fill.append(signalsPanel);
+  signalsBtn.onclick = () => {
+    const open = signalsPanel.style.display === 'none';
+    signalsPanel.style.display = open ? '' : 'none';
+    signalsBtn.classList.toggle('on', open);
+    if (open) renderSignals();
+  };
+  function renderSignals(): void {
+    const list = [...store.setups].sort((a, b) => b.t - a.t);
+    const year = list.filter((x) => x.t > store.now() - 365 * 86_400_000).length;
+    const fmtR = (x: Setup) => (x.outcome.status === 'open' ? `открыт ${f2(x.outcome.r)}R` : `${x.outcome.r >= 0 ? '+' : ''}${f2(x.outcome.r)}R`);
+    const now =
+      engOrders.map((o) => `<tr><td class="l">⏳ ${o.dir > 0 ? 'BUY' : 'SELL'} ${o.kind === 'limit' ? 'лимит' : 'стоп'} ${esc(fmtP(o.price, dec()))}</td><td class="l">${esc(MODEL_SHORT[o.model] ?? o.model)}</td><td class="l muted">SL ${esc(fmtP(o.sl, dec()))}</td></tr>`).join('') +
+      engPositions.map((p) => `<tr><td class="l">● ${p.direction} от ${esc(fmtP(p.entry, dec()))}</td><td class="l">${esc(MODEL_SHORT[p.model] ?? p.model)}</td><td class="l muted">SL ${esc(fmtP(p.stop, dec()))} · ${f2(p.r)}R</td></tr>`).join('');
+    signalsPanel.innerHTML =
+      `<button class="close" aria-label="Закрыть">×</button><b>Входы движка ${esc(store.symbol)}</b> <span class="muted">${year} за год — модели строгие, ≈ ${(year / 12).toFixed(1)} в месяц</span>` +
+      `<p class="muted" style="margin:6px 0 2px">Сейчас</p><table><tbody>${now || '<tr><td class="l muted">движок ничего не ждёт: цена далеко от сильных уровней и канала</td></tr>'}</tbody></table>` +
+      `<p class="muted" style="margin:6px 0 2px">Последние входы (нажмите — покажу на графике)</p><table><tbody>` +
+      (list.length
+        ? list
+            .slice(0, 20)
+            .map((x) => `<tr data-sid="${esc(x.id)}" style="cursor:pointer"><td class="l">${esc(fmtDateTime(x.t))}</td><td class="l" style="color:${x.direction === 'LONG' ? '#26a69a' : '#ef5350'}">✅ ${x.direction}</td><td class="l">${esc(MODEL_SHORT[x.reasons[1]] ?? x.reasons[1] ?? '')}</td><td>${fmtR(x)}</td></tr>`)
+            .join('')
+        : '<tr><td class="l muted">история ещё считается или для монеты нет сигналов</td></tr>') +
+      '</tbody></table>';
+    signalsPanel.querySelector<HTMLButtonElement>('.close')!.onclick = () => signalsBtn.click();
+    for (const tr of signalsPanel.querySelectorAll<HTMLTableRowElement>('tr[data-sid]'))
+      tr.onclick = () => {
+        const x = store.setups.find((y) => y.id === tr.dataset.sid);
+        if (x) focusSetup(x);
+      };
+  }
+  let pendingFocus = '';
+  function focusSetup(x: Setup): void {
+    signalsPanel.style.display = 'none';
+    signalsBtn.classList.remove('on');
+    if (!isTick() && barTime(x.t) !== null) return void showAt(x);
+    // the smallest time frame whose 1000 loaded bars reach back to the signal
+    const age = store.now() - x.t;
+    const tf = (['15m', '1h', '4h', '1d'] as const).find((f) => 950 * TF_MS[f] > age) ?? '1d';
+    pendingFocus = x.id;
+    (window as unknown as { oftSetTf?: (tf: string) => void }).oftSetTf?.(tf);
+  }
+  function tryFocus(): void {
+    if (!pendingFocus) return;
+    const x = store.setups.find((y) => y.id === pendingFocus);
+    if (!x || barTime(x.t) === null) return;
+    pendingFocus = '';
+    showAt(x);
+  }
+  function showAt(x: Setup): void {
+    const bt = barTime(x.t);
+    if (bt !== null && chart) {
+      const span = 60 * TF_MS[store.tf as Exclude<Timeframe, 'tick'>] / 1000;
+      chart.timeScale().setVisibleRange({ from: (bt - span) as UTCTimestamp, to: (bt + span) as UTCTimestamp });
+      liveBtn.classList.remove('on');
+    }
+    showSetup(x);
+  }
   let detailLines: IPriceLine[] = [];
   function closeDetail(): void {
     detail.style.display = 'none';
@@ -812,14 +895,15 @@ export function createChartTab(): Tab {
       originNote.textContent =
         r.origin === 'recorded-trades'
           ? `Построено из записанных aggTrade${r.coverage?.from ? ' с ' + fmtDateTime(r.coverage.from) : ''} (покрытие ограничено записью; одно сообщение может объединять несколько исполнений)`
-          : r.origin === 'stored-1m'
-            ? `⚠ ${r.warning ?? 'REST биржи недоступен'} — закрытые 1m-свечи из Supabase`
+          : r.origin !== 'exchange-rest'
+            ? `⚠ ${r.warning ?? 'REST биржи недоступен'}`
             : 'Свечи REST биржи + живые сделки';
-      originNote.className = r.origin === 'stored-1m' ? 'warn' : 'muted';
+      originNote.className = r.origin !== 'exchange-rest' && r.origin !== 'recorded-trades' ? 'warn' : 'muted';
       liveFrom = r.liveFrom ?? 0;
       emptyText = r.origin === 'recorded-trades' ? 'Для инструмента ещё нет записанных сделок — бары появятся по мере поступления живых сделок.' : 'Биржа не вернула данных.';
       setAll();
       chart?.timeScale().scrollToRealTime();
+      tryFocus();
     } catch (e) {
       emptyText = 'Не удалось загрузить историю: ' + (e as Error).message;
       setAll();

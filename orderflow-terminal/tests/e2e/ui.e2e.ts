@@ -88,6 +88,14 @@ for (const [name, viewport, mobile] of [
       await page.waitForFunction(() => /O \d/.test(document.querySelector('#tab-chart .legend')?.textContent ?? ''), null, { timeout: 15_000 });
       await page.screenshot({ path: `${OUT}/${name}-chart.png` });
 
+      // signals panel: engine signals of any age, working orders and open positions
+      await page.click('#tab-chart .toolbar button:has-text("Входы")');
+      await page.waitForSelector('#tab-chart .signals-panel', { state: 'visible', timeout: 5000 });
+      expect(await page.textContent('#tab-chart .signals-panel')).toMatch(/Входы движка TESTUSDT[\s\S]*Сейчас[\s\S]*Последние входы/);
+      await page.screenshot({ path: `${OUT}/${name}-chart-entries.png` });
+      await page.click('#tab-chart .signals-panel .close');
+      expect(await page.isHidden('#tab-chart .signals-panel')).toBe(true);
+
       // coin picker: every instrument, searchable; tapping a row selects it
       await page.click('#symbolInput');
       await page.waitForSelector('.picker-row', { timeout: 5000 });

@@ -15,7 +15,7 @@
 // perpetual funding for longs are charged in R.
 import type { Candle } from '../types.js';
 import type { DailyLevel } from './dailyLevels.js';
-import type { Feat, LevelState, Setup, SetupOutcome } from './setupEngine.js';
+import type { Feat, LevelState, OpenPosition, Setup, SetupOutcome, WorkingOrder } from './setupEngine.js';
 
 export interface TrendParams {
   model: 'trend';
@@ -92,6 +92,16 @@ export class TrendEngine {
 
   get atrDaily(): number {
     return this.atr20;
+  }
+
+  workingOrders(): WorkingOrder[] {
+    const o = this.order;
+    if (!o || this.open) return [];
+    return [{ model: 'TREND_BREAKOUT', dir: o.dir, kind: 'stop', price: o.price, sl: o.stop, why: `пробой ${this.p.nIn}-дневного ${o.dir > 0 ? 'максимума' : 'минимума'} (стоп-ордер на сегодня, UTC)` }];
+  }
+
+  openPositions(): OpenPosition[] {
+    return this.open ? [{ setup: this.open, stop: this.open._sl }] : [];
   }
   activeLevels(): DailyLevel[] {
     return [];

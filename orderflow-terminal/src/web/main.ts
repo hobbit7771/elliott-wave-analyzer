@@ -293,6 +293,11 @@ function selectSymbol(source: SourceId, symbol: string): void {
   location.hash = '#chart';
 };
 
+// the chart switches to a longer time frame to show an older signal
+(window as unknown as { oftSetTf: (tf: string) => void }).oftSetTf = (tf) => {
+  if ((TIMEFRAMES as readonly string[]).includes(tf)) setTf(tf as Timeframe);
+};
+
 function setTf(tf: Timeframe): void {
   store.tf = tf;
   for (const b of tfGroup.querySelectorAll('button')) b.classList.toggle('on', b.getAttribute('data-tf') === tf);

@@ -109,6 +109,21 @@ export interface Setup {
   segment?: 'TRAIN' | 'VALIDATION' | 'OOS';
 }
 
+/** An order an engine is waiting to fill right now (shown on the chart as "⏳"). */
+export interface WorkingOrder {
+  model: string;
+  dir: 1 | -1;
+  kind: 'limit' | 'stop';
+  price: number;
+  sl: number;
+  why: string;
+}
+/** A position an engine holds right now, with its current (possibly trailed) stop. */
+export interface OpenPosition {
+  setup: Setup;
+  stop: number;
+}
+
 interface LevelTrack {
   level: DailyLevel;
   state: LevelState;

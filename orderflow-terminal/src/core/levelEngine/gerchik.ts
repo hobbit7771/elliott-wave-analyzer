@@ -17,7 +17,7 @@
 // both the stop and the target, the stop is assumed first. Exchange fees are charged in R on every trade.
 import type { Candle } from '../types.js';
 import { analyzeDailyLevels, DEFAULT_DAILY_LEVEL_PARAMS, type DailyLevel, type DailyLevelParams } from './dailyLevels.js';
-import type { Feat, LevelState, Setup, SetupOutcome } from './setupEngine.js';
+import type { Feat, LevelState, OpenPosition, Setup, SetupOutcome, WorkingOrder } from './setupEngine.js';
 import { adx } from './raschke.js';
 
 export interface GerchikParams {
@@ -202,6 +202,14 @@ export class GerchikEngine {
 
   get atrDaily(): number {
     return this.atrD;
+  }
+
+  workingOrders(): WorkingOrder[] {
+    return this.pending.map((o) => ({ model: o.model, dir: o.dir, kind: o.kind, price: o.price, sl: o.sl, why: o.trigger }));
+  }
+
+  openPositions(): OpenPosition[] {
+    return this.open.map((s) => ({ setup: s, stop: s._sl }));
   }
 
   step(b: Candle): Setup[] {

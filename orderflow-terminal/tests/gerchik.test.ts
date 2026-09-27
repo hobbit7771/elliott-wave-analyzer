@@ -47,6 +47,8 @@ describe('Gerchik engine', () => {
     // БПУ1: low exactly at the level, close back above it → an order, no trade yet
     expect(eng.step(bar(x + 2 * S, x + 2 * S, x, x + 0.8 * S))).toEqual([]);
     expect(eng.stateOf(lv.id)).toBe('TOUCH');
+    // the chart shows the working order: a buy limit at level + luft
+    expect(eng.workingOrders()).toEqual([expect.objectContaining({ model: 'BOUNCE', dir: 1, kind: 'limit', price: x + L })]);
     // БПУ2: price returns to level + luft → filled
     const filled = eng.step(bar(x + 0.8 * S, x + S, x + 0.1 * L, x + 0.5 * S));
     expect(filled).toHaveLength(1);
@@ -56,6 +58,8 @@ describe('Gerchik engine', () => {
     expect(s.sl).toBeCloseTo(x + L - S, 6);
     expect(s.tp).toBeCloseTo(x + L + 3 * S, 6);
     expect(s.trigger).toMatch(/Отбой/);
+    expect(eng.workingOrders()).toEqual([]);
+    expect(eng.openPositions().map((p) => p.setup.id)).toEqual([s.id]);
     // the target is reached later: a win worth 3R minus Bybit fees
     eng.step(bar(x + 0.5 * S, x + 4 * S, x + 0.5 * S, x + 3.9 * S));
     expect(s.outcome.status).toBe('win');
