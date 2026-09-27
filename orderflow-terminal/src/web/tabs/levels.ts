@@ -48,6 +48,7 @@ const MODEL_NAME: Record<string, string> = {
   BREAKOUT: 'Пробой с поджатием (Герчик)',
   FALSE_BREAK: 'Ложный пробой (Герчик)',
   HOLY_GRAIL: 'Holy Grail (Рашке)',
+  TREND_BREAKOUT: 'Тренд: пробой 20-дневного канала',
   TURTLE_SOUP: 'Turtle Soup (Рашке)',
   TURTLE_SOUP_PLUS_ONE: 'Turtle Soup +1 (Рашке)',
   EIGHTY_TWENTY: '80-20 (Рашке)',

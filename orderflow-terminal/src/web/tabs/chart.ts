@@ -742,8 +742,8 @@ export function createChartTab(): Tab {
       ['Exchange', s.exchange],
       ['Time (UTC)', fmtDateTime(s.t)],
       ['Direction', s.direction],
-      ...((s.reasons[0] === 'RASCHKE'
-        ? [['Опорная цена', `${fmtP(s.level, dec())} (${s.reasons[1] === 'HOLY_GRAIL' ? 'EMA20 D1' : 'уровень сетапа'})`]]
+      ...((s.reasons[0] === 'RASCHKE' || s.reasons[0] === 'TREND'
+        ? [['Опорная цена', `${fmtP(s.level, dec())} (${s.reasons[1] === 'HOLY_GRAIL' ? 'EMA20 D1' : s.reasons[0] === 'TREND' ? 'максимум канала' : 'уровень сетапа'})`]]
         : [
             ['D1 level', fmtP(s.level, dec())],
             ['Level strength', `${s.levelStrength}/100 (${s.levelStatus})`],
@@ -768,21 +768,21 @@ export function createChartTab(): Tab {
       ['Invalidation', fmtP(s.invalidation, dec())],
       ['SL reference', fmtP(s.sl, dec())],
       ['Next strong level', s.nextLevel !== null ? fmtP(s.nextLevel, dec()) : 'нет'],
-      ['Potential RR', f2(s.rr)],
+      ['Potential RR', Number.isFinite(s.rr) ? f2(s.rr) : 'нет фиксированной цели (трейлинг-стоп)'],
       ['Reason codes', s.reasons.join(', ')],
       ['Segment', s.segment ?? 'LIVE'],
       ['Result', s.outcome.status === 'open' ? `открыт, ${f2(s.outcome.r)}R` : `${s.outcome.status}, ${f2(s.outcome.r)}R после комиссий (MFE ${f2(s.outcome.mfeR)}R, MAE ${f2(s.outcome.maeR)}R)`],
     ];
     openDetail(
-      `<b style="color:${s.direction === 'LONG' ? '#26a69a' : '#ef5350'}">✅ ${s.direction}</b> <span class="muted">${s.reasons[0] === 'RASCHKE' ? esc(s.trigger.split(':')[0]) : `качество ${s.setupQuality} · уровень ${s.levelStrength}`}</span>` +
+      `<b style="color:${s.direction === 'LONG' ? '#26a69a' : '#ef5350'}">✅ ${s.direction}</b> <span class="muted">${s.reasons[0] === 'RASCHKE' || s.reasons[0] === 'TREND' ? esc(s.trigger.split(':')[0]) : `качество ${s.setupQuality} · уровень ${s.levelStrength}`}</span>` +
         `<table><tbody>${rows.map(([k, v]) => `<tr><td class="l">${esc(k)}</td><td class="l">${esc(v)}</td></tr>`).join('')}</tbody></table>` +
-        `<p class="muted">${s.reasons[0] === 'RASCHKE' ? '' : 'Уровень D1: '}${esc(s.levelWhy)}</p><p class="muted">Историческая разметка: сигнал построен движком свеча за свечой только по данным до его времени; результат — то, что произошло дальше. Не торговая рекомендация.</p>`,
+        `<p class="muted">${s.reasons[0] === 'RASCHKE' || s.reasons[0] === 'TREND' ? '' : 'Уровень D1: '}${esc(s.levelWhy)}</p><p class="muted">Историческая разметка: сигнал построен движком свеча за свечой только по данным до его времени; результат — то, что произошло дальше. Не торговая рекомендация.</p>`,
     );
     if (candleS) {
       detailLines = [
         candleS.createPriceLine({ price: s.entry, color: '#e0e0e0', lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: 'Entry' }),
         candleS.createPriceLine({ price: s.sl, color: '#ef5350', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: 'SL' }),
-        candleS.createPriceLine({ price: s.tp, color: '#26a69a', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: 'TP' }),
+        ...(Number.isFinite(s.tp) ? [candleS.createPriceLine({ price: s.tp, color: '#26a69a', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: 'TP' })] : []),
       ];
     }
   }

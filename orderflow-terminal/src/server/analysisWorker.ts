@@ -10,6 +10,7 @@ export interface AnalysisRequest {
   meta: { symbol: string; exchange: string; tick: number };
   daily: Candle[];
   bars: Candle[];
+  market?: Candle[]; // BTC daily candles (market factor)
 }
 
 parentPort!.on('message', (req: AnalysisRequest) => {
@@ -17,7 +18,7 @@ parentPort!.on('message', (req: AnalysisRequest) => {
   try {
     const first = req.bars[0]?.t ?? 0;
     const dailyBefore = req.daily.filter((d) => d.t + 86_400_000 <= first);
-    const wf = runSite(req.meta, dailyBefore, req.bars, SITE_PARAMS, SITE_CHOICE);
+    const wf = runSite(req.meta, dailyBefore, req.bars, SITE_PARAMS, SITE_CHOICE, req.market ?? []);
     const setups = wf.setups;
     parentPort!.postMessage({
       id: req.id,

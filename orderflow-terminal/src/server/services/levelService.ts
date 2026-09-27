@@ -3,7 +3,7 @@
 // Data: closed exchange klines (1d and 15m) are fetched from REST once and cached in Supabase (oft.klines),
 // afterwards only the tail is fetched — so a restart or a REST ban does not lose the history.
 // History: the walk-forward backtest runs in a worker thread (analysisWorker.ts).
-// Live: a SiteEngine (Gerchik levels + Raschke Holy Grail) per instrument is warmed up on the last days of CLOSED 15m bars and then fed
+// Live: a SiteEngine (trend breakout + Gerchik levels) per instrument is warmed up on the last days of CLOSED 15m bars and then fed
 // every newly CLOSED 15m bar — the same engine class the backtest uses.
 import { Worker } from 'node:worker_threads';
 import type { Candle, SourceId } from '../../core/types.js';
@@ -57,6 +57,8 @@ export class LevelService {
   private queue: string[] = [];
   private busy = false;
   readonly historyDays = +(process.env.LEVELS_HISTORY_DAYS ?? 365);
+  /** market-factor (BTC) closed daily candles per source, refreshed once a day */
+  private market = new Map<SourceId, { day: number; d: Candle[] }>();
 
   constructor(
     private deps: {
@@ -139,6 +141,17 @@ export class LevelService {
     return [...have.values()].filter((k) => k.t >= from).sort((a, b) => a.t - b.t);
   }
 
+  /** BTC daily candles of the same source (cached in Supabase like every other kline series). */
+  private async loadMarket(source: SourceId): Promise<Candle[]> {
+    const today = Math.floor(Date.now() / DAY) * DAY;
+    const hit = this.market.get(source);
+    if (hit && hit.day === today) return hit.d;
+    const btc: Ctx = { source, symbol: 'BTCUSDT', key: `${source}:BTCUSDT`, tick: 0, engine: null, params: SITE_PARAMS, lastBarT: 0, history: null, status: '', error: '', live: [], price: NaN, running: false };
+    const d = (await this.loadKlines(btc, '1d', Date.now() - 1000 * DAY).catch(() => hit?.d ?? [])).filter((x) => x.t + DAY <= Date.now());
+    if (d.length) this.market.set(source, { day: today, d });
+    return d.length ? d : hit?.d ?? [];
+  }
+
   // ---------------- live ----------------
 
   private async startLive(c: Ctx): Promise<void> {
@@ -147,7 +160,7 @@ export class LevelService {
     const warm = await this.loadKlines(c, '15m', now - 7 * DAY);
     if (daily.length < 60 || !warm.length) throw new Error(`not enough history (D1 ${daily.length}, 15m ${warm.length})`);
     const dailyBefore = daily.filter((d) => d.t + DAY <= warm[0].t);
-    const eng = new SiteEngine({ symbol: c.symbol, exchange: c.source, tick: c.tick }, dailyBefore, c.params);
+    const eng = new SiteEngine({ symbol: c.symbol, exchange: c.source, tick: c.tick }, dailyBefore, c.params, await this.loadMarket(c.source));
     for (const b of warm) eng.step(b);
     c.engine = eng;
     c.lastBarT = warm[warm.length - 1].t;
@@ -173,6 +186,7 @@ export class LevelService {
         continue;
       }
       if (Date.now() < c.lastBarT + 2 * M15) continue; // no new closed bar yet
+      c.engine.setMarket(await this.loadMarket(c.source)); // cached: reloads once per UTC day
       try {
         const rows = await this.deps.adapter(c.source).fetchKlines(c.symbol, '15m', 20);
         const closed = rows.filter((r) => r.t > c.lastBarT && r.t + M15 <= Date.now());
@@ -212,7 +226,7 @@ export class LevelService {
       const bars = await this.loadKlines(c, '15m', now - this.historyDays * DAY);
       const daily = await this.loadKlines(c, '1d', now - (this.historyDays + 400) * DAY);
       if (bars.length < 2000 || daily.length < 120) throw new Error(`not enough history for a backtest (15m ${bars.length}, D1 ${daily.length})`);
-      const r = await this.analyze({ symbol: c.symbol, exchange: c.source, tick: c.tick || 0 }, daily, bars);
+      const r = await this.analyze({ symbol: c.symbol, exchange: c.source, tick: c.tick || 0 }, daily, bars, await this.loadMarket(c.source));
       c.history = r;
       const repo = this.deps.repo();
       if (repo) await repo.setSetting('levelsetups:' + key, r).catch((e) => this.deps.log(`[levels ${key}] result save failed: ${(e as Error).message}`));
@@ -228,7 +242,7 @@ export class LevelService {
     }
   }
 
-  private analyze(meta: { symbol: string; exchange: string; tick: number }, daily: Candle[], bars: Candle[]): Promise<HistoryResult> {
+  private analyze(meta: { symbol: string; exchange: string; tick: number }, daily: Candle[], bars: Candle[], market: Candle[]): Promise<HistoryResult> {
     if (!this.worker) {
       this.worker = new Worker(this.deps.workerPath, { resourceLimits: { maxOldGenerationSizeMb: +(process.env.ANALYSIS_HEAP_MB ?? 160) } });
       this.worker.on('message', (m: { id: number; ok: boolean; result?: HistoryResult; error?: string }) => {
@@ -245,7 +259,7 @@ export class LevelService {
     const id = ++this.reqId;
     return new Promise((resolve, reject) => {
       this.pending.set(id, (m) => (m.ok && m.result ? resolve(m.result) : reject(new Error(m.error ?? 'analysis failed'))));
-      this.worker!.postMessage({ id, meta, daily, bars });
+      this.worker!.postMessage({ id, meta, daily, bars, market });
     });
   }
 

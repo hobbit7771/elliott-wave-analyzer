@@ -1,38 +1,39 @@
-// The engine the site runs for every coin: Gerchik's level entries (with Raschke's ADX trend-strength
-// condition) and Raschke's Holy Grail (D1), fed the same closed 15m bars. History, replay and live all use it.
+// The engine the site runs for every coin, fed the same closed 15m bars (history, replay and live):
+//  1) TREND — Donchian channel breakout (20-day high, stop 3 ATR, exit on the 10-day low, longs only, not
+//     against BTC's D1 trend): the only model that held up on 5 years of daily data (see README);
+//  2) LEVELS — Gerchik's entries at strong D1 levels with Raschke's trend-strength condition (ADX ≥ 20).
 import type { Candle } from '../types.js';
 import type { DailyLevel } from './dailyLevels.js';
 import type { LevelState, Setup } from './setupEngine.js';
 import { GerchikEngine, SITE_GERCHIK_PARAMS, type GerchikParams } from './gerchik.js';
-import { BOOK_RASCHKE_PARAMS, RaschkeEngine, type RaschkeParams } from './raschke.js';
+import { SITE_TREND_PARAMS, TrendEngine, type TrendParams } from './trend.js';
 
 export interface SiteParams {
   gerchik: GerchikParams;
-  raschke: RaschkeParams;
+  trend: TrendParams;
 }
 
-export const SITE_PARAMS: SiteParams = {
-  gerchik: SITE_GERCHIK_PARAMS,
-  // Holy Grail with the book's entry rules (D1, ADX(14) > 30, first pullback to the 20 EMA, target = prior swing
-  // extreme); exit horizon chosen on TRAIN: up to 10 days, no daily trailing
-  raschke: { ...BOOK_RASCHKE_PARAMS, setups: ['HOLY_GRAIL'], hgTf: 'D1', hgAdx: 30, holdDays: 10, trailPrevDay: false },
-};
+export const SITE_PARAMS: SiteParams = { gerchik: SITE_GERCHIK_PARAMS, trend: SITE_TREND_PARAMS };
 
 export const SITE_CHOICE =
-  'Две модели с фиксированными параметрами для всех монет (выбраны один раз на 14 монетах Bybit по первым 6 месяцам года, проверены на следующих 3): 1) уровни D1 по Герчику — сила ≥ 70, отбой БСУ/БПУ и пробой с поджатием, стоп 0,5 ATR(D1), цель 3:1, только по тренду D1 и при ADX(14) ≥ 20 (условие силы тренда Рашке); 2) Holy Grail Рашке (D1: ADX > 30, первый откат к EMA20, стоп-ордер выше бара отката, цель — прежний экстремум, до 10 дней). Комиссии Bybit включены в R.';
+  'Две модели с фиксированными параметрами для всех монет. 1) Тренд: пробой 20-дневного максимума, стоп 3 ATR(20), выход по 10-дневному минимуму, только лонг и не против тренда BTC — выбрана скользящим walk-forward на 5 годах дневных данных 17 монет (устойчива во всех подпериодах). 2) Уровни D1 по Герчику (сила ≥ 70, отбой БСУ/БПУ и пробой с поджатием, стоп 0,5 ATR, цель 3:1) только по тренду D1 и при ADX(14) ≥ 20 (условие Рашке). Комиссии Bybit и оценка фандинга включены в R.';
 
 export class SiteEngine {
   readonly g: GerchikEngine;
-  readonly r: RaschkeEngine;
-  constructor(meta: { symbol: string; exchange: string; tick: number }, dailyBefore: readonly Candle[], readonly p: SiteParams = SITE_PARAMS) {
+  readonly tr: TrendEngine;
+  constructor(meta: { symbol: string; exchange: string; tick: number }, dailyBefore: readonly Candle[], readonly p: SiteParams = SITE_PARAMS, market: readonly Candle[] = []) {
     this.g = new GerchikEngine(meta, dailyBefore, p.gerchik);
-    this.r = new RaschkeEngine(meta, dailyBefore, p.raschke);
+    this.tr = new TrendEngine(meta, dailyBefore, p.trend, market);
+  }
+  /** market-factor daily candles (BTC), refreshed live when a new day has closed */
+  setMarket(d: readonly Candle[]): void {
+    this.tr.setMarket(d);
   }
   get levels(): DailyLevel[] {
     return this.g.levels;
   }
   get setups(): Setup[] {
-    return [...this.g.setups, ...this.r.setups].sort((a, b) => a.t - b.t);
+    return [...this.g.setups, ...this.tr.setups].sort((a, b) => a.t - b.t);
   }
   get atrDaily(): number {
     return this.g.atrDaily;
@@ -44,6 +45,6 @@ export class SiteEngine {
     return this.g.stateOf(levelId);
   }
   step(b: Candle): Setup[] {
-    return [...this.g.step(b), ...this.r.step(b)];
+    return [...this.g.step(b), ...this.tr.step(b)];
   }
 }

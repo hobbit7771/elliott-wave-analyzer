@@ -20,3 +20,12 @@ both, Bybit fees in R). Segments: TRAIN = first 50 % of the year, VALIDATION = n
 Raschke (Street Smarts) setups: `rasch.ts` (each setup with the book rules; `CFG` overrides, `SETUPS` selects),
 `rgrid.ts` (full grid of exits / filters for one setup; `SETUP`, `SPACE`, `OUT`), `analyze_raschke.py`
 (TRAIN vs VALIDATION per setup), `combo.ts` (Gerchik + Holy Grail side by side), `site.ts` (the site engine).
+
+Market mechanics and the trend model (daily data, `daily/`): run from a directory that holds `daily/SYMBOL.json`
+(daily candles `[t, o, h, l, c, v]`, 2021-2026). `mech.py` — autocorrelation, variance ratios (Lo–MacKinlay),
+time-series momentum test, volatility clustering, cross-coin correlation, tails; `dbt.py` — daily backtester
+(orders from closed days, stop first, fees, funding estimate) with Holy Grail and Donchian generators, portfolio
+metrics, stationary block bootstrap and the deflated Sharpe ratio; `run_fixed.py` — the book / classic rules
+without tuning; `wf.py` + `wf_eval.py` — 112 Donchian variants and a rolling walk-forward (train 2 years, trade
+the next 6 months). `trend15.ts` checks the 15m TrendEngine against the daily simulator on the same year;
+`gd.ts` runs the Gerchik engine on daily bars (5 years); `site.ts` — the site engine on the 15m year.
