@@ -27,6 +27,7 @@ import { staticLevels } from '../core/staticLevels.js';
 import { LevelService } from './services/levelService.js';
 import { CarryService } from './services/carry.js';
 import { PortfolioService } from './services/portfolio.js';
+import { NewsService } from './services/news.js';
 import type { BybitLinearAdapter } from './adapters/bybit.js';
 import { RetentionService, policyFromEnv } from './services/retention.js';
 
@@ -121,8 +122,20 @@ const hub: Hub = new Hub({
   },
 });
 
+// ---------- news and exchange announcements -> event-risk flags (local LLM, keyword fallback) ----------
+const bybitLinear = () => getAdapter('bybit-linear') as unknown as BybitLinearAdapter;
+const news = new NewsService({
+  repo: () => repo,
+  log,
+  symbols: async () => (await bybitLinear().fetchLinearFunding()).map((x) => x.symbol),
+  prices: async () => (await bybitLinear().fetchPrices?.()) ?? {},
+});
+setTimeout(() => void news.tick(), 60_000).unref();
+setInterval(() => void news.tick(), 5 * 60_000).unref();
+
 // ---------- strong D1 levels, level setups (history + live) and the watchlist ----------
 const levels = new LevelService({
+  eventRisk: () => news.blocked(),
   adapter: (src) => getAdapter(src),
   repo: () => repo,
   log,
@@ -151,7 +164,7 @@ const levels = new LevelService({
 setInterval(() => void levels.tick().catch((e) => log(`levels tick failed: ${(e as Error).message}`)), 60_000).unref();
 
 // ---------- paper funding carry (long spot + short perpetual), Bybit ----------
-const carry = new CarryService({ adapter: () => getAdapter('bybit-linear') as unknown as BybitLinearAdapter, repo: () => repo, log });
+const carry = new CarryService({ adapter: bybitLinear, repo: () => repo, log, eventRisk: () => news.blocked() });
 setTimeout(() => void carry.tick(), 90_000).unref();
 setInterval(() => void carry.tick(), 5 * 60_000).unref();
 
@@ -509,6 +522,7 @@ async function api(req: http.IncomingMessage, res: http.ServerResponse, u: URL):
   }
   if (p === '/api/carry') return json(res, 200, carry.view());
   if (p === '/api/portfolio') return json(res, 200, portfolio.view());
+  if (p === '/api/news') return json(res, 200, news.view());
   if (p === '/api/levels/strong') {
     const { source, symbol, key } = params(u);
     if (!levels.levels(key)) await levels.ensure(source, symbol);

@@ -108,7 +108,7 @@ def sh(c):
     except Exception as e: return str(e)
 print(json.dumps({
   "at": datetime.datetime.utcnow().isoformat() + "Z",
-  "services": sh("systemctl is-active oft caddy oft-update.timer oft-logs.timer oracle-cloud-agent snap.oracle-cloud-agent.oracle-cloud-agent 2>&1"),
+  "services": sh("systemctl is-active oft caddy llama oft-update.timer oft-logs.timer oracle-cloud-agent snap.oracle-cloud-agent.oracle-cloud-agent 2>&1"),
   "listening": sh("ss -ltn"),
   "iptables": sh("iptables -L INPUT --line-numbers -n"),
   "deploy": sh("cat /var/www/oft/deploy.json"),
@@ -118,6 +118,7 @@ print(json.dumps({
   "caddy": sh("journalctl -u caddy -n 30 --no-pager"),
   "app": sh("journalctl -u oft -n 60 --no-pager"),
   "health": sh("curl -s -m 5 http://127.0.0.1:8080/api/health"),
+  "llm": sh("curl -s -m 5 http://127.0.0.1:8081/health; tail -5 /var/log/oft-llm.log"),
   "mem": sh("free -m"), "disk": sh("df -h /"),
 }))
 PY
@@ -178,4 +179,6 @@ systemctl enable oft oft-update.timer oft-logs.timer
 systemctl start oft-update.timer oft-logs.timer
 systemctl restart caddy
 /usr/local/bin/oft-logs || true
+# local LLM for the news filter (builds llama.cpp and downloads the model: several minutes, in the background)
+nohup bash /opt/oft/repo/orderflow-terminal/deploy/oracle/llm.sh >/dev/null 2>&1 &
 echo "OFT setup done: https://$HOST"

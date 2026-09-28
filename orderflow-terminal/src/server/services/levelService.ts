@@ -71,6 +71,8 @@ export class LevelService {
       workerPath: string;
       tickOf: (s: SourceId, sym: string) => Promise<number>;
       onLiveSetup: (s: Setup) => void;
+      /** coins at event risk (news filter): ticker without USDT -> reason */
+      eventRisk?: () => Map<string, string>;
     },
   ) {}
 
@@ -207,6 +209,7 @@ export class LevelService {
       if (Date.now() < c.lastBarT + 2 * M15) continue; // no new closed bar yet
       c.engine.setMarket(await this.loadMarket(c.source)); // cached: reloads once per UTC day
       c.engine.setFunding(await this.loadFunding(c)); // cached: reloads every 4 h
+      c.engine.setEventRisk(this.deps.eventRisk?.().get(c.symbol.replace(/USDT$/, '').replace(/^1000+/, '')) ?? '');
       try {
         const rows = await this.deps.adapter(c.source).fetchKlines(c.symbol, '15m', 20);
         const closed = rows.filter((r) => r.t > c.lastBarT && r.t + M15 <= Date.now());

@@ -5,7 +5,7 @@
 import type { Repo } from '../persist/repo.js';
 import type { BybitLinearAdapter } from '../adapters/bybit.js';
 import { SITE_FACTOR_PARAMS, accrueFactor, factorEquity, meanFunding, newFactorState, rebalance, type FactorInput, type FactorState } from '../../core/fundingFactor.js';
-import { SITE_CARRY_PARAMS, accrue, decide, newCarryState, totals, trailingApr, basisPnl, type CarryQuote, type CarryState, type Funding } from '../../core/carry.js';
+import { SITE_CARRY_PARAMS, close, accrue, decide, newCarryState, totals, trailingApr, basisPnl, type CarryQuote, type CarryState, type Funding } from '../../core/carry.js';
 
 const KEY = 'carry:state';
 const FKEY = 'factor:state';
@@ -22,7 +22,11 @@ export class CarryService {
   private busy = false;
   error = '';
 
-  constructor(private deps: { adapter: () => BybitLinearAdapter; repo: () => Repo | null; log: (m: string) => void }) {}
+  constructor(private deps: { adapter: () => BybitLinearAdapter; repo: () => Repo | null; log: (m: string) => void; eventRisk?: () => Map<string, string> }) {}
+
+  private risk(symbol: string): string {
+    return this.deps.eventRisk?.().get(symbol.replace(/USDT$/, '').replace(/^1000+/, '')) ?? '';
+  }
 
   async tick(): Promise<void> {
     if (this.busy) return;
@@ -39,7 +43,15 @@ export class CarryService {
       const now = Date.now();
       const st = this.st;
       accrue(st, this.quotes, now);
-      const decided = decide(st, this.quotes, now);
+      // news filter: leave coins with a serious negative event, and do not open them
+      for (const pos of [...st.positions]) {
+        const r = this.risk(pos.symbol);
+        if (r) {
+          close(st, pos, this.quotes.get(pos.symbol), now, `новость: ${r}`);
+          this.deps.log(`OFT_CARRY closed ${pos.symbol} on news: ${r.slice(0, 120)}`);
+        }
+      }
+      const decided = decide(st, new Map([...this.quotes].filter(([s]) => !this.risk(s))), now);
       const tot = totals(st, this.quotes);
       const last = st.equity[st.equity.length - 1];
       if (!last || now - last.t >= 3600_000) {
@@ -80,7 +92,7 @@ export class CarryService {
           const r = k.slice(1).map((x, i) => Math.log(x.c / k[i].c));
           const m = r.reduce((a, b) => a + b, 0) / (r.length || 1);
           const vol = r.length >= 20 ? Math.sqrt(r.reduce((a, b) => a + (b - m) ** 2, 0) / (r.length - 1)) * Math.sqrt(365) : NaN;
-          inputs.push({ symbol: q.symbol, price: q.perp, settlements: q.settlements, vol });
+          if (!this.risk(q.symbol)) inputs.push({ symbol: q.symbol, price: q.perp, settlements: q.settlements, vol });
         } catch (e) {
           this.deps.log(`[factor] klines ${q.symbol}: ${(e as Error).message.slice(0, 100)}`);
         }

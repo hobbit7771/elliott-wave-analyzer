@@ -25,6 +25,10 @@ export class SiteEngine {
     this.g = new GerchikEngine(meta, dailyBefore, p.gerchik);
     this.tr = new TrendEngine(meta, dailyBefore, p.trend, market, funding);
   }
+  /** news filter: serious negative event for this coin ('' = none) */
+  setEventRisk(reason: string): void {
+    this.tr.setEventRisk(reason);
+  }
   /** the coin's perpetual funding settlements (trend filter) */
   setFunding(f: readonly Funding[]): void {
     this.tr.setFunding(f);

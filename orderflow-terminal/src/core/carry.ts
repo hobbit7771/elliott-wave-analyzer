@@ -114,7 +114,7 @@ export function accrue(st: CarryState, quotes: ReadonlyMap<string, CarryQuote>, 
   }
 }
 
-function close(st: CarryState, pos: CarryPos, q: CarryQuote | undefined, now: number, reason: string): void {
+export function close(st: CarryState, pos: CarryPos, q: CarryQuote | undefined, now: number, reason: string): void {
   const spot1 = q?.spot ?? pos.spot0;
   const perp1 = q?.perp ?? pos.perp0;
   const fees = pos.fees + pos.notional * st.params.feePerSide;

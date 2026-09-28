@@ -101,6 +101,8 @@ export class TrendEngine {
   private funding: Funding[] = [];
   /** why no order was placed today (shown in the entries panel) */
   skipped = '';
+  /** a serious negative news event for this coin (news filter): no new longs while set */
+  private eventRisk = '';
 
   constructor(
     readonly meta: { symbol: string; exchange: string; tick: number },
@@ -118,6 +120,15 @@ export class TrendEngine {
   /** Live: replace the market-factor daily candles (BTC) when a new day has closed. */
   setMarket(d: readonly Candle[]): void {
     this.market = [...d];
+  }
+
+  /** News filter: set (reason) or clear ('') the event risk; an active long order is cancelled. */
+  setEventRisk(reason: string): void {
+    this.eventRisk = reason;
+    if (reason && this.order && this.order.dir > 0 && !this.open) {
+      this.order = null;
+      this.skipped = `событие: ${reason}`;
+    }
   }
 
   /** Live: replace the coin's funding history (refreshed a few times a day). */
@@ -227,6 +238,10 @@ export class TrendEngine {
       if (dir < 0 && p.longOnly) continue;
       if (p.marketFilter && mt === -dir) {
         this.skipped = 'тренд BTC против';
+        continue;
+      }
+      if (dir > 0 && this.eventRisk) {
+        this.skipped = `событие: ${this.eventRisk}`;
         continue;
       }
       if (p.maxFundingPerDay > 0 && this.funding.length) {
