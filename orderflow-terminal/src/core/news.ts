@@ -33,17 +33,25 @@ export interface RiskFlag {
   market?: number; // BTC price when flagged
   r1?: number; // coin return minus BTC return after 1 day
   r3?: number; // ... after 3 days
+  lifted?: boolean; // the model re-read the headline and found no risk for this coin: flag ended early, not in the journal
 }
 
 export const FLAG_HOURS = 72;
 const NEG_EVENTS: EventType[] = ['hack', 'delisting', 'regulatory', 'unlock'];
 
-/** Does a classified item put its coins at event risk? Serious negative events only. */
-export function isRisk(c: Classified): boolean {
-  if (!c.coins.length) return false;
-  if (c.event === 'delisting' || c.event === 'hack') return c.sentiment <= 0;
-  return NEG_EVENTS.includes(c.event) && c.sentiment <= -1 && c.severity >= 2;
+// Large coins that hack stories mention as the STOLEN or MOVED asset ("hacker swaps ETH", "$83M in stolen XRP"): an
+// exchange or bridge hack is not a risk to them. Seen live on 28.09.2026 (Bitget hack flagged BTC, ETH, XRP).
+const CARRIERS = new Set(['BTC', 'ETH', 'SOL', 'XRP', 'BNB', 'DOGE', 'TRX', 'LTC', 'USDT', 'USDC', 'DAI']);
+
+/** Coins a classified item puts at event risk (serious negative events only); [] if none. */
+export function riskCoins(c: Classified): string[] {
+  const coins = c.event === 'hack' ? c.coins.filter((x) => !CARRIERS.has(x)) : c.coins;
+  if (!coins.length) return [];
+  if (c.event === 'delisting' || c.event === 'hack') return c.sentiment <= 0 ? coins : [];
+  return NEG_EVENTS.includes(c.event) && c.sentiment <= -1 && c.severity >= 2 ? coins : [];
 }
+
+export const isRisk = (c: Classified): boolean => riskCoins(c).length > 0;
 
 const KW: [EventType, RegExp, number, number][] = [
   // [event, pattern, sentiment, severity]
@@ -88,7 +96,9 @@ function classifyWith(item: NewsItem, coins: string[]): Classified {
 export const LLM_SYSTEM =
   'You classify crypto news headlines for a risk filter. Answer with ONE JSON object only, no prose: ' +
   '{"coins":["TICKER",...],"event":"hack|delisting|unlock|regulatory|listing|partnership|macro|other","sentiment":-2..2,"severity":0..3}. ' +
-  'coins: tickers of the cryptocurrencies the headline is directly about (e.g. BTC, ETH, SOL), [] if none or only the market in general. ' +
+  'coins: tickers of the cryptocurrencies whose OWN project, chain, token or issuer the headline is about (e.g. "Solana outage" -> SOL). ' +
+  'Do NOT list assets that were only stolen, moved, swapped or mentioned (an exchange hack where the hacker moves ETH is not about ETH); ' +
+  '[] if none, if the subject is an exchange or company without its own token here, or only the market in general. ' +
   'sentiment: expected effect on those coins, -2 very negative ... 2 very positive. severity: 0 noise, 1 minor, 2 material, 3 critical (hack, delisting, exchange collapse).';
 
 /** Parse the model's answer; null if it is not a usable JSON object. Tickers are filtered to the known ones. */
@@ -111,10 +121,11 @@ export function parseLlm(item: NewsItem, answer: string, known: readonly string[
 
 /** Add flags for a risky item (one per coin; an existing active flag is extended). */
 export function applyItem(flags: RiskFlag[], c: Classified, now: number, price: (coin: string) => number | undefined): RiskFlag[] {
-  if (!isRisk(c)) return flags;
+  const coins = riskCoins(c);
+  if (!coins.length) return flags;
   const until = Math.max(now, c.t) + FLAG_HOURS * 3600_000;
   const out = [...flags];
-  for (const coin of c.coins) {
+  for (const coin of coins) {
     const active = out.find((f) => f.coin === coin && f.until > now);
     if (active) {
       active.until = Math.max(active.until, until);
@@ -123,6 +134,22 @@ export function applyItem(flags: RiskFlag[], c: Classified, now: number, price: 
     out.push({ coin, since: now, until, reason: `${c.event}: ${c.title.slice(0, 140)}`, itemId: c.id, price: price(coin), market: price('BTC') });
   }
   return out;
+}
+
+/**
+ * The item was re-classified (the model re-read a headline the keyword rules had labelled): end its active flags on the
+ * coins the new reading does not put at risk. Lifted flags leave the forward journal (they were false alarms).
+ */
+export function liftFlags(flags: RiskFlag[], c: Classified, now: number): number {
+  const keep = new Set(riskCoins(c));
+  let n = 0;
+  for (const f of flags) {
+    if (f.itemId !== c.id || f.until <= now || keep.has(f.coin)) continue;
+    f.until = now;
+    f.lifted = true;
+    n++;
+  }
+  return n;
 }
 
 export const activeFlags = (flags: readonly RiskFlag[], now: number): RiskFlag[] => flags.filter((f) => f.until > now);

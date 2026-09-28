@@ -30,7 +30,7 @@ interface View {
   sources?: Record<string, { ok: boolean; n: number; error: string; at: number }>;
   known?: number;
   active?: Flag[];
-  journal?: { flags: number; scored1: number; avgR1: number | null; scored3: number; avgR3: number | null; recent: Flag[] };
+  journal?: { flags: number; lifted?: number; scored1: number; avgR1: number | null; scored3: number; avgR3: number | null; recent: Flag[] };
   items?: Item[];
 }
 
@@ -75,7 +75,7 @@ export function createNewsTab(): Tab {
           '</tbody></table>'
         : '<p class="muted">Сейчас ни одна монета не под флагом.</p>') +
       `<h3>Журнал проверки вперёд</h3>` +
-      `<p>Флагов всего: ${j.flags}. Монета минус BTC через 1 день: ${pct(j.avgR1)} (n=${j.scored1}); через 3 дня: ${pct(j.avgR3)} (n=${j.scored3}).</p>` +
+      `<p>Флагов всего: ${j.flags}${j.lifted ? ` (ещё ${j.lifted} снято: модель перечитала заголовок и не подтвердила риск)` : ''}. Монета минус BTC через 1 день: ${pct(j.avgR1)} (n=${j.scored1}); через 3 дня: ${pct(j.avgR3)} (n=${j.scored3}).</p>` +
       (j.recent.length
         ? `<table><thead><tr><th class="l">Монета</th><th class="l">Флаг</th><th>+1 день</th><th>+3 дня</th><th class="l">Причина</th></tr></thead><tbody>` +
           j.recent.map((f) => `<tr><td class="l">${esc(f.coin)}</td><td class="l">${fmtDateTime(f.since)}</td><td class="${cls(f.r1 ?? 0)}">${pct(f.r1)}</td><td class="${cls(f.r3 ?? 0)}">${pct(f.r3)}</td><td class="l muted">${esc(f.reason)}</td></tr>`).join('') +

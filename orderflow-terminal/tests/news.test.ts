@@ -1,8 +1,8 @@
 // TEST-ONLY synthetic headlines for the news event-risk filter.
-import { activeFlags, applyItem, classifyKeywords, findCoins, isRisk, parseLlm, scoreFlags, type NewsItem } from '../src/core/news.js';
+import { activeFlags, applyItem, classifyKeywords, findCoins, isRisk, liftFlags, parseLlm, scoreFlags, type NewsItem } from '../src/core/news.js';
 import { SITE_TREND_PARAMS, TrendEngine } from '../src/core/levelEngine/trend.js';
 
-const KNOWN = ['BTC', 'ETH', 'SOL', 'ONE', 'AI', 'ENA', 'ZRO'];
+const KNOWN = ['BTC', 'ETH', 'SOL', 'XRP', 'ONE', 'AI', 'ENA', 'ZRO'];
 const T = Date.UTC(2026, 8, 28, 12);
 const item = (title: string): NewsItem => ({ id: title, source: 'test', title, url: '', t: T });
 
@@ -22,6 +22,20 @@ describe('news event-risk filter', () => {
     const list = classifyKeywords(item('Bybit will list SOL perpetual with 50x'), KNOWN);
     expect(list.event).toBe('listing');
     expect(isRisk(list)).toBe(false);
+  });
+
+  it('an exchange hack does not flag the large coins that were stolen or moved; the model can lift a keyword flag', () => {
+    const moved = classifyKeywords(item('Bitget resumes Bitcoin withdrawals as hacker swaps ETH via THORChain'), KNOWN);
+    expect(moved.coins).toEqual(['ETH', 'BTC']);
+    expect(isRisk(moved)).toBe(false);
+    expect(applyItem([], moved, T, () => 1)).toHaveLength(0);
+    const kw = classifyKeywords(item('Hacker moves ZRO and ENA stolen from exchange'), KNOWN);
+    const f = applyItem([], kw, T, () => 1);
+    expect(f.map((x) => x.coin).sort()).toEqual(['ENA', 'ZRO']);
+    const llm = parseLlm(kw, '{"coins":["ZRO"],"event":"hack","sentiment":-2,"severity":3}', KNOWN)!;
+    expect(liftFlags(f, llm, T + 600_000)).toBe(1);
+    expect(activeFlags(f, T + 600_001).map((x) => x.coin)).toEqual(['ZRO']);
+    expect(f.find((x) => x.coin === 'ENA')!.lifted).toBe(true);
   });
 
   it('parses the model answer, keeps only known tickers, rejects prose', () => {

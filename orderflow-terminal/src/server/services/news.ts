@@ -2,7 +2,7 @@
 // media + Bybit and Binance delisting announcements; new headlines are classified by the local LLM (llama.cpp server,
 // OpenAI-compatible API at LLM_URL) or, when it is unavailable, by keyword rules. State in oft.settings 'news:state'.
 import type { Repo } from '../persist/repo.js';
-import { LLM_SYSTEM, activeFlags, applyItem, classifyKeywords, parseLlm, scoreFlags, type Classified, type NewsItem, type RiskFlag } from '../../core/news.js';
+import { LLM_SYSTEM, activeFlags, applyItem, classifyKeywords, liftFlags, parseLlm, scoreFlags, type Classified, type NewsItem, type RiskFlag } from '../../core/news.js';
 
 const KEY = 'news:state';
 const RSS = [
@@ -72,6 +72,18 @@ export class NewsService {
         done++;
         this.st.seen.push(it.id);
         this.st.items.push(c);
+        this.st.flags = applyItem(this.st.flags, c, now, this.price);
+      }
+      // spare model time: re-read recent headlines the keyword rules labelled (model was down), newest first;
+      // flags the model does not confirm are lifted
+      const redo = this.st.items.filter((x) => x.by === 'keywords' && now - x.t < MAX_AGE).reverse();
+      for (const it of redo) {
+        if (done >= 12 || !this.llm.ok) break;
+        const c = await this.classify(it);
+        done++;
+        if (c.by !== 'llm') break;
+        this.st.items[this.st.items.indexOf(it)] = c;
+        liftFlags(this.st.flags, c, now);
         this.st.flags = applyItem(this.st.flags, c, now, this.price);
       }
       scoreFlags(this.st.flags, now, this.price);
@@ -172,7 +184,8 @@ export class NewsService {
     const st = this.st;
     if (!st) return { status: 'loading', error: this.error };
     const now = Date.now();
-    const scored = st.flags.filter((f) => f.r3 !== undefined);
+    const real = st.flags.filter((f) => !f.lifted);
+    const scored = real.filter((f) => f.r3 !== undefined);
     const avg = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : NaN);
     return {
       status: 'ok',
@@ -182,12 +195,13 @@ export class NewsService {
       known: this.known.length,
       active: activeFlags(st.flags, now),
       journal: {
-        flags: st.flags.length,
-        scored1: st.flags.filter((f) => f.r1 !== undefined).length,
-        avgR1: avg(st.flags.filter((f) => f.r1 !== undefined).map((f) => f.r1!)),
+        flags: real.length,
+        lifted: st.flags.length - real.length,
+        scored1: real.filter((f) => f.r1 !== undefined).length,
+        avgR1: avg(real.filter((f) => f.r1 !== undefined).map((f) => f.r1!)),
         scored3: scored.length,
         avgR3: avg(scored.map((f) => f.r3!)),
-        recent: st.flags.slice(-30).reverse(),
+        recent: real.slice(-30).reverse(),
       },
       items: st.items.slice(-80).reverse(),
     };
