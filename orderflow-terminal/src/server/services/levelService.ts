@@ -321,9 +321,15 @@ export class LevelService {
   }
 
   /** For the portfolio: cumulative R of the engine's setups since `since` (open ones at their current R) and open positions. */
-  portfolioInputs(since: number): { trendR: number; trades: number; open: { symbol: string; dir: 1 | -1; entry: number; stop: number; price: number; model: string }[] } {
+  portfolioInputs(since: number): {
+    trendR: number;
+    trades: number;
+    open: { symbol: string; dir: 1 | -1; entry: number; stop: number; price: number; model: string }[];
+    journal: { symbol: string; t: number; closedAt?: number; direction: string; model: string; entry: number; r: number; status: string }[];
+  } {
     let trendR = 0;
     let trades = 0;
+    const journal: { symbol: string; t: number; closedAt?: number; direction: string; model: string; entry: number; r: number; status: string }[] = [];
     const open: { symbol: string; dir: 1 | -1; entry: number; stop: number; price: number; model: string }[] = [];
     for (const c of this.ctx.values()) {
       const seen = new Map<string, Setup>();
@@ -331,11 +337,12 @@ export class LevelService {
       for (const s of seen.values()) {
         trendR += s.outcome.r;
         trades++;
+        journal.push({ symbol: c.symbol, t: s.t, closedAt: s.outcome.closedAt, direction: s.direction, model: s.reasons[1] ?? '', entry: s.entry, r: s.outcome.r, status: s.outcome.status });
       }
       for (const p of c.engine?.openPositions() ?? [])
         if (p.setup.t >= since) open.push({ symbol: c.symbol, dir: p.setup.direction === 'LONG' ? 1 : -1, entry: p.setup.entry, stop: p.stop, price: c.price, model: p.setup.reasons[1] ?? '' });
     }
-    return { trendR, trades, open };
+    return { trendR, trades, open, journal: journal.sort((a, b) => b.t - a.t).slice(0, 60) };
   }
 
   watchRow(key: string): Record<string, unknown> | null {

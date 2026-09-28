@@ -27,7 +27,14 @@ interface View {
   };
   exposures?: Expo[];
   path?: { day: number; eq: number; k: number }[];
+  tracking?: { sleeve: string; note: string; days: number; live: number; annRet: number; expected: number; sd: number; z: number; verdict: string }[];
+  journal?: {
+    trend: { symbol: string; t: number; closedAt?: number; direction: string; model: string; entry: number; r: number; status: string }[];
+    carry: { symbol: string; openedAt: number; closedAt: number; net: number; reason: string }[];
+    factorLast: { t: number; long: string[]; short: string[] } | null;
+  };
 }
+const MODEL: Record<string, string> = { TREND_BREAKOUT: 'тренд', BOUNCE: 'отбой', BREAKOUT: 'пробой', FALSE_BREAK: 'ложный пробой' };
 
 const pct = (x: number | undefined, d = 1) => (x === undefined || !Number.isFinite(x) ? '—' : (x * 100).toFixed(d) + '%');
 const num = (x: number | undefined, d = 2) => (x === undefined || !Number.isFinite(x) ? '—' : x.toFixed(d));
@@ -43,6 +50,22 @@ function spark(path: { eq: number }[]): string {
   const hi = Math.max(...ys);
   const pts = ys.map((y, i) => `${((i / (ys.length - 1)) * w).toFixed(1)},${(h - ((y - lo) / (hi - lo || 1)) * (h - 4) - 2).toFixed(1)}`).join(' ');
   return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="width:100%;max-width:${w}px;height:${h}px;display:block"><polyline fill="none" stroke="#26a69a" stroke-width="1.5" points="${pts}"/></svg>`;
+}
+
+function journalHtml(j: View['journal']): string {
+  if (!j) return '';
+  const tr = j.trend
+    .map((x) => `<tr><td class="l">${fmtDateTime(x.t)}</td><td class="l">${esc(x.symbol)}</td><td class="l ${x.direction === 'LONG' ? 'pos' : 'neg'}">${esc(x.direction)}</td><td class="l">${esc(MODEL[x.model] ?? x.model)}</td><td>${x.entry}</td><td class="${cls(x.r)}">${x.r >= 0 ? '+' : ''}${x.r.toFixed(2)}R</td><td class="l muted">${x.status === 'open' ? 'открыта' : x.closedAt ? 'закрыта ' + fmtDateTime(x.closedAt) : esc(x.status)}</td></tr>`)
+    .join('');
+  const ca = j.carry.map((x) => `<tr><td class="l">${esc(x.symbol)}</td><td class="l">${fmtDateTime(x.openedAt)} — ${fmtDateTime(x.closedAt)}</td><td class="${cls(x.net)}">${x.net >= 0 ? '+' : ''}${x.net.toFixed(2)} USDT</td><td class="l muted">${esc(x.reason)}</td></tr>`).join('');
+  return (
+    `<h3>Журнал сделок</h3>` +
+    `<p class="muted"><b>Тренд и уровни</b> (с начала портфеля):</p>` +
+    (tr ? `<table><thead><tr><th class="l">Вход</th><th class="l">Монета</th><th class="l">Сторона</th><th class="l">Модель</th><th>Цена</th><th>Результат</th><th class="l">Статус</th></tr></thead><tbody>${tr}</tbody></table>` : '<p class="muted">Сделок пока не было (модели входят редко: ≈ 1–2 раза в месяц на монету).</p>') +
+    `<p class="muted"><b>Кэрри</b> — закрытые позиции:</p>` +
+    (ca ? `<table><thead><tr><th class="l">Монета</th><th class="l">Период</th><th>Итог</th><th class="l">Причина закрытия</th></tr></thead><tbody>${ca}</tbody></table>` : '<p class="muted">Закрытых позиций пока нет.</p>') +
+    (j.factorLast ? `<p class="muted"><b>Фактор фандинга</b> — последняя ребалансировка ${fmtDateTime(j.factorLast.t)}: лонг ${esc(j.factorLast.long.join(', '))}; шорт ${esc(j.factorLast.short.join(', '))}.</p>` : '')
+  );
 }
 
 export function createPortfolioTab(): Tab {
@@ -84,6 +107,13 @@ export function createPortfolioTab(): Tab {
       `<tr><td class="l">Кэрри</td><td class="${cls(s.carry.pnlPct)}">${num(s.carry.pnlPct)}%</td><td class="l muted">капитал книги ${num(s.carry.equity)} USDT (вкладка «Фандинг»)</td></tr>` +
       `<tr><td class="l">Фактор фандинга</td><td class="${cls(s.factor.pnlPct)}">${num(s.factor.pnlPct)}%</td><td class="l muted">капитал книги ${num(s.factor.equity)} USDT, в портфеле ${pct(p.factorWeight, 0)}</td></tr>` +
       `</tbody></table>` +
+      `<h3>Живой результат против бэктеста</h3>` +
+      `<p class="muted">Ожидание = годовая доходность бэктеста × прошедшее время; разброс = годовая волатильность × √(время). z — насколько живой результат отличается от ожидания в единицах разброса: |z| < 1 — как на истории, z < −2 — стратегия ведёт себя хуже, чем на истории (повод разобраться).</p>` +
+      `<table><thead><tr><th class="l">Часть</th><th>Живой</th><th>Ожидание</th><th>± разброс</th><th>z</th><th class="l">Вывод</th></tr></thead><tbody>` +
+      (v.tracking ?? [])
+        .map((x) => `<tr><td class="l">${esc(x.note)}</td><td class="${cls(x.live)}">${pct(x.live, 2)}</td><td>${pct(x.expected, 2)}</td><td>${pct(x.sd, 2)}</td><td>${num(x.z)}</td><td class="l ${x.z < -2 && x.days >= 30 ? 'neg' : ''}">${esc(x.verdict)}</td></tr>`)
+        .join('') +
+      `</tbody></table>` +
       `<h3>Экспозиция по монетам (с учётом k)</h3>` +
       (expo.length
         ? `<table><thead><tr><th class="l">Монета</th><th>Чистая позиция, USDT</th><th>Доля капитала</th><th class="l">Из чего</th><th></th></tr></thead><tbody>` +
@@ -91,7 +121,8 @@ export function createPortfolioTab(): Tab {
             .map((e) => `<tr><td class="l">${esc(e.symbol)}</td><td class="${cls(e.net)}">${e.net >= 0 ? '+' : ''}${e.net.toFixed(0)}</td><td>${pct(e.share)}</td><td class="l muted">${Object.entries(e.parts).map(([k, x]) => `${esc(SLEEVE[k] ?? k)} ${x >= 0 ? '+' : ''}${x.toFixed(0)}`).join(', ')}</td><td class="l ${e.overLimit ? 'neg' : ''}">${e.overLimit ? 'выше лимита' : ''}</td></tr>`)
             .join('') +
           '</tbody></table>'
-        : '<p class="muted">Открытых направленных позиций нет.</p>');
+        : '<p class="muted">Открытых направленных позиций нет.</p>') +
+      journalHtml(v.journal);
   }
   const painter = new Painter(render, 1000);
   let iv = 0;

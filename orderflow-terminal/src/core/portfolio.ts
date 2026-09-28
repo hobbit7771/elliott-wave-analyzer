@@ -115,3 +115,23 @@ export function exposures(items: readonly { symbol: string; notional: number; sl
     .map(([symbol, e]) => ({ symbol, net: e.net, share: equity > 0 ? e.net / equity : 0, parts: e.parts, overLimit: equity > 0 && Math.abs(e.net) / equity > p.maxCoinExposure }))
     .sort((a, b) => Math.abs(b.net) - Math.abs(a.net));
 }
+
+/** Backtest expectations per sleeve (research, 06.2021–09.2026; README rounds 5–7): annual return and volatility. */
+export const BACKTEST: Record<'trend' | 'carry' | 'factor' | 'total', { annRet: number; annVol: number; note: string }> = {
+  trend: { annRet: 0.109, annVol: 0.099, note: 'тренд + уровни, риск 0,25 %/сделку' },
+  carry: { annRet: 0.046, annVol: 0.005, note: 'кэрри, ротация до 10 монет' },
+  factor: { annRet: 0.145, annVol: 0.093, note: '½ фактора фандинга' },
+  total: { annRet: 0.234, annVol: 0.095, note: 'портфель с риск-менеджером' },
+};
+
+/**
+ * Live vs backtest: the return expected over `days` and its 1-sigma band (i.i.d. daily returns: sd grows with √time);
+ * z = (live − expected) / sd. |z| < 1: as expected; z < −2: the live result is unlikely under the backtest — review.
+ */
+export function trackVsBacktest(liveRet: number, days: number, annRet: number, annVol: number): { expected: number; sd: number; z: number; verdict: string } {
+  const expected = annRet * (days / 365);
+  const sd = annVol * Math.sqrt(Math.max(days, 1) / 365);
+  const z = sd > 0 ? (liveRet - expected) / sd : 0;
+  const verdict = days < 30 ? 'мало данных' : z < -2 ? 'хуже бэктеста — проверить' : z < -1 ? 'ниже ожиданий, в пределах разброса' : z > 2 ? 'заметно лучше бэктеста' : 'в пределах ожидаемого';
+  return { expected, sd, z, verdict };
+}

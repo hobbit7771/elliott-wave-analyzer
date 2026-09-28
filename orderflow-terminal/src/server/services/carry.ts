@@ -134,14 +134,23 @@ export class CarryService {
   }
 
   /** For the portfolio: equity of the carry and factor books and the factor's signed notional per coin. */
-  sleeves(): { ready: boolean; carry: number; factor: number; factorPositions: { symbol: string; notional: number }[] } {
-    if (!this.st || !this.fs) return { ready: false, carry: NaN, factor: NaN, factorPositions: [] };
+  sleeves(): {
+    ready: boolean;
+    carry: number;
+    factor: number;
+    factorPositions: { symbol: string; notional: number }[];
+    carryClosed: { symbol: string; openedAt: number; closedAt: number; net: number; reason: string }[];
+    factorLast: { t: number; long: string[]; short: string[] } | null;
+  } {
+    if (!this.st || !this.fs) return { ready: false, carry: NaN, factor: NaN, factorPositions: [], carryClosed: [], factorLast: null };
     const fs = this.fs;
     return {
       ready: this.quotes.size > 0,
       carry: totals(this.st, this.quotes).equity,
       factor: factorEquity(fs, (s) => this.perp(s)),
       factorPositions: fs.positions.map((x) => ({ symbol: x.symbol, notional: x.qty * (this.perp(x.symbol) ?? x.px) })),
+      carryClosed: this.st.closed.slice(-40).map((x) => ({ symbol: x.symbol, openedAt: x.openedAt, closedAt: x.closedAt, net: x.net, reason: x.reason })),
+      factorLast: fs.last,
     };
   }
 

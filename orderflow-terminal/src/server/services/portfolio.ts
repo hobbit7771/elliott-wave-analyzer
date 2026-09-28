@@ -4,7 +4,7 @@
 import type { Repo } from '../persist/repo.js';
 import type { LevelService } from './levelService.js';
 import type { CarryService } from './carry.js';
-import { SITE_PORTFOLIO_PARAMS, dailyReturns, exposures, managedEquity, maxDrawdown, riskMultiplier, type PortfolioParams, type Snap } from '../../core/portfolio.js';
+import { BACKTEST, SITE_PORTFOLIO_PARAMS, trackVsBacktest, dailyReturns, exposures, managedEquity, maxDrawdown, riskMultiplier, type PortfolioParams, type Snap } from '../../core/portfolio.js';
 
 const KEY = 'portfolio:state';
 
@@ -75,6 +75,17 @@ export class PortfolioService {
         factor: { equity: sl.factor, pnlPct: first ? (sl.factor / first.factor - 1) * 100 : 0 },
       },
       exposures: exposures(items, equity, p).slice(0, 30),
+      tracking: (() => {
+        const days = rets.length;
+        const sum = (f: (r: (typeof rets)[number]) => number) => rets.reduce((a, r) => a * (1 + f(r)), 1) - 1;
+        const live = { trend: sum((r) => r.trend), carry: sum((r) => r.carry), factor: sum((r) => r.factor), total: (equity - p.capital) / p.capital };
+        return (['trend', 'carry', 'factor', 'total'] as const).map((k) => ({ sleeve: k, note: BACKTEST[k].note, days, live: live[k], annRet: BACKTEST[k].annRet, ...trackVsBacktest(live[k], days, BACKTEST[k].annRet, BACKTEST[k].annVol) }));
+      })(),
+      journal: {
+        trend: tr.journal,
+        carry: [...sl.carryClosed].reverse(),
+        factorLast: sl.factorLast,
+      },
       path: path.slice(-400),
     };
   }

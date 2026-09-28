@@ -48,3 +48,17 @@ describe('portfolio risk manager', () => {
     expect(ex[1]).toMatchObject({ symbol: 'B', net: -300, overLimit: false });
   });
 });
+
+import { trackVsBacktest } from '../src/core/portfolio.js';
+describe('live vs backtest tracking', () => {
+  it('expected return grows with time, the band with its square root; verdicts', () => {
+    const a = trackVsBacktest(0.05, 365, 0.2, 0.1);
+    expect(a.expected).toBeCloseTo(0.2, 9);
+    expect(a.sd).toBeCloseTo(0.1, 9);
+    expect(a.z).toBeCloseTo(-1.5, 9);
+    expect(a.verdict).toMatch(/ниже ожиданий/);
+    expect(trackVsBacktest(-0.2, 365, 0.2, 0.1).verdict).toMatch(/проверить/);
+    expect(trackVsBacktest(-0.5, 10, 0.2, 0.1).verdict).toBe('мало данных');
+    expect(trackVsBacktest(0.0, 91.25, 0.2, 0.1).sd).toBeCloseTo(0.05, 9);
+  });
+});
