@@ -2,7 +2,8 @@
 # First-boot setup of an Oracle Cloud Always Free VM (Ubuntu 24.04, ARM) for OrderFlow Terminal:
 # Node 22, the app as a systemd service, Caddy with automatic HTTPS on <ip>.sslip.io, and a timer that pulls
 # the branch every 3 minutes and redeploys on new commits (like Render's auto-deploy).
-# The secrets block (__OFT_ENV__) is filled in at launch time; this template holds none.
+# The secrets block below (the placeholder line inside the oft.env heredoc) is filled in at launch time;
+# this template holds no secrets.
 set -euxo pipefail
 exec > >(tee -a /var/log/oft-setup.log) 2>&1
 export DEBIAN_FRONTEND=noninteractive
@@ -102,7 +103,9 @@ L3
 
 IP=$(curl -fsS https://api.ipify.org || curl -fsS https://ifconfig.me)
 HOST="${IP//./-}.sslip.io"
+set +x # never trace secrets into the setup log / serial console
 HASH=$(caddy hash-password --plaintext "$(grep '^OWNER_TOKEN=' /etc/oft/oft.env | cut -d= -f2-)")
+set -x
 cat > /etc/caddy/Caddyfile <<CADDY
 $HOST {
 	encode zstd gzip
