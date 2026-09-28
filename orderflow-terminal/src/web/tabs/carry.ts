@@ -27,8 +27,17 @@ interface Closed extends Pos {
   closedAt: number;
   reason: string;
 }
+interface Factor {
+  params: { lookbackDays: number; quantile: number; rebalanceDays: number; gross: number; feePerSide: number; capital: number };
+  startedAt: number;
+  lastRebalance: number;
+  equity: number;
+  last: { t: number; long: string[]; short: string[] } | null;
+  positions: { symbol: string; qty: number; notional: number; funding: number; fees: number; fundingDay: number | null }[];
+}
 interface View {
   status: string;
+  factor?: Factor | null;
   error: string;
   params?: { entryApr: number; exitApr: number; slots: number; lookbackDays: number; feePerSide: number; capital: number; marginFrac: number };
   startedAt?: number;
@@ -70,6 +79,7 @@ export function createCarryTab(): Tab {
     const t = v.totals;
     const slot = p.capital / (1 + p.marginFrac) / p.slots;
     box.innerHTML =
+      `<p class="muted">Портфель из трёх некоррелированных стратегий (история 06.2021–09.2026, корреляции −0,11…+0,04): тренд (вкладка «Уровни», риск 0,25 % на сделку) + кэрри + половина фактора фандинга — ≈ +25,6 % в год, Шарп 1,99, макс. просадка 9,4 % (только тренд: +10,9 %, Шарп 1,09, просадка 12,3 %). Все стратегии здесь — paper: на биржу ничего не отправляется.</p>` +
       `<h3>Кэрри на фандинге (paper): лонг спот + шорт бессрочный фьючерс, Bybit</h3>` +
       `<p class="muted">Позиция не зависит от цены монеты: спот и фьючерс гасят друг друга, а шорт получает фандинг, который платят лонги. ` +
       `Раз в сутки (после 00:05 UTC) сервер закрывает монеты, где средний фандинг за ${p.lookbackDays} дней упал ниже ${pct(p.exitApr, 0)} годовых, и открывает монеты с самым высоким фандингом выше ${pct(p.entryApr, 0)} годовых — до ${p.slots} позиций по ${slot.toFixed(0)} USDT (виртуальный капитал ${p.capital} USDT: спот покупается целиком, под шорт — маржа ${pct(p.marginFrac, 0)}). ` +
@@ -93,17 +103,35 @@ export function createCarryTab(): Tab {
         .map((r) => `<tr><td class="l">${esc(r.symbol)}</td><td>${px(r.spot)}</td><td>${px(r.perp)}</td><td>${r.basisBp.toFixed(1)}</td><td class="${cls(r.fundingApr)}">${pct(r.fundingApr)}</td><td class="${cls(r.apr7 ?? 0)}">${pct(r.apr7)}</td><td>${(r.turnover / 1e6).toFixed(0)}</td><td class="l">${r.held ? '● в позиции' : (r.apr7 ?? -1) > p.entryApr ? 'кандидат' : ''}</td></tr>`)
         .join('') +
       '</tbody></table>' +
+      factorHtml(v.factor) +
       (v.closed?.length
-        ? `<h3>Закрытые</h3><table><thead><tr><th class="l">Монета</th><th class="l">Период</th><th>Фандинг</th><th>Спред</th><th>Комиссии</th><th>Итог</th><th class="l">Причина</th></tr></thead><tbody>` +
+        ? `<h3>Закрытые (кэрри)</h3><table><thead><tr><th class="l">Монета</th><th class="l">Период</th><th>Фандинг</th><th>Спред</th><th>Комиссии</th><th>Итог</th><th class="l">Причина</th></tr></thead><tbody>` +
           v.closed.map((x) => `<tr><td class="l">${esc(x.symbol)}</td><td class="l">${fmtDateTime(x.openedAt)} — ${fmtDateTime(x.closedAt)}</td><td>${usd(x.funding)}</td><td>${usd(x.basis)}</td><td>−${x.fees.toFixed(2)}</td><td class="${cls(x.net)}">${usd(x.net)}</td><td class="l">${esc(x.reason)}</td></tr>`).join('') +
           '</tbody></table>'
         : '');
+  }
+  function factorHtml(f: Factor | null | undefined): string {
+    if (!f) return '';
+    const p = f.params;
+    const ret = ((f.equity - p.capital) / p.capital) * 100;
+    const pos = [...f.positions].sort((a, b) => b.notional - a.notional);
+    return (
+      `<h3>Фактор фандинга (paper): лонг монет с низким фандингом / шорт монет с высоким</h3>` +
+      `<p class="muted">Раз в ${p.rebalanceDays} дней сервер ранжирует ликвидные фьючерсы по среднему фандингу за ${p.lookbackDays} дней: треть с самым низким — в лонг, треть с самым высоким — в шорт, размер обратно пропорционален волатильности, по ${pct(p.gross, 0)} капитала на сторону (рыночно-нейтрально). Высокий фандинг = толпа в лонгах; такие монеты дальше растут слабее, а шорт ещё и получает фандинг. Проверка на истории (35 фьючерсов Binance, 2021–2026, комиссии): ≈ +29 % в год, Шарп 1,48, просадка 24 %, связь с BTC ≈ 0; без любой одной монеты Шарп ≥ 1,03. Виртуальный капитал ${p.capital} USDT, комиссия ${pct(p.feePerSide, 3)} за сторону.</p>` +
+      `<table><tbody><tr><td class="l">Капитал сейчас</td><td>${f.equity.toFixed(2)} USDT</td><td class="${cls(ret)}">${ret >= 0 ? '+' : ''}${ret.toFixed(2)}%</td></tr>` +
+      `<tr><td class="l">Запущено / последняя ребалансировка</td><td colspan="2" class="l">${fmtDateTime(f.startedAt)} / ${f.lastRebalance ? fmtDateTime(f.lastRebalance) : 'ещё не было'}</td></tr></tbody></table>` +
+      (pos.length
+        ? `<table><thead><tr><th class="l">Монета</th><th class="l">Сторона</th><th>Объём, USDT</th><th>Фандинг 7 д, годовых</th><th>Получено фандинга</th><th>Комиссии</th></tr></thead><tbody>` +
+          pos.map((x) => `<tr><td class="l">${esc(x.symbol)}</td><td class="l ${x.qty > 0 ? 'pos' : 'neg'}">${x.qty > 0 ? 'LONG' : 'SHORT'}</td><td>${Math.abs(x.notional).toFixed(0)}</td><td>${pct(x.fundingDay === null ? null : x.fundingDay * 365)}</td><td class="${cls(x.funding)}">${usd(x.funding)}</td><td>−${x.fees.toFixed(2)}</td></tr>`).join('') +
+          '</tbody></table>'
+        : '<p class="muted">Первая ребалансировка — после 00:05 UTC, когда будет история фандинга и волатильности (нужно ≥ 10 монет).</p>')
+    );
   }
   const painter = new Painter(render, 1000);
   let iv = 0;
   return {
     id: 'carry',
-    title: 'Кэрри',
+    title: 'Фандинг',
     root,
     show: () => {
       void refresh();
