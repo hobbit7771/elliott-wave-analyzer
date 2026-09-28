@@ -41,3 +41,7 @@ Round 3 (machine learning): `mlds.py` builds the daily feature panel (`panel.pkl
 retrain, purge gap H) of Ridge / logistic / LightGBM / ExtraTrees and a rank ensemble, cross-sectional IC; `mltrade.py H` —
 portfolios from the predictions with costs and funding; `meta.py` — meta-labeling of the trend model's trades;
 `pyr.py` — Turtle pyramiding. Needs `pip install scikit-learn lightgbm`.
+Round 5 (carry): `carry/cfetch.py` downloads monthly funding and spot / USDⓈ-M daily klines of 35 coins from the Binance
+public archive; `carry/carry.py` — the delta-neutral cash-and-carry backtest (rotation by trailing funding, fees on both
+legs, basis P&L); `carry/combo2.py` — the trend model + carry portfolio (run from the scratch directory that holds the
+daily study).

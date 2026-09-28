@@ -11,6 +11,7 @@ import { createProfileTab } from './tabs/profile.js';
 import { createSignalsTab } from './tabs/signals.js';
 import { createLevelsTab } from './tabs/levels.js';
 import { createPaperTab } from './tabs/paper.js';
+import { createCarryTab } from './tabs/carry.js';
 import { createAlertsTab, alerts } from './tabs/alerts.js';
 import { createSourcesTab } from './tabs/sources.js';
 
@@ -82,7 +83,7 @@ const nav = el('nav', { class: 'tabs', role: 'tablist' });
 const main = el('main');
 app.append(header, statusbar, noteBar, nav, main);
 
-const tabs: Tab[] = [createChartTab(), createHeatmapTab(), createDomTab(), createFootprintTab(), createProfileTab(), createSignalsTab(), createLevelsTab(), createPaperTab(), createAlertsTab(), createSourcesTab()];
+const tabs: Tab[] = [createChartTab(), createHeatmapTab(), createDomTab(), createFootprintTab(), createProfileTab(), createSignalsTab(), createLevelsTab(), createCarryTab(), createPaperTab(), createAlertsTab(), createSourcesTab()];
 let active: Tab | null = null;
 for (const t of tabs) {
   t.root.classList.add('tab');

@@ -25,6 +25,8 @@ import { PaperService, type PaperState, type BookView } from './services/paper.j
 import { AlertService, DEFAULT_RULES, type AlertRule } from './services/alerts.js';
 import { staticLevels } from '../core/staticLevels.js';
 import { LevelService } from './services/levelService.js';
+import { CarryService } from './services/carry.js';
+import type { BybitLinearAdapter } from './adapters/bybit.js';
 import { RetentionService, policyFromEnv } from './services/retention.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -146,6 +148,11 @@ const levels = new LevelService({
   },
 });
 setInterval(() => void levels.tick().catch((e) => log(`levels tick failed: ${(e as Error).message}`)), 60_000).unref();
+
+// ---------- paper funding carry (long spot + short perpetual), Bybit ----------
+const carry = new CarryService({ adapter: () => getAdapter('bybit-linear') as unknown as BybitLinearAdapter, repo: () => repo, log });
+setTimeout(() => void carry.tick(), 90_000).unref();
+setInterval(() => void carry.tick(), 5 * 60_000).unref();
 async function watchlistKeys(): Promise<string[]> {
   const w = repo ? await repo.getSetting<string[]>('watchlist').catch(() => undefined) : undefined;
   return w ?? hub.pinned;
@@ -494,6 +501,7 @@ async function api(req: http.IncomingMessage, res: http.ServerResponse, u: URL):
     const candles = candlesFromTrades(trades, tf, ticksPerBar).slice(-limit);
     return json(res, 200, { candles, origin: 'recorded-trades', tf, coverage: reader.tradeRange(key), note: 'aggTrade messages: one message can aggregate several fills at the same price' });
   }
+  if (p === '/api/carry') return json(res, 200, carry.view());
   if (p === '/api/levels/strong') {
     const { source, symbol, key } = params(u);
     if (!levels.levels(key)) await levels.ensure(source, symbol);

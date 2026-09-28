@@ -110,6 +110,18 @@ export class BybitLinearAdapter implements MarketAdapter {
     return [...out].filter(([t]) => t >= from).sort((a, b) => a[0] - b[0]).map(([t, rate]) => ({ t, rate }));
   }
 
+  /** Every USDT perpetual with its funding rate (for the carry strategy). */
+  async fetchLinearFunding(): Promise<{ symbol: string; last: number; funding: number; nextFundingTime: number; turnover: number }[]> {
+    const r = await this.get<{ list: { symbol: string; lastPrice: string; fundingRate: string; nextFundingTime: string; turnover24h: string }[] }>('/v5/market/tickers?category=linear');
+    return r.list.filter((x) => x.symbol.endsWith('USDT') && x.fundingRate !== '').map((x) => ({ symbol: x.symbol, last: +x.lastPrice, funding: +x.fundingRate, nextFundingTime: +x.nextFundingTime, turnover: +x.turnover24h }));
+  }
+
+  /** Last prices of every spot pair. */
+  async fetchSpotPrices(): Promise<Record<string, number>> {
+    const r = await this.get<{ list: { symbol: string; lastPrice: string }[] }>('/v5/market/tickers?category=spot');
+    return Object.fromEntries(r.list.map((x) => [x.symbol, +x.lastPrice]));
+  }
+
   async fetchPrices(): Promise<Record<string, number>> {
     const r = await this.get<{ list: { symbol: string; lastPrice: string }[] }>('/v5/market/tickers?category=linear');
     return Object.fromEntries(r.list.map((x) => [x.symbol, +x.lastPrice]));
