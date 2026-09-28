@@ -39,7 +39,8 @@ describe('news event-risk filter', () => {
   });
 
   it('parses the model answer, keeps only known tickers, rejects prose', () => {
-    const c = parseLlm(item('x'), 'Sure! {"coins":["eth","FOO","SOLUSDT"],"event":"regulatory","sentiment":-2,"severity":2}', KNOWN)!;
+    expect(parseLlm(item('US prosecutors want $84M from a bank tied to Tether'), '{"coins":["TWT"],"event":"regulatory","sentiment":-1,"severity":2}', [...KNOWN, 'TWT'])!.coins).toEqual([]);
+    const c = parseLlm(item('SEC sues Ethereum foundation, SOL also named'), 'Sure! {"coins":["eth","FOO","SOLUSDT"],"event":"regulatory","sentiment":-2,"severity":2}', KNOWN)!;
     expect(c).toMatchObject({ coins: ['ETH', 'SOL'], event: 'regulatory', sentiment: -2, severity: 2, by: 'llm' });
     expect(isRisk(c)).toBe(true);
     expect(parseLlm(item('x'), 'I cannot tell.', KNOWN)).toBeNull();

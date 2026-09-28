@@ -74,6 +74,13 @@ export function findCoins(text: string, known: readonly string[]): string[] {
   return [...out];
 }
 
+/** Is the coin named in the text (ticker in capitals or a common name)? Guards against the model guessing tickers. */
+export function mentions(text: string, coin: string, known: readonly string[]): boolean {
+  if (findCoins(text, known).includes(coin)) return true;
+  const low = text.toLowerCase();
+  return Object.entries(COIN_NAMES).some(([name, t]) => t === coin && new RegExp(`\\b${name}\\b`).test(low));
+}
+
 /** Common coin names -> tickers for headlines that name the coin in words. */
 export const COIN_NAMES: Record<string, string> = {
   bitcoin: 'BTC', ethereum: 'ETH', ether: 'ETH', solana: 'SOL', ripple: 'XRP', dogecoin: 'DOGE', cardano: 'ADA', chainlink: 'LINK', avalanche: 'AVAX',
@@ -114,7 +121,10 @@ export function parseLlm(item: NewsItem, answer: string, known: readonly string[
   const events: EventType[] = ['hack', 'delisting', 'unlock', 'regulatory', 'listing', 'partnership', 'macro', 'other'];
   const event = events.includes(o.event as EventType) ? (o.event as EventType) : 'other';
   const knownSet = new Set(known);
-  const coins = Array.isArray(o.coins) ? [...new Set(o.coins.map((c) => String(c).toUpperCase().replace(/USDT$/, '').replace(/[^A-Z0-9]/g, '')).filter((c) => knownSet.has(c)))] : [];
+  // keep only known tickers that the headline actually names (live: "a bank tied to Tether" came back as TWT)
+  const coins = Array.isArray(o.coins)
+    ? [...new Set(o.coins.map((c) => String(c).toUpperCase().replace(/USDT$/, '').replace(/[^A-Z0-9]/g, '')).filter((c) => knownSet.has(c) && mentions(item.title, c, known)))]
+    : [];
   const clamp = (x: unknown, lo: number, hi: number) => Math.max(lo, Math.min(hi, Math.round(Number(x) || 0)));
   return { ...item, coins, event, sentiment: clamp(o.sentiment, -2, 2), severity: clamp(o.severity, 0, 3), by: 'llm' };
 }

@@ -2,7 +2,7 @@
 // media + Bybit and Binance delisting announcements; new headlines are classified by the local LLM (llama.cpp server,
 // OpenAI-compatible API at LLM_URL) or, when it is unavailable, by keyword rules. State in oft.settings 'news:state'.
 import type { Repo } from '../persist/repo.js';
-import { LLM_SYSTEM, activeFlags, applyItem, classifyKeywords, liftFlags, parseLlm, scoreFlags, type Classified, type NewsItem, type RiskFlag } from '../../core/news.js';
+import { LLM_SYSTEM, activeFlags, applyItem, classifyKeywords, liftFlags, mentions, parseLlm, scoreFlags, type Classified, type NewsItem, type RiskFlag } from '../../core/news.js';
 
 const KEY = 'news:state';
 const RSS = [
@@ -85,6 +85,11 @@ export class NewsService {
         this.st.items[this.st.items.indexOf(it)] = c;
         liftFlags(this.st.flags, c, now);
         this.st.flags = applyItem(this.st.flags, c, now, this.price);
+      }
+      // flags whose coin the headline does not name (a model guess) end early
+      for (const f of activeFlags(this.st.flags, now)) {
+        const it = this.st.items.find((x) => x.id === f.itemId);
+        if (it && this.known.length && !mentions(it.title, f.coin, this.known)) Object.assign(f, { until: now, lifted: true });
       }
       scoreFlags(this.st.flags, now, this.price);
       this.st.items = this.st.items.slice(-300);
