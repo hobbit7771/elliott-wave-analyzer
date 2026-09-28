@@ -827,7 +827,7 @@ const server = http.createServer((req, res) => {
   });
 });
 
-const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024, perMessageDeflate: { threshold: 1024, zlibDeflateOptions: { level: 3 } } });
+const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024, perMessageDeflate: { threshold: 256, zlibDeflateOptions: { level: 3 } } });
 server.on('upgrade', (req, socket, head) => {
   if (!req.url?.startsWith('/ws')) {
     socket.destroy();

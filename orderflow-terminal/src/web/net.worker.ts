@@ -9,6 +9,7 @@ let ws: WebSocket | null = null;
 let url = '';
 let attempt = 0;
 let subs: { source: string; symbol: string }[] = [];
+let paused = false; // the page is hidden: no market data is streamed (saves the server's outbound traffic)
 let pending: Msg[] = [];
 const latest = new Map<string, Msg>(); // coalesced channels
 let trades: unknown[] = [];
@@ -32,7 +33,7 @@ function connect(): void {
   ws.onopen = () => {
     attempt = 0;
     post({ ch: 'net', d: { state: 'open' } });
-    for (const s of subs) ws!.send(JSON.stringify({ op: 'sub', ...s }));
+    if (!paused) for (const s of subs) ws!.send(JSON.stringify({ op: 'sub', ...s }));
     if (pingTimer) clearInterval(pingTimer);
     pingTimer = setInterval(() => ws?.readyState === 1 && ws.send(JSON.stringify({ op: 'ping', t: Date.now() })), 5000);
     ws!.send(JSON.stringify({ op: 'ping', t: Date.now() }));
@@ -127,7 +128,14 @@ self.onmessage = (e: MessageEvent) => {
   } else if (m.op === 'ack') {
     uiBusy = false;
     if (pending.length || latest.size || trades.length) flushSoon();
+  } else if (m.op === 'pause') {
+    paused = true;
+    for (const s of subs) ws?.readyState === 1 && ws.send(JSON.stringify({ op: 'unsub', ...s }));
+    pending = [];
+    latest.clear();
+    trades = [];
   } else if (m.op === 'sub' && m.source && m.symbol) {
+    paused = false;
     for (const s of subs) ws?.readyState === 1 && ws.send(JSON.stringify({ op: 'unsub', ...s }));
     subs = [{ source: m.source, symbol: m.symbol }];
     pending = [];

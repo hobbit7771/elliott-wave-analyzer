@@ -288,6 +288,26 @@ function selectSymbol(source: SourceId, symbol: string): void {
   void loadHistory();
 }
 
+// A hidden page (background tab, locked phone) stops the market-data stream after 20 s: the server sends every
+// open page the order book twice a second, which is most of its outbound traffic. Back on screen, the page
+// subscribes again and reloads the history it missed.
+let hideTimer = 0;
+let streamPaused = false;
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    hideTimer = window.setTimeout(() => {
+      streamPaused = true;
+      worker.postMessage({ op: 'pause' });
+    }, 20_000);
+  } else {
+    clearTimeout(hideTimer);
+    if (streamPaused) {
+      streamPaused = false;
+      selectSymbol(store.source, store.symbol);
+    }
+  }
+});
+
 // the Levels tab opens a watchlist coin on the chart
 (window as unknown as { oftOpen: (s: string, y: string) => void }).oftOpen = (source, symbol) => {
   if (source === store.source) selectSymbol(source as SourceId, symbol);

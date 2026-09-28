@@ -21,6 +21,8 @@ export interface SessionOptions {
   log?: (msg: string) => void;
   wsFactory?: WsClientOptions['factory'];
   bookLevels?: number;
+  /** how often the book snapshot is published (ms); every open browser tab receives it */
+  bookMs?: number;
   heatHalfBuckets?: number;
   heatIntervalMs?: number;
   backfillMinutes?: number;
@@ -184,7 +186,7 @@ export class Session {
     if (!this.o.skipWarmup) void this.warmup();
     for (const ws of this.sockets.values()) ws.start();
     this.timers.push(setInterval(() => this.flushTrades(), 100));
-    this.timers.push(setInterval(() => this.publishBook(), 200));
+    this.timers.push(setInterval(() => this.publishBook(), this.o.bookMs ?? +(process.env.BOOK_MS ?? 500)));
     this.timers.push(setInterval(() => this.tick(), 250));
     this.timers.push(setInterval(() => this.everySecond(), 1000));
     if (!this.o.skipWarmup) {
@@ -581,7 +583,7 @@ export class Session {
   private publishBook(): void {
     if (!this.bookDirty || this.engine.sync.state !== 'synced') return;
     this.bookDirty = false;
-    const n = this.o.bookLevels ?? 400;
+    const n = this.o.bookLevels ?? +(process.env.BOOK_LEVELS ?? 200); // the DOM tab shows 40 by default
     const top = this.engine.book.top(n);
     this.o.publish('book', { t: this.engine.book.lastT, u: this.engine.book.lastUpdateId, bids: top.bids, asks: top.asks, stats: this.engine.stats, bbo: this.lastBbo, reliable: [this.engine.book.reliableLo * this.meta.tickSize, this.engine.book.reliableHi * this.meta.tickSize] });
   }
