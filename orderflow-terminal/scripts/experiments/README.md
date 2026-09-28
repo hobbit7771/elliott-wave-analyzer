@@ -45,3 +45,6 @@ Round 5 (carry): `carry/cfetch.py` downloads monthly funding and spot / USDⓈ-M
 public archive; `carry/carry.py` — the delta-neutral cash-and-carry backtest (rotation by trailing funding, fees on both
 legs, basis P&L); `carry/combo2.py` — the trend model + carry portfolio (run from the scratch directory that holds the
 daily study).
+Round 8 (patterns and waves): `daily/patterns.py` — candlestick patterns vs a 2:1 triple barrier; `daily/waves.py` — causal
+ZigZag wave features + patterns + context in a walk-forward LightGBM; `daily/chronos_test.py` — zero-shot Chronos-Bolt
+forecasts (needs `pip install chronos-forecasting`).
