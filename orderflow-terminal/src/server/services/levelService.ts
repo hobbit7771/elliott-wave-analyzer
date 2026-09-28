@@ -317,6 +317,24 @@ export class LevelService {
     return { history: c.history, live: c.live, status: c.status, error: c.error };
   }
 
+  /** For the portfolio: cumulative R of the engine's setups since `since` (open ones at their current R) and open positions. */
+  portfolioInputs(since: number): { trendR: number; trades: number; open: { symbol: string; dir: 1 | -1; entry: number; stop: number; price: number; model: string }[] } {
+    let trendR = 0;
+    let trades = 0;
+    const open: { symbol: string; dir: 1 | -1; entry: number; stop: number; price: number; model: string }[] = [];
+    for (const c of this.ctx.values()) {
+      const seen = new Map<string, Setup>();
+      for (const s of [...(c.history?.setups ?? []), ...c.live]) if (s.t >= since) seen.set(s.id, s);
+      for (const s of seen.values()) {
+        trendR += s.outcome.r;
+        trades++;
+      }
+      for (const p of c.engine?.openPositions() ?? [])
+        if (p.setup.t >= since) open.push({ symbol: c.symbol, dir: p.setup.direction === 'LONG' ? 1 : -1, entry: p.setup.entry, stop: p.stop, price: c.price, model: p.setup.reasons[1] ?? '' });
+    }
+    return { trendR, trades, open };
+  }
+
   watchRow(key: string): Record<string, unknown> | null {
     const c = this.ctx.get(key);
     if (!c) return null;

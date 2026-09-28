@@ -26,6 +26,7 @@ import { AlertService, DEFAULT_RULES, type AlertRule } from './services/alerts.j
 import { staticLevels } from '../core/staticLevels.js';
 import { LevelService } from './services/levelService.js';
 import { CarryService } from './services/carry.js';
+import { PortfolioService } from './services/portfolio.js';
 import type { BybitLinearAdapter } from './adapters/bybit.js';
 import { RetentionService, policyFromEnv } from './services/retention.js';
 
@@ -153,6 +154,11 @@ setInterval(() => void levels.tick().catch((e) => log(`levels tick failed: ${(e 
 const carry = new CarryService({ adapter: () => getAdapter('bybit-linear') as unknown as BybitLinearAdapter, repo: () => repo, log });
 setTimeout(() => void carry.tick(), 90_000).unref();
 setInterval(() => void carry.tick(), 5 * 60_000).unref();
+
+// ---------- paper portfolio with the risk manager (trend + carry + funding factor) ----------
+const portfolio = new PortfolioService({ levels, carry, repo: () => repo, log });
+setTimeout(() => void portfolio.tick(), 150_000).unref();
+setInterval(() => void portfolio.tick(), 10 * 60_000).unref();
 async function watchlistKeys(): Promise<string[]> {
   const w = repo ? await repo.getSetting<string[]>('watchlist').catch(() => undefined) : undefined;
   return w ?? hub.pinned;
@@ -502,6 +508,7 @@ async function api(req: http.IncomingMessage, res: http.ServerResponse, u: URL):
     return json(res, 200, { candles, origin: 'recorded-trades', tf, coverage: reader.tradeRange(key), note: 'aggTrade messages: one message can aggregate several fills at the same price' });
   }
   if (p === '/api/carry') return json(res, 200, carry.view());
+  if (p === '/api/portfolio') return json(res, 200, portfolio.view());
   if (p === '/api/levels/strong') {
     const { source, symbol, key } = params(u);
     if (!levels.levels(key)) await levels.ensure(source, symbol);
