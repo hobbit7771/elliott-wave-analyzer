@@ -27,6 +27,8 @@ import { staticLevels } from '../core/staticLevels.js';
 import { LevelService } from './services/levelService.js';
 import { CarryService } from './services/carry.js';
 import { PortfolioService } from './services/portfolio.js';
+import { FlowFactorService } from './services/flowFactor.js';
+import type { BinanceFuturesAdapter } from './adapters/binance.js';
 import { NewsService } from './services/news.js';
 import type { BybitLinearAdapter } from './adapters/bybit.js';
 import { RetentionService, policyFromEnv } from './services/retention.js';
@@ -172,6 +174,11 @@ setInterval(() => void carry.tick(), 5 * 60_000).unref();
 const portfolio = new PortfolioService({ levels, carry, repo: () => repo, log });
 setTimeout(() => void portfolio.tick(), 150_000).unref();
 setInterval(() => void portfolio.tick(), 10 * 60_000).unref();
+
+// ---------- paper forward test of the order-flow factor flow7 (Binance perps; not in the managed portfolio) ----------
+const flow = new FlowFactorService({ adapter: () => getAdapter('binance-futures') as unknown as BinanceFuturesAdapter, repo: () => repo, log });
+setTimeout(() => void flow.tick(), 120_000).unref();
+setInterval(() => void flow.tick(), 10 * 60_000).unref();
 async function watchlistKeys(): Promise<string[]> {
   const w = repo ? await repo.getSetting<string[]>('watchlist').catch(() => undefined) : undefined;
   return w ?? hub.pinned;
@@ -522,6 +529,7 @@ async function api(req: http.IncomingMessage, res: http.ServerResponse, u: URL):
   }
   if (p === '/api/carry') return json(res, 200, carry.view());
   if (p === '/api/portfolio') return json(res, 200, portfolio.view());
+  if (p === '/api/flow') return json(res, 200, flow.view());
   if (p === '/api/news') return json(res, 200, news.view());
   if (p === '/api/levels/strong') {
     const { source, symbol, key } = params(u);

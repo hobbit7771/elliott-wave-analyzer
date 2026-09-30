@@ -112,31 +112,37 @@ export function rebalance(st: FactorState, inputs: readonly FactorInput[], now: 
   if (now < day + 5 * 60_000 || (st.lastRebalance && day < st.lastRebalance + p.rebalanceDays * DAY)) return false;
   const tg = targets(inputs, now, p);
   if (!tg) return false;
-  const px = new Map(inputs.map((x) => [x.symbol, x]));
+  applyTargets(st, tg, new Map(inputs.map((x) => [x.symbol, x.price])), now);
+  return true;
+}
+
+/** Trades the book to the target signed notionals (only the difference; fees on the traded notional). */
+export function applyTargets(st: FactorState, tg: ReadonlyMap<string, number>, prices: ReadonlyMap<string, number>, now: number): void {
+  const p = st.params;
+  const day = Math.floor(now / DAY) * DAY;
   const cur = new Map(st.positions.map((x) => [x.symbol, x]));
   const next: FactorPos[] = [];
   for (const sym of new Set([...cur.keys(), ...tg.keys()])) {
-    const q = px.get(sym);
+    const price = prices.get(sym);
     const pos = cur.get(sym) ?? { symbol: sym, qty: 0, funding: 0, fees: 0, lastSettle: now, px: 0 };
-    if (!q || !(q.price > 0)) {
+    if (!price || !(price > 0)) {
       if (pos.qty !== 0) next.push(pos); // no price: keep until it comes back
       continue;
     }
-    const want = (tg.get(sym) ?? 0) / q.price;
+    const want = (tg.get(sym) ?? 0) / price;
     const dq = want - pos.qty;
     if (dq !== 0) {
-      const fee = Math.abs(dq) * q.price * p.feePerSide;
-      st.cash -= dq * q.price + fee;
+      const fee = Math.abs(dq) * price * p.feePerSide;
+      st.cash -= dq * price + fee;
       pos.fees += fee;
       pos.qty = want;
     }
-    pos.px = q.price;
+    pos.px = price;
     if (pos.qty !== 0) next.push(pos);
   }
   st.positions = next;
   st.lastRebalance = day;
   st.last = { t: now, long: [...tg].filter(([, v]) => v > 0).map(([s]) => s), short: [...tg].filter(([, v]) => v < 0).map(([s]) => s) };
-  return true;
 }
 
 export function factorEquity(st: FactorState, price: (s: string) => number | undefined): number {

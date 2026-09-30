@@ -36,6 +36,21 @@ interface View {
     factorLast: { t: number; long: string[]; short: string[] } | null;
   };
 }
+interface FlowView {
+  status: string;
+  error: string;
+  startedAt?: number;
+  lastRebalance?: number;
+  equity?: number;
+  returnPct?: number;
+  maxDrawdown?: number;
+  backtest?: { annRet: number; annVol: number; maxDD: number };
+  tracking?: { expected: number; sd: number; z: number; verdict: string };
+  last?: { t: number; long: string[]; short: string[] } | null;
+  positions?: { symbol: string; notional: number; funding: number; fees: number }[];
+  scores?: { t: number; rows: { symbol: string; flow7: number }[] } | null;
+  equityPath?: { t: number; eq: number }[];
+}
 const MODEL: Record<string, string> = { TREND_BREAKOUT: 'тренд', BOUNCE: 'отбой', BREAKOUT: 'пробой', FALSE_BREAK: 'ложный пробой' };
 
 const pct = (x: number | undefined, d = 1) => (x === undefined || !Number.isFinite(x) ? '—' : (x * 100).toFixed(d) + '%');
@@ -70,17 +85,45 @@ function journalHtml(j: View['journal']): string {
   );
 }
 
+function flowHtml(f: FlowView | null): string {
+  const head =
+    `<h3>Форвард-тест: индикатор потока ордеров flow7 (в портфель не входит)</h3>` +
+    `<p class="muted">Собственный индикатор (README, раунд 18): flow7 — средний за 7 дней баланс агрессивных ордеров, (рыночные покупки − рыночные продажи) / объём. Монеты, которые неделю покупали по рынку, следующую неделю в среднем обгоняют остальные; связь подтвердилась на отложенной части истории (IC +0,049, t 3,2). Раз в неделю: 10 монет с самым сильным давлением покупателей — лонг, 10 с самым сильным давлением продавцов — шорт (топ-50 perpetual Binance по объёму за 30 дней, веса обратно волатильности, по 50 % капитала на сторону, комиссия 0,075 %, фандинг учитывается). Бэктест за 5 лет: +19,9 % в год, волатильность 20 %, макс. просадка 26 %; первая половина истории была слабой, поэтому стратегия сначала проверяется на бумаге и в капитал портфеля не входит.</p>`;
+  if (!f || f.status !== 'ok') return head + `<p class="muted">${f?.error ? 'нет данных: ' + esc(f.error) : 'Запускается…'}</p>`;
+  const t = f.tracking;
+  const pos = (f.positions ?? []).slice().sort((a, b) => b.notional - a.notional);
+  const sc = f.scores?.rows ?? [];
+  return (
+    head +
+    `<table><tbody>` +
+    `<tr><td class="l">Капитал книги</td><td>${num(f.equity)} USDT</td><td class="${cls(f.returnPct ?? 0)}">${(f.returnPct ?? 0) >= 0 ? '+' : ''}${num(f.returnPct)}%</td><td class="l muted">с ${fmtDateTime(f.startedAt ?? 0)}</td></tr>` +
+    `<tr><td class="l">Макс. просадка</td><td>${pct(f.maxDrawdown)}</td><td></td><td class="l muted">в бэктесте ${pct(f.backtest?.maxDD, 0)}</td></tr>` +
+    (t ? `<tr><td class="l">Против бэктеста</td><td>ожидание ${pct(t.expected, 2)} ± ${pct(t.sd, 2)}</td><td>z ${num(t.z)}</td><td class="l ${t.verdict.startsWith('хуже') ? 'neg' : 'muted'}">${esc(t.verdict)}</td></tr>` : '') +
+    `<tr><td class="l">Ребалансировка</td><td colspan="3" class="l muted">${f.lastRebalance ? 'последняя ' + fmtDateTime(f.last?.t ?? f.lastRebalance) + ', следующая через 7 дней в 00:05 UTC' : 'первая — в ближайшие 00:05 UTC'}</td></tr>` +
+    `</tbody></table>` +
+    spark(f.equityPath ?? []) +
+    (pos.length
+      ? `<table><thead><tr><th class="l">Монета</th><th>Позиция, USDT</th><th>Фандинг</th><th>Комиссии</th></tr></thead><tbody>` +
+        pos.map((x) => `<tr><td class="l">${esc(x.symbol)}</td><td class="${cls(x.notional)}">${x.notional >= 0 ? '+' : ''}${x.notional.toFixed(0)}</td><td class="${cls(x.funding)}">${x.funding.toFixed(2)}</td><td>${x.fees.toFixed(2)}</td></tr>`).join('') +
+        '</tbody></table>'
+      : '<p class="muted">Позиций пока нет.</p>') +
+    (sc.length ? `<p class="muted">flow7 на ${fmtDateTime(f.scores!.t)} (топ давления покупателей → продавцов): ${sc.map((x) => `${esc(x.symbol.replace(/USDT$/, ''))} ${(x.flow7 * 100).toFixed(1)}%`).join(', ')}</p>` : '')
+  );
+}
+
 export function createPortfolioTab(): Tab {
   const root = el('section', { id: 'tab-portfolio', role: 'tabpanel' });
   const box = el('div', { class: 'scroll' });
   root.append(box);
   let v: View | null = null;
+  let fv: FlowView | null = null;
   let err = '';
 
   async function refresh(): Promise<void> {
     try {
       v = await api<View>('/api/portfolio');
       err = '';
+      fv = await api<FlowView>('/api/flow').catch(() => null);
     } catch (e) {
       err = (e as Error).message;
     }
@@ -125,7 +168,8 @@ export function createPortfolioTab(): Tab {
             .join('') +
           '</tbody></table>'
         : '<p class="muted">Открытых направленных позиций нет.</p>') +
-      journalHtml(v.journal);
+      journalHtml(v.journal) +
+      flowHtml(fv);
   }
   const painter = new Painter(render, 1000);
   let iv = 0;
