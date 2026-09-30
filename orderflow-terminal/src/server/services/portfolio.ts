@@ -25,7 +25,10 @@ export class PortfolioService {
       const repo = this.deps.repo();
       if (!this.st) {
         const saved = repo ? await repo.getSetting<State>(KEY).catch(() => undefined) : undefined;
-        this.st = saved ?? { params: SITE_PORTFOLIO_PARAMS, startedAt: Date.now(), snaps: [] };
+        // a changed configuration (e.g. the trend risk) starts a new record instead of mixing two configurations
+        const same = saved && JSON.stringify(saved.params) === JSON.stringify(SITE_PORTFOLIO_PARAMS);
+        if (saved && !same) this.deps.log(`[portfolio] parameters changed: new record from now (was ${JSON.stringify(saved.params)})`);
+        this.st = same && saved ? saved : { params: SITE_PORTFOLIO_PARAMS, startedAt: Date.now(), snaps: [] };
       }
       const sl = this.deps.carry.sleeves();
       if (!sl.ready) return; // quotes not loaded yet: no snapshot rather than a wrong one
