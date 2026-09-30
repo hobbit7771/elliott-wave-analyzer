@@ -62,9 +62,9 @@ describe('live vs backtest tracking', () => {
     expect(trackVsBacktest(0.0, 91.25, 0.2, 0.1).sd).toBeCloseTo(0.05, 9);
   });
   it('drawdown verdict against the Monte-Carlo percentiles of the backtest', () => {
-    expect(drawdownVerdict(0.03)).toBe('в пределах обычного');
-    expect(drawdownVerdict(0.1)).toMatch(/обычная/);
-    expect(drawdownVerdict(0.13)).toMatch(/редкая/);
-    expect(drawdownVerdict(0.2)).toMatch(/проверить/);
+    expect(drawdownVerdict(0.05)).toBe('в пределах обычного');
+    expect(drawdownVerdict(0.15)).toMatch(/обычная/);
+    expect(drawdownVerdict(0.2)).toMatch(/редкая/);
+    expect(drawdownVerdict(0.25)).toMatch(/проверить/);
   });
 });

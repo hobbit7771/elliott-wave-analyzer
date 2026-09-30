@@ -1,5 +1,5 @@
 // Portfolio risk manager (paper) over the three strategies the site runs:
-//   trend  — the site engine's setups (trend breakout + Gerchik levels), risk `trendRisk` of capital per trade (R units);
+//   trend  — the site engine's setups (trend breakout; Gerchik entries are off since round 15), risk `trendRisk` of capital per trade (R units);
 //   carry  — long spot + short perpetual (market-neutral, not scaled: its volatility is tiny);
 //   factor — cross-sectional funding factor, weight `factorWeight` of its own book.
 // Rule (research, README round 7): scale the DIRECTIONAL part (trend + factor) by
@@ -20,7 +20,7 @@ export interface PortfolioParams {
 
 export const SITE_PORTFOLIO_PARAMS: PortfolioParams = {
   capital: 10_000,
-  trendRisk: 0.0025,
+  trendRisk: 0.005, // 0.5 % per trade (owner's choice 30.09.2026; 0.25 % before): README round 16
   factorWeight: 0.5,
   volWindowDays: 30,
   minHistoryDays: 45,
@@ -118,18 +118,18 @@ export function exposures(items: readonly { symbol: string; notional: number; sl
 
 /** Backtest expectations per sleeve (research, 06.2021–09.2026; README rounds 5–7): annual return and volatility. */
 export const BACKTEST: Record<'trend' | 'carry' | 'factor' | 'total', { annRet: number; annVol: number; note: string }> = {
-  trend: { annRet: 0.109, annVol: 0.099, note: 'тренд, риск 0,25 %/сделку' },
+  trend: { annRet: 0.219, annVol: 0.199, note: 'тренд, риск 0,5 %/сделку' },
   carry: { annRet: 0.046, annVol: 0.005, note: 'кэрри, ротация до 10 монет' },
   factor: { annRet: 0.145, annVol: 0.093, note: '½ фактора фандинга' },
-  total: { annRet: 0.234, annVol: 0.095, note: 'портфель с риск-менеджером' },
+  total: { annRet: 0.333, annVol: 0.146, note: 'портфель с риск-менеджером' },
 };
 
 /**
  * Monte-Carlo drawdown of the backtested portfolio (06.2021-09.2026; days reshuffled 3 000 times, also in 20/30-day
  * blocks - same result): the maximum drawdown one should expect from the same returns in another order. The historical
- * 9.4 % sits at the 76th percentile. Idea from the MQL5 code base ("Portfolio Correlation Analyzer"), README round 12.
+ * 9.4 % sat at the 76th percentile at 0.25 % trend risk. Idea from the MQL5 code base ("Portfolio Correlation Analyzer"), README round 12.
  */
-export const BACKTEST_DD = { p50: 0.08, p95: 0.12, p99: 0.15 };
+export const BACKTEST_DD = { p50: 0.12, p95: 0.18, p99: 0.22 }; // at 0.5 % trend risk (0.25 %: 0.08 / 0.12 / 0.15)
 
 export function drawdownVerdict(dd: number): string {
   if (dd > BACKTEST_DD.p99) return 'выше, чем в 99 % вариантов истории — стратегия ведёт себя иначе, проверить';
