@@ -9,6 +9,7 @@ import { FLOW_BACKTEST, SITE_FLOW_PARAMS, flowFeatures, flowTargets, type FlowIn
 import { trackVsBacktest } from '../../core/portfolio.js';
 
 const KEY = 'flow:state';
+const SKEY = 'flow:scores';
 const DAY = 86_400_000;
 const STABLE = /^(USDC|FDUSD|TUSD|BUSD|USDP|DAI|USDE|EUR|AEUR)USDT$/;
 
@@ -33,6 +34,7 @@ export class FlowFactorService {
       if (!this.st) {
         const saved = repo ? await repo.getSetting<FactorState>(KEY).catch(() => undefined) : undefined;
         this.st = saved ?? newFactorState(Date.now(), SITE_FLOW_PARAMS);
+        this.scores = (repo ? await repo.getSetting<FlowFactorService['scores']>(SKEY).catch(() => undefined) : undefined) ?? null;
       }
       const st = this.st;
       const ad = this.deps.adapter();
@@ -95,6 +97,7 @@ export class FlowFactorService {
     const p = SITE_FLOW_PARAMS;
     const uni = inputs.filter((x) => isFinite(x.flow7) && isFinite(x.qv30)).sort((a, b) => b.qv30 - a.qv30).slice(0, p.universe);
     this.scores = { t: now, rows: uni.map((x) => ({ symbol: x.symbol, flow7: x.flow7 })).sort((a, b) => b.flow7 - a.flow7) };
+    await this.deps.repo()?.setSetting(SKEY, this.scores).catch((e) => this.deps.log(`[flow] scores save failed: ${(e as Error).message}`));
     const tg = flowTargets(inputs, p);
     if (!tg) {
       this.deps.log(`[flow] rebalance skipped: ${uni.length} coins with data`);
