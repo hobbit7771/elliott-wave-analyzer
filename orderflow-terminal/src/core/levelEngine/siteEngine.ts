@@ -1,7 +1,9 @@
 // The engine the site runs for every coin, fed the same closed 15m bars (history, replay and live):
 //  1) TREND — Donchian channel breakout (20-day high, stop 3 ATR, exit on the 10-day low, longs only, not
 //     against BTC's D1 trend, not when the coin's funding shows crowded longs): the only model that held up on 5 years of daily data (see README);
-//  2) LEVELS — Gerchik's entries at strong D1 levels with Raschke's trend-strength condition (ADX ≥ 20).
+//  2) LEVELS — the strong D1 levels are still computed and drawn, but Gerchik's entries at them are OFF: on 5.3 years
+//     of 15m bars (12 coins, README round 15) every bounce and false-breakout variant lost and the breakout with
+//     compression was not stable, while the trend model earned all of the profit.
 import type { Candle } from '../types.js';
 import type { DailyLevel } from './dailyLevels.js';
 import type { LevelState, OpenPosition, Setup, WorkingOrder } from './setupEngine.js';
@@ -13,10 +15,10 @@ export interface SiteParams {
   trend: TrendParams;
 }
 
-export const SITE_PARAMS: SiteParams = { gerchik: SITE_GERCHIK_PARAMS, trend: SITE_TREND_PARAMS };
+export const SITE_PARAMS: SiteParams = { gerchik: { ...SITE_GERCHIK_PARAMS, bounce: false, breakout: false, falseBreak: false }, trend: SITE_TREND_PARAMS };
 
 export const SITE_CHOICE =
-  'Две модели с фиксированными параметрами для всех монет. 1) Тренд: пробой 20-дневного максимума, стоп 3 ATR(20), выход по 10-дневному минимуму, только лонг, не против тренда BTC и не при перегреве лонгов (средний фандинг за 7 дней > 0,05 %/день) — выбрана скользящим walk-forward на 5 годах дневных данных 17 монет (устойчива во всех подпериодах). 2) Уровни D1 по Герчику (сила ≥ 70, отбой БСУ/БПУ и пробой с поджатием, стоп 0,5 ATR, цель 3:1) только по тренду D1 и при ADX(14) ≥ 20 (условие Рашке). Комиссии Bybit и оценка фандинга включены в R.';
+  'Тренд: пробой 20-дневного максимума, стоп 3 ATR(20), выход по 10-дневному минимуму, только лонг, не против тренда BTC и не при перегреве лонгов (средний фандинг за 7 дней > 0,05 %/день) — выбран скользящим walk-forward на 5 годах дневных данных и перепроверен на 5,3 года 15-минутных свечей (+0,60R на сделку, 337 сделок). Уровни D1 рисуются, но входы по Герчику отключены: на 5,3 года все варианты отбоя и ложного пробоя убыточны. Комиссии Bybit и оценка фандинга включены в R.';
 
 export class SiteEngine {
   readonly g: GerchikEngine;

@@ -118,7 +118,7 @@ export function exposures(items: readonly { symbol: string; notional: number; sl
 
 /** Backtest expectations per sleeve (research, 06.2021–09.2026; README rounds 5–7): annual return and volatility. */
 export const BACKTEST: Record<'trend' | 'carry' | 'factor' | 'total', { annRet: number; annVol: number; note: string }> = {
-  trend: { annRet: 0.109, annVol: 0.099, note: 'тренд + уровни, риск 0,25 %/сделку' },
+  trend: { annRet: 0.109, annVol: 0.099, note: 'тренд, риск 0,25 %/сделку' },
   carry: { annRet: 0.046, annVol: 0.005, note: 'кэрри, ротация до 10 монет' },
   factor: { annRet: 0.145, annVol: 0.093, note: '½ фактора фандинга' },
   total: { annRet: 0.234, annVol: 0.095, note: 'портфель с риск-менеджером' },

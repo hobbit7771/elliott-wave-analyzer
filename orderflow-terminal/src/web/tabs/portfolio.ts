@@ -106,7 +106,7 @@ export function createPortfolioTab(): Tab {
       `</tbody></table>` +
       spark(v.path ?? []) +
       `<h3>Части портфеля</h3><table><thead><tr><th class="l">Стратегия</th><th>Результат</th><th class="l">Детали</th></tr></thead><tbody>` +
-      `<tr><td class="l">Тренд + уровни Герчика</td><td class="${cls(s.trend.r)}">${s.trend.r >= 0 ? '+' : ''}${num(s.trend.r)}R (${s.trend.pnl >= 0 ? '+' : ''}${num(s.trend.pnl)} USDT)</td><td class="l muted">${s.trend.trades} сделок с начала, открыто ${s.trend.open.length}</td></tr>` +
+      `<tr><td class="l">Тренд (пробой канала)</td><td class="${cls(s.trend.r)}">${s.trend.r >= 0 ? '+' : ''}${num(s.trend.r)}R (${s.trend.pnl >= 0 ? '+' : ''}${num(s.trend.pnl)} USDT)</td><td class="l muted">${s.trend.trades} сделок с начала, открыто ${s.trend.open.length}</td></tr>` +
       `<tr><td class="l">Кэрри</td><td class="${cls(s.carry.pnlPct)}">${num(s.carry.pnlPct)}%</td><td class="l muted">капитал книги ${num(s.carry.equity)} USDT (вкладка «Фандинг»)</td></tr>` +
       `<tr><td class="l">Фактор фандинга</td><td class="${cls(s.factor.pnlPct)}">${num(s.factor.pnlPct)}%</td><td class="l muted">капитал книги ${num(s.factor.equity)} USDT, в портфеле ${pct(p.factorWeight, 0)}</td></tr>` +
       `</tbody></table>` +
