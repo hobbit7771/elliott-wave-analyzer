@@ -20,6 +20,8 @@ interface View {
   equity?: number;
   returnPct?: number;
   maxDrawdown?: number;
+  ddExpected?: { p50: number; p95: number; p99: number };
+  ddVerdict?: string;
   sleeves?: {
     trend: { r: number; trades: number; pnl: number; open: { symbol: string; dir: number; entry: number; stop: number; price: number; model: string }[] };
     carry: { equity: number; pnlPct: number };
@@ -99,6 +101,7 @@ export function createPortfolioTab(): Tab {
       `<table><tbody>` +
       `<tr><td class="l">Капитал</td><td>${num(v.equity)} USDT</td><td class="${cls(v.returnPct ?? 0)}">${(v.returnPct ?? 0) >= 0 ? '+' : ''}${num(v.returnPct)}%</td></tr>` +
       `<tr><td class="l">Макс. просадка</td><td>${pct(v.maxDrawdown)}</td><td class="l muted">с ${fmtDateTime(v.startedAt ?? 0)}, дней истории: ${v.days}</td></tr>` +
+      (v.ddExpected ? `<tr><td class="l">Ожидаемая просадка</td><td>${pct(v.ddExpected.p50, 0)} / ${pct(v.ddExpected.p95, 0)} / ${pct(v.ddExpected.p99, 0)}</td><td class="l muted">обычная / в 5 % случаев / в 1 % случаев (Монте-Карло: те же дни истории в случайном порядке, 3 000 раз). Сейчас: ${esc(v.ddVerdict ?? '')}</td></tr>` : '') +
       `<tr><td class="l">Множитель риска k</td><td>${num(v.k)}</td><td class="l muted">${v.kActive ? (v.k! < 1 ? 'рынок нервнее обычного — позиции уменьшены' : 'волатильность в норме — полный размер') : `включится после ${p.minHistoryDays} дней истории (сейчас k = 1)`}</td></tr>` +
       `</tbody></table>` +
       spark(v.path ?? []) +

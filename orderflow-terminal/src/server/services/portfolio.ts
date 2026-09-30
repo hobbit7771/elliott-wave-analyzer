@@ -4,7 +4,7 @@
 import type { Repo } from '../persist/repo.js';
 import type { LevelService } from './levelService.js';
 import type { CarryService } from './carry.js';
-import { BACKTEST, SITE_PORTFOLIO_PARAMS, trackVsBacktest, dailyReturns, exposures, managedEquity, maxDrawdown, riskMultiplier, type PortfolioParams, type Snap } from '../../core/portfolio.js';
+import { BACKTEST, BACKTEST_DD, drawdownVerdict, SITE_PORTFOLIO_PARAMS, trackVsBacktest, dailyReturns, exposures, managedEquity, maxDrawdown, riskMultiplier, type PortfolioParams, type Snap } from '../../core/portfolio.js';
 
 const KEY = 'portfolio:state';
 
@@ -69,6 +69,8 @@ export class PortfolioService {
       equity,
       returnPct: ((equity - p.capital) / p.capital) * 100,
       maxDrawdown: maxDrawdown(path),
+      ddExpected: BACKTEST_DD,
+      ddVerdict: drawdownVerdict(maxDrawdown(path)),
       sleeves: {
         trend: { r: tr.trendR, trades: tr.trades, pnl: tr.trendR * p.trendRisk * p.capital, open: tr.open },
         carry: { equity: sl.carry, pnlPct: first ? (sl.carry / first.carry - 1) * 100 : 0 },

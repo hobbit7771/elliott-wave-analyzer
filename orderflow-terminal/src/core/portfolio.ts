@@ -125,6 +125,20 @@ export const BACKTEST: Record<'trend' | 'carry' | 'factor' | 'total', { annRet: 
 };
 
 /**
+ * Monte-Carlo drawdown of the backtested portfolio (06.2021-09.2026; days reshuffled 3 000 times, also in 20/30-day
+ * blocks - same result): the maximum drawdown one should expect from the same returns in another order. The historical
+ * 9.4 % sits at the 76th percentile. Idea from the MQL5 code base ("Portfolio Correlation Analyzer"), README round 12.
+ */
+export const BACKTEST_DD = { p50: 0.08, p95: 0.12, p99: 0.15 };
+
+export function drawdownVerdict(dd: number): string {
+  if (dd > BACKTEST_DD.p99) return 'выше, чем в 99 % вариантов истории — стратегия ведёт себя иначе, проверить';
+  if (dd > BACKTEST_DD.p95) return 'редкая просадка (хуже 95 % вариантов истории), но ещё допустимая';
+  if (dd > BACKTEST_DD.p50) return 'обычная для этой стратегии просадка';
+  return 'в пределах обычного';
+}
+
+/**
  * Live vs backtest: the return expected over `days` and its 1-sigma band (i.i.d. daily returns: sd grows with √time);
  * z = (live − expected) / sd. |z| < 1: as expected; z < −2: the live result is unlikely under the backtest — review.
  */

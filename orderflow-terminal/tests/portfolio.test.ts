@@ -1,5 +1,5 @@
 // TEST-ONLY synthetic sleeve snapshots for the portfolio risk manager.
-import { SITE_PORTFOLIO_PARAMS as P, dailyReturns, exposures, managedEquity, maxDrawdown, riskMultiplier, type Snap } from '../src/core/portfolio.js';
+import { SITE_PORTFOLIO_PARAMS as P, drawdownVerdict, dailyReturns, exposures, managedEquity, maxDrawdown, riskMultiplier, type Snap } from '../src/core/portfolio.js';
 
 const DAY = 86_400_000;
 const T0 = Date.UTC(2026, 0, 1, 12);
@@ -60,5 +60,11 @@ describe('live vs backtest tracking', () => {
     expect(trackVsBacktest(-0.2, 365, 0.2, 0.1).verdict).toMatch(/проверить/);
     expect(trackVsBacktest(-0.5, 10, 0.2, 0.1).verdict).toBe('мало данных');
     expect(trackVsBacktest(0.0, 91.25, 0.2, 0.1).sd).toBeCloseTo(0.05, 9);
+  });
+  it('drawdown verdict against the Monte-Carlo percentiles of the backtest', () => {
+    expect(drawdownVerdict(0.03)).toBe('в пределах обычного');
+    expect(drawdownVerdict(0.1)).toMatch(/обычная/);
+    expect(drawdownVerdict(0.13)).toMatch(/редкая/);
+    expect(drawdownVerdict(0.2)).toMatch(/проверить/);
   });
 });
