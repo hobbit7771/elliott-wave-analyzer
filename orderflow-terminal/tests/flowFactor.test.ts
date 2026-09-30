@@ -1,5 +1,5 @@
 // TEST-ONLY synthetic daily bars for the order-flow factor flow7.
-import { SITE_FLOW_PARAMS, flowFeatures, flowTargets, type FlowInput } from '../src/core/flowFactor.js';
+import { SITE_FLOW_PARAMS, flowFeatures, flowTargets, marketBetas, type FlowInput } from '../src/core/flowFactor.js';
 import { applyTargets, factorEquity, newFactorState } from '../src/core/fundingFactor.js';
 import type { Candle } from '../src/core/types.js';
 
@@ -33,6 +33,23 @@ describe('flow7 order-flow factor (paper forward test)', () => {
     expect(shorts.reduce((a, s) => a + tg.get(s)!, 0)).toBeCloseTo(-g, 6);
     expect(tg.get('C45USDT')!).toBeCloseTo(tg.get('C46USDT')! / 2, 6); // twice the vol → half the size
     expect(flowTargets(inputs.slice(0, 20), p)).toBeNull(); // too few coins
+  });
+
+  it('beta-neutral: scales the short side so both sides carry the same market beta', () => {
+    const p = SITE_FLOW_PARAMS;
+    const inputs: FlowInput[] = Array.from({ length: 40 }, (_, i) => ({ symbol: `C${i}USDT`, price: 10, flow7: i / 100, vol: 0.6, qv30: 1e9, beta: i < 20 ? 2 : 1 }));
+    const tg = flowTargets(inputs, p)!;
+    const sum = (sign: number) => [...tg].filter(([, v]) => Math.sign(v) === sign).reduce((a, [, v]) => a + v, 0);
+    expect(sum(1)).toBeCloseTo(p.gross * p.capital, 6);
+    expect(sum(-1)).toBeCloseTo(-p.gross * p.capital / 2, 6); // shorts have beta 2 → half the gross
+    expect(flowTargets(inputs, { ...p, betaNeutral: false })!.get('C0USDT')).toBeCloseTo(-p.gross * p.capital / 10, 6);
+  });
+
+  it('market betas: a coin that moves twice the market has beta ≈ 2', () => {
+    const mk = (f: number) => Array.from({ length: 70 }, (_, i) => ({ t: i * DAY, o: 1, h: 1, l: 1, c: Math.exp(f * 0.02 * Math.sin(i * 1.3) + (f === 2 ? 0.001 * ((i * 7) % 3) : 0)), v: 1, bv: 0.5 }));
+    const b = marketBetas(new Map([['A', mk(1)], ['B', mk(1)], ['C', mk(1)], ['D', mk(1)], ['E', mk(2)]]));
+    expect(b.get('A')!).toBeLessThan(b.get('E')!);
+    expect(b.get('E')! / b.get('A')!).toBeGreaterThan(1.7);
   });
 
   it('applies targets with fees only on the traded notional', () => {

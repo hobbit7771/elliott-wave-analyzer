@@ -5,7 +5,8 @@ import type { Repo } from '../persist/repo.js';
 import type { BinanceFuturesAdapter } from '../adapters/binance.js';
 import type { Funding } from '../../core/carry.js';
 import { accrueFactor, applyTargets, factorEquity, newFactorState, type FactorState } from '../../core/fundingFactor.js';
-import { FLOW_BACKTEST, SITE_FLOW_PARAMS, flowFeatures, flowTargets, type FlowInput } from '../../core/flowFactor.js';
+import { FLOW_BACKTEST, SITE_FLOW_PARAMS, flowFeatures, flowTargets, marketBetas, type FlowInput } from '../../core/flowFactor.js';
+import type { Candle } from '../../core/types.js';
 import { trackVsBacktest } from '../../core/portfolio.js';
 
 const KEY = 'flow:state';
@@ -33,7 +34,10 @@ export class FlowFactorService {
       const repo = this.deps.repo();
       if (!this.st) {
         const saved = repo ? await repo.getSetting<FactorState>(KEY).catch(() => undefined) : undefined;
-        this.st = saved ?? newFactorState(Date.now(), SITE_FLOW_PARAMS);
+        // a changed rule (e.g. beta-neutral sizing) starts a new record instead of mixing two rules
+        const same = saved && JSON.stringify(saved.params) === JSON.stringify(SITE_FLOW_PARAMS);
+        if (saved && !same) this.deps.log(`[flow] parameters changed: new record from now (was ${JSON.stringify(saved.params)})`);
+        this.st = same && saved ? saved : newFactorState(Date.now(), SITE_FLOW_PARAMS);
         this.scores = (repo ? await repo.getSetting<FlowFactorService['scores']>(SKEY).catch(() => undefined) : undefined) ?? null;
       }
       const st = this.st;
@@ -84,10 +88,12 @@ export class FlowFactorService {
     const crypto = new Set((await ad.listInstruments()).filter((m) => m.quote === 'USDT' && !m.note).map((m) => m.symbol));
     const tickers = (await ad.fetchTickers()).filter((x) => crypto.has(x.symbol) && !STABLE.test(x.symbol)).sort((a, b) => b.turnover - a.turnover).slice(0, 80);
     const inputs: FlowInput[] = [];
+    const bars = new Map<string, Candle[]>();
     for (const x of tickers) {
       try {
-        const k = (await ad.fetchKlines(x.symbol, '1d', 40)).filter((c) => c.t + DAY <= now);
+        const k = (await ad.fetchKlines(x.symbol, '1d', 70)).filter((c) => c.t + DAY <= now);
         const f = flowFeatures(k);
+        bars.set(x.symbol, k);
         inputs.push({ symbol: x.symbol, price: this.prices.get(x.symbol) ?? x.last, ...f });
       } catch (e) {
         this.deps.log(`[flow] klines ${x.symbol}: ${(e as Error).message.slice(0, 100)}`);
@@ -96,6 +102,8 @@ export class FlowFactorService {
     }
     const p = SITE_FLOW_PARAMS;
     const uni = inputs.filter((x) => isFinite(x.flow7) && isFinite(x.qv30)).sort((a, b) => b.qv30 - a.qv30).slice(0, p.universe);
+    const beta = marketBetas(new Map(uni.map((x) => [x.symbol, bars.get(x.symbol) ?? []])));
+    for (const x of inputs) x.beta = beta.get(x.symbol);
     this.scores = { t: now, rows: uni.map((x) => ({ symbol: x.symbol, flow7: x.flow7 })).sort((a, b) => b.flow7 - a.flow7) };
     await this.deps.repo()?.setSetting(SKEY, this.scores).catch((e) => this.deps.log(`[flow] scores save failed: ${(e as Error).message}`));
     const tg = flowTargets(inputs, p);
